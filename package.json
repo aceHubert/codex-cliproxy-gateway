@@ -1,0 +1,45 @@
+{
+  "name": "codex-cliproxy-gateway",
+  "version": "0.2.1",
+  "description": "A Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
+  "type": "module",
+  "bin": {
+    "codex-cliproxy": "./dist/index.js"
+  },
+  "files": [
+    "dist/index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "dev": "bun src/index.ts",
+    "build": "bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test && bun run build",
+    "prepack": "bun run check"
+  },
+  "keywords": [
+    "codex",
+    "cliproxy",
+    "bun",
+    "gateway",
+    "openai",
+    "claude",
+    "gemini"
+  ],
+  "devDependencies": {
+    "@types/bun": "^1.3.5",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
