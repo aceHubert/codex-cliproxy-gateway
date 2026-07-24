@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
-import { decideRoute, joinUpstreamUrl } from "../src/gateway.ts";
+import { decideRoute, isLoopbackUrl, joinUpstreamUrl } from "../src/gateway.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
 import { resolvePaths } from "../src/paths.ts";
 import { fetchCliProxyCatalog, mergeCatalog, invalidateModelsCache, loadNativeCatalog } from "../src/catalog.ts";
@@ -19,14 +19,21 @@ test("only cliproxy prefix is routed away from official", () => {
     kind: "cliproxy",
     upstreamModel: "claude-opus-4-6",
   });
-  assert.deepEqual(decideRoute("auto-review"), {
+  assert.deepEqual(decideRoute("codex-auto-review"), {
     kind: "official",
-    upstreamModel: "auto-review",
+    upstreamModel: "codex-auto-review",
   });
   assert.deepEqual(decideRoute("gpt-5.6-sol"), {
     kind: "official",
     upstreamModel: "gpt-5.6-sol",
   });
+});
+
+test("only loopback CLIProxy URLs may omit authentication", () => {
+  assert.equal(isLoopbackUrl("http://127.0.0.1:8317/v1"), true);
+  assert.equal(isLoopbackUrl("http://localhost:8317/v1"), true);
+  assert.equal(isLoopbackUrl("http://[::1]:8317/v1"), true);
+  assert.equal(isLoopbackUrl("https://cliproxy.example/v1"), false);
 });
 
 test("upstream URL removes the local /v1 mount", () => {
@@ -123,18 +130,18 @@ test("official route preserves OAuth and exact model", async () => {
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: { authorization: "Bearer oauth-token", "content-type": "application/json" },
-      body: JSON.stringify({ model: "auto-review", input: "test" }),
+      body: JSON.stringify({ model: "codex-auto-review", input: "test" }),
     }));
     assert.ok(captured);
     assert.equal(captured.url, "https://chatgpt.com/backend-api/codex/responses");
     assert.equal(new Headers(captured.options.headers).get("authorization"), "Bearer oauth-token");
-    assert.equal(JSON.parse(new TextDecoder().decode(captured.options.body as ArrayBuffer)).model, "auto-review");
+    assert.equal(JSON.parse(new TextDecoder().decode(captured.options.body as ArrayBuffer)).model, "codex-auto-review");
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
 
-test("CLIProxy route strips prefix and replaces OAuth", async () => {
+test("CLIProxy route strips prefix and replaces or clears OAuth", async () => {
   const originalFetch = globalThis.fetch;
   let captured: { url: string; options: RequestInit } | undefined;
   globalThis.fetch = (async (url, options) => {
@@ -160,6 +167,22 @@ test("CLIProxy route strips prefix and replaces OAuth", async () => {
     assert.equal(captured.url, "https://cliproxy.example/v1/responses");
     assert.equal(new Headers(captured.options.headers).get("authorization"), "Bearer proxy-key");
     assert.equal(JSON.parse(captured.options.body as string).model, "claude-opus-4-6");
+
+    const localHandler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "");
+    await localHandler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer oauth-token", "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "test" }),
+    }));
+    assert.equal(new Headers(captured.options.headers).get("authorization"), null);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -225,17 +248,18 @@ test("native catalog reads only the app-server model cache", () => {
   }
 });
 
-test("CLIProxy catalog is fetched once using the Codex client format", async () => {
+test("unauthenticated local CLIProxy catalog is fetched once without an auth header", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
-  globalThis.fetch = (async (url) => {
+  globalThis.fetch = (async (url, options) => {
     calls += 1;
     const value = new URL(String(url));
     assert.equal(value.searchParams.get("client_version"), "codex-cliproxy");
+    assert.equal(new Headers(options?.headers).has("authorization"), false);
     return Response.json({ models: [{ slug: "claude-opus", display_name: "Claude Opus" }] });
   }) as typeof fetch;
   try {
-    const catalog = await fetchCliProxyCatalog("http://127.0.0.1:8317/v1", "secret");
+    const catalog = await fetchCliProxyCatalog("http://127.0.0.1:8317/v1", "");
     assert.equal(catalog.models[0]?.display_name, "Claude Opus");
     assert.equal(calls, 1);
   } finally {

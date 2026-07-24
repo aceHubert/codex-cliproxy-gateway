@@ -14,7 +14,7 @@ local Bun gateway
   `-- every other model ----------> official Codex backend, preserve OAuth
 ```
 
-There is deliberately no allowlist for official model names. `gpt-*`, `auto-review`, and future native models all remain on the official route unless their model ID explicitly starts with `cliproxy/`.
+There is deliberately no allowlist for official model names. `gpt-*`, `codex-auto-review`, and future native models all remain on the official route unless their model ID explicitly starts with `cliproxy/`.
 
 ## Requirements
 
@@ -35,6 +35,10 @@ The default CLIProxyAPI URL is:
 ```text
 http://127.0.0.1:8317/v1
 ```
+
+For a loopback CLIProxyAPI (`127.0.0.1`, `localhost`, or `::1`), the API key
+may be left empty. The gateway then sends no authentication header. Remote
+CLIProxyAPI URLs still require a key.
 
 For a remote CLIProxyAPI:
 
@@ -117,10 +121,10 @@ codex-cliproxy install --select all
 
 ## Routing behavior
 
-For a native model such as `auto-review`:
+For a native model such as `codex-auto-review`:
 
 ```text
-model: auto-review
+model: codex-auto-review
 Authorization: Bearer <ChatGPT OAuth token>
         -> https://chatgpt.com/backend-api/codex/responses
 ```

@@ -12,7 +12,7 @@ import {
 import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
 import { syncCatalog, fetchCliProxyCatalog, invalidateModelsCache } from "./catalog.ts";
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
-import { startGateway } from "./gateway.ts";
+import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import {
   installLaunchAgent,
   uninstallLaunchAgent,
@@ -124,10 +124,14 @@ function stringOption(options: CliOptions, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function getInstallApiKey(keyEnv?: string): string {
-  const key = keyEnv ? process.env[keyEnv] : process.env.CLIPROXY_API_KEY;
-  const value = key || readSecretFromTerminal();
-  if (!value) throw new Error("CLIProxy API key is empty");
+function getInstallApiKey(baseUrl: string, keyEnv?: string): string {
+  const envName = keyEnv || "CLIPROXY_API_KEY";
+  const value = (Object.hasOwn(process.env, envName)
+    ? process.env[envName] || ""
+    : readSecretFromTerminal()).trim();
+  if (!value && !isLoopbackUrl(baseUrl)) {
+    throw new Error("CLIProxy API key may be empty only for a loopback URL");
+  }
   return value;
 }
 
@@ -226,7 +230,7 @@ async function install(options: CliOptions): Promise<void> {
     officialBaseUrl: (stringOption(options, "official-url") || existingBaseUrl || DEFAULTS.officialBaseUrl).replace(/\/+$/, ""),
     cliproxyBaseUrl: (stringOption(options, "cliproxy-url") || DEFAULTS.cliproxyBaseUrl).replace(/\/+$/, ""),
   });
-  const apiKey = getInstallApiKey(stringOption(options, "key-env"));
+  const apiKey = getInstallApiKey(config.cliproxyBaseUrl, stringOption(options, "key-env"));
 
   const proxyCatalog = await fetchCliProxyCatalog(config.cliproxyBaseUrl, apiKey);
   const availableModels = proxyCatalog.models.map((model) => model.slug);
@@ -244,7 +248,8 @@ async function install(options: CliOptions): Promise<void> {
   let launchInstalled = false;
 
   try {
-    saveApiKey(apiKey);
+    if (apiKey) saveApiKey(apiKey);
+    else deleteApiKey();
     const catalogResult = await syncCatalog({
       codexHome: paths.codexHome,
       catalogFile: paths.catalogFile,
@@ -356,7 +361,7 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
-  const apiKey = readApiKey();
+  const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
   const proxyCatalog = await fetchCliProxyCatalog(config.cliproxyBaseUrl, apiKey);
   const availableModels = proxyCatalog.models.map((model) => model.slug);
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);

@@ -25,7 +25,9 @@ export function loadNativeCatalog(codexHome: string): ModelCatalog {
 export async function fetchCliProxyCatalog(baseUrl: string, apiKey: string): Promise<ModelCatalog> {
   const url = new URL(`${baseUrl.replace(/\/+$/, "")}/models`);
   url.searchParams.set("client_version", "codex-cliproxy");
-  const response = await fetch(url, { headers: { authorization: `Bearer ${apiKey}` } });
+  const response = await fetch(url, apiKey
+    ? { headers: { authorization: `Bearer ${apiKey}` } }
+    : undefined);
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`CLIProxy /models returned HTTP ${response.status}: ${text.slice(0, 300)}`);

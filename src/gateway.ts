@@ -24,6 +24,11 @@ export function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
 }
 
+export function isLoopbackUrl(value: string): boolean {
+  const hostname = new URL(value).hostname;
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+}
+
 export function joinUpstreamUrl(baseUrl: string, incomingUrl: string, mountPath = "/v1"): string {
   const incoming = new URL(incomingUrl);
   let relativePath = incoming.pathname;
@@ -50,7 +55,7 @@ function copyRequestHeaders(request: Request, route: Route, apiKey: string): Hea
     headers.delete("x-api-key");
     headers.delete("x-goog-api-key");
     headers.delete("content-encoding");
-    headers.set("authorization", `Bearer ${apiKey}`);
+    if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
   }
   return headers;
 }
@@ -200,7 +205,7 @@ export function startGateway(config: GatewayConfig): Bun.Server<undefined> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
-  const apiKey = readApiKey();
+  const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,

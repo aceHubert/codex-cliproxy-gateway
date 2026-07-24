@@ -28,7 +28,7 @@ export function saveApiKey(apiKey: string): void {
   ]);
 }
 
-export function readApiKey(): string {
+export function readApiKey(optional = false): string {
   try {
     return security([
       "find-generic-password",
@@ -39,6 +39,7 @@ export function readApiKey(): string {
       "-w",
     ]);
   } catch {
+    if (optional) return "";
     throw new Error("CLIProxy API key was not found in macOS Keychain");
   }
 }
