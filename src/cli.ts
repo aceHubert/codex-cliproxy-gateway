@@ -10,7 +10,7 @@ import {
   readRootTomlString,
 } from "./toml.ts";
 import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
-import { syncCatalog, fetchCliProxyCatalog, invalidateModelsCache } from "./catalog.ts";
+import { syncCatalog, fetchCliProxyCatalog } from "./catalog.ts";
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import {
@@ -224,6 +224,7 @@ async function install(options: CliOptions): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
   const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const existingBaseUrl = readRootTomlString(currentToml, "openai_base_url");
+  const existingCatalog = readRootTomlString(currentToml, "model_catalog_json");
   const config = gatewayConfig(paths, {
     port,
     prefix: stringOption(options, "prefix") || DEFAULTS.prefix,
@@ -251,13 +252,12 @@ async function install(options: CliOptions): Promise<void> {
     if (apiKey) saveApiKey(apiKey);
     else deleteApiKey();
     const catalogResult = await syncCatalog({
-      codexHome: paths.codexHome,
       catalogFile: paths.catalogFile,
+      nativeCatalogFile: existingCatalog,
       proxyModels: proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
       prefix: config.prefix,
     });
     console.log(`Catalog synced: ${catalogResult.nativeCount} native + ${catalogResult.proxyCount} CLIProxy models.`);
-    console.log(`Model cache invalidated: ${catalogResult.cacheFile}`);
 
     writeJson(paths.gatewayConfig, config);
 
@@ -321,11 +321,9 @@ function uninstall(): void {
   }
   fs.rmSync(paths.catalogFile, { force: true });
   deleteApiKey();
-  const cache = invalidateModelsCache(paths.codexHome);
   fs.rmSync(paths.runtimeHome, { recursive: true, force: true });
 
   console.log("Uninstalled. Managed config.toml values were restored; the generated catalog was removed.");
-  console.log(`Model cache invalidated: ${cache.cacheFile}`);
   console.log("Codex auth.json was never changed.");
 }
 
@@ -373,7 +371,6 @@ async function models(options: CliOptions): Promise<void> {
   });
 
   const result = await syncCatalog({
-    codexHome: paths.codexHome,
     catalogFile: paths.catalogFile,
     proxyModels: proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
     prefix: config.prefix,
@@ -382,7 +379,6 @@ async function models(options: CliOptions): Promise<void> {
   writeJson(paths.gatewayConfig, config);
 
   console.log(`Catalog synced: ${result.nativeCount} native + ${result.proxyCount} selected CLIProxy models.`);
-  console.log(`Model cache invalidated: ${result.cacheFile}`);
   printCurrentModels(config, selectedModels);
   console.log("Fully quit and reopen Codex Desktop to reload the startup catalog.");
 }
@@ -409,7 +405,7 @@ async function status(): Promise<void> {
     openaiBaseUrl: configuredBaseUrl,
     modelCatalogJson: configuredCatalog,
     authJsonModified: false,
-    modelsCachePresent: fs.existsSync(path.join(paths.codexHome, "models_cache.json")),
+    modelCatalogPresent: Boolean(configuredCatalog && fs.existsSync(configuredCatalog)),
   }, null, 2));
 }
 

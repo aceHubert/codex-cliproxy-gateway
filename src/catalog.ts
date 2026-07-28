@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { atomicWrite } from "./toml.ts";
 import type { ModelCatalog, ModelEntry } from "./types.ts";
 
@@ -11,13 +11,21 @@ function normalizeCatalog(value: unknown): ModelCatalog {
   throw new Error("Native Codex model catalog does not contain a models array");
 }
 
-export function loadNativeCatalog(codexHome: string): ModelCatalog {
-  const cacheFile = path.join(codexHome, "models_cache.json");
+export function loadNativeCatalog(catalogFile?: string, codexCommand = "codex"): ModelCatalog {
+  if (catalogFile && fs.existsSync(catalogFile)) {
+    return normalizeCatalog(JSON.parse(fs.readFileSync(catalogFile, "utf8")));
+  }
+
   try {
-    return normalizeCatalog(JSON.parse(fs.readFileSync(cacheFile, "utf8")));
+    const output = execFileSync(codexCommand, ["debug", "models", "--bundled"], {
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    return normalizeCatalog(JSON.parse(output));
   } catch (error) {
     throw new Error(
-      `Unable to load app-server models from ${cacheFile}: ${error instanceof Error ? error.message : String(error)}. Open Codex once to refresh its model cache.`,
+      `Unable to load the bundled Codex model catalog: ${error instanceof Error ? error.message : String(error)}. Ensure the codex CLI is installed and supports "codex debug models --bundled".`,
     );
   }
 }
@@ -62,31 +70,20 @@ export function mergeCatalog(nativeCatalog: ModelCatalog, proxyCatalog: ModelCat
   return { models: [...nativeModels, ...proxyModels] };
 }
 
-export function invalidateModelsCache(codexHome: string): { cacheFile: string; existed: boolean } {
-  const cacheFile = path.join(codexHome, "models_cache.json");
-  const existed = fs.existsSync(cacheFile);
-  fs.rmSync(cacheFile, { force: true });
-  return { cacheFile, existed };
-}
-
 interface SyncCatalogOptions {
-  codexHome: string;
   catalogFile: string;
+  nativeCatalogFile?: string;
   proxyModels: ModelEntry[];
   prefix: string;
 }
 
-export async function syncCatalog({ codexHome, catalogFile, proxyModels, prefix }: SyncCatalogOptions) {
-  const native = loadNativeCatalog(codexHome);
+export async function syncCatalog({ catalogFile, nativeCatalogFile, proxyModels, prefix }: SyncCatalogOptions) {
+  const native = loadNativeCatalog(nativeCatalogFile);
   const merged = mergeCatalog(native, { models: proxyModels }, prefix);
   atomicWrite(catalogFile, `${JSON.stringify(merged, null, 2)}\n`);
-  const cache = invalidateModelsCache(codexHome);
   return {
     nativeCount: native.models.length,
     proxyCount: proxyModels.length,
     catalogFile,
-    cacheFile: cache.cacheFile,
-    cacheInvalidated: true,
-    cachePreviouslyExisted: cache.existed,
   };
 }

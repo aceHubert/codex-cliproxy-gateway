@@ -7,7 +7,7 @@ import { zstdCompressSync } from "node:zlib";
 import { decideRoute, isLoopbackUrl, joinUpstreamUrl } from "../src/gateway.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
 import { resolvePaths } from "../src/paths.ts";
-import { fetchCliProxyCatalog, mergeCatalog, invalidateModelsCache, loadNativeCatalog } from "../src/catalog.ts";
+import { fetchCliProxyCatalog, mergeCatalog, loadNativeCatalog } from "../src/catalog.ts";
 import {
   applyModelPickerKey,
   parseModelSelection,
@@ -225,26 +225,28 @@ test("zstd CLIProxy request is decoded, routed, and rewritten", async () => {
 });
 
 
-test("model cache invalidation removes models_cache.json", () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-cache-test-"));
-  const cacheFile = path.join(codexHome, "models_cache.json");
-  fs.writeFileSync(cacheFile, '{"models":[]}\n');
-  const result = invalidateModelsCache(codexHome);
-  assert.equal(result.cacheFile, cacheFile);
-  assert.equal(result.existed, true);
-  assert.equal(fs.existsSync(cacheFile), false);
-  fs.rmSync(codexHome, { recursive: true, force: true });
-});
-
-test("native catalog reads only the app-server model cache", () => {
+test("native catalog preserves an existing configured catalog", () => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-source-test-"));
-  fs.writeFileSync(path.join(codexHome, "models_cache.json"), JSON.stringify({
+  const catalogFile = path.join(codexHome, "custom-catalog.json");
+  fs.writeFileSync(catalogFile, JSON.stringify({
     models: [{ slug: "gpt-5.4", display_name: "GPT-5.4" }],
   }));
   try {
-    assert.equal(loadNativeCatalog(codexHome).models[0]?.slug, "gpt-5.4");
+    assert.equal(loadNativeCatalog(catalogFile).models[0]?.slug, "gpt-5.4");
   } finally {
     fs.rmSync(codexHome, { recursive: true, force: true });
+  }
+});
+
+test("native catalog falls back to the Codex bundled catalog command", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bundled-model-test-"));
+  const fakeCodex = path.join(tempDir, "codex");
+  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf \'%s\\n\' \'{"models":[{"slug":"gpt-bundled"}]}\'\n');
+  fs.chmodSync(fakeCodex, 0o755);
+  try {
+    assert.equal(loadNativeCatalog(path.join(tempDir, "missing.json"), fakeCodex).models[0]?.slug, "gpt-bundled");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 

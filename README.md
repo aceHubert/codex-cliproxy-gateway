@@ -52,13 +52,12 @@ The installer:
 1. Validates the key against `GET /v1/models`.
 2. Displays the CLIProxy model list and asks which models should appear in Codex.
 3. Stores the key in macOS Keychain.
-4. Builds a combined Codex catalog from the app-server's current `~/.codex/models_cache.json` and only the selected CLIProxy models, preserving their reasoning metadata.
+4. Builds a combined Codex catalog from `codex debug models --bundled` and only the selected CLIProxy models, preserving their reasoning metadata. An existing `model_catalog_json` is preserved as the base during installation.
 5. Prefixes selected model IDs with `cliproxy/` while preserving their original display names; the gateway strips the ID prefix before forwarding.
 6. Backs up `~/.codex/config.toml` as `~/.codex/config.toml.bak-cliproxy-gateway-YYYYMMDDHHmmss`.
 7. Changes only root-level `openai_base_url` and `model_catalog_json`.
 8. Installs a `launchd` service bound to `127.0.0.1`.
-9. Deletes `~/.codex/models_cache.json` after the new catalog is written, forcing a fresh model load on the next app start.
-10. Leaves `~/.codex/auth.json` untouched.
+9. Leaves `~/.codex/auth.json` untouched.
 
 Installed files are split by responsibility:
 
@@ -100,7 +99,7 @@ Keychain API key.
 
 `models` lists the CLIProxy models currently selected for the Codex picker.
 
-`models --sync` fetches the current CLIProxy model list, marks the current selection, asks you to choose again, rebuilds the picker catalog, and deletes `~/.codex/models_cache.json`. Press Enter to keep the checked models. Fully quit and reopen Codex Desktop afterward.
+`models --sync` fetches the current CLIProxy model list, marks the current selection, asks you to choose again, and rebuilds the picker catalog from the Codex bundled catalog. Press Enter to keep the checked models. Fully quit and reopen Codex Desktop afterward.
 
 In an interactive terminal, use `↑`/`↓` to move, `Space` to toggle a model,
 and `Enter` to confirm. `--select` remains available for scripts and CI.
@@ -182,12 +181,6 @@ npm publish --access public
 
 The package has no runtime dependencies.
 
-## Model cache invalidation
+## Model catalog refresh
 
-After a successful `install` or `models --sync`, the command deletes:
-
-```text
-~/.codex/models_cache.json
-```
-
-The catalog file is written atomically first, so a failed sync does not clear the existing cache. Deleting the cache does not affect `auth.json` or conversation history; Codex recreates it when needed. `uninstall` also deletes the cache once after restoring native configuration, preventing a stale picker from surviving the transition.
+The native catalog comes from `codex debug models --bundled`; `models_cache.json` is not required. The generated catalog is written atomically. Fully quit and reopen Codex Desktop after `install` or `models --sync`, because Codex loads `model_catalog_json` when app-server starts.
