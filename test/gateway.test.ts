@@ -108,6 +108,18 @@ test("catalog prefixes CLIProxy models and preserves their metadata", () => {
   assert.equal(merged.models[1].supports_reasoning_summaries, true);
 });
 
+test("catalog marks display-name [1m] CLIProxy models as 1M context", () => {
+  const merged = mergeCatalog({ models: [{ slug: "gpt-5.5", priority: 0 }] }, { models: [{
+    slug: "z.ai/glm-5.2",
+    display_name: "glm-5.2[1m]",
+    context_window: 272000,
+    max_context_window: 272000,
+  }] });
+  assert.equal(merged.models[1].slug, "cliproxy/z.ai/glm-5.2");
+  assert.equal(merged.models[1].context_window, 1_000_000);
+  assert.equal(merged.models[1].max_context_window, 1_000_000);
+});
+
 import { createGatewayHandler } from "../src/gateway.ts";
 
 test("official route preserves OAuth and exact model", async () => {

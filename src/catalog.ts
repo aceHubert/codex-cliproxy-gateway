@@ -3,6 +3,9 @@ import { execFileSync } from "node:child_process";
 import { atomicWrite } from "./toml.ts";
 import type { ModelCatalog, ModelEntry } from "./types.ts";
 
+const ONE_M_CONTEXT_WINDOW = 1_000_000;
+const ONE_M_DISPLAY_NAME_SUFFIX = /\[1m\]\s*$/i;
+
 function normalizeCatalog(value: unknown): ModelCatalog {
   if (Array.isArray(value)) return { models: value };
   if (value && typeof value === "object" && "models" in value && Array.isArray(value.models)) {
@@ -57,6 +60,10 @@ function prefixModel(source: ModelEntry, prefix: string, priority: number): Mode
   const model = structuredClone(source);
   model.slug = `${prefix}${source.slug}`;
   model.display_name = source.display_name || source.slug;
+  if (ONE_M_DISPLAY_NAME_SUFFIX.test(String(model.display_name))) {
+    model.context_window = ONE_M_CONTEXT_WINDOW;
+    model.max_context_window = ONE_M_CONTEXT_WINDOW;
+  }
   model.priority = priority;
   return model;
 }
