@@ -74,8 +74,9 @@ Installed files are split by responsibility:
   gateway.error.log
 ```
 
-The catalog is generated data, so it is rebuilt rather than backed up. Uninstall
-removes it and leaves the timestamped `config.toml` backup in place. If
+The catalog is generated data, so it is rebuilt rather than backed up. Model
+metadata overrides are read directly from the bundled `models.json` on each
+catalog sync and are not copied into the runtime directory. If
 `config.toml` was manually edited after installation, uninstall restores only
 the two managed root keys and preserves unrelated edits.
 
@@ -100,6 +101,23 @@ Keychain API key.
 `models` lists the CLIProxy models currently selected for the Codex picker.
 
 `models --sync` fetches the current CLIProxy model list, marks the current selection, asks you to choose again, and rebuilds the picker catalog from the Codex bundled catalog. Press Enter to keep the checked models. Fully quit and reopen Codex Desktop afterward.
+
+Model metadata overrides are applied to case-insensitive upstream model IDs
+before `cliproxy/` is added. The `openai` group leaves names unprefixed; other
+groups are joined with `/`. A trailing `*` enables prefix matching:
+
+```json
+{
+  "openai": [
+    { "name": "gpt-5.6-*", "context_window": 372000 }
+  ],
+  "z.ai": [
+    { "name": "glm-5.2", "context_window": 1000000 }
+  ]
+}
+```
+
+Run `codex-cliproxy models --sync` after editing `models.json`.
 
 In an interactive terminal, use `↑`/`↓` to move, `Space` to toggle a model,
 and `Enter` to confirm. `--select` remains available for scripts and CI.

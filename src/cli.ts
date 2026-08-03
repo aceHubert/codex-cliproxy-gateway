@@ -47,6 +47,7 @@ interface InstallState {
 }
 
 const MANAGED_CONFIG_KEYS = ["openai_base_url", "model_catalog_json"];
+const DEFAULT_MODELS_FILE = path.resolve(import.meta.dir, "../models.json");
 
 function usage() {
   console.log(`codex-cliproxy - Bun gateway for Codex Desktop and CLI
@@ -169,6 +170,12 @@ function writeJson(file: string, value: unknown): void {
   atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+export function removeManagedRuntimeFiles(paths: ResolvedPaths): void {
+  for (const file of [paths.gatewayConfig, paths.stateFile, paths.stdoutLog, paths.stderrLog]) {
+    fs.rmSync(file, { force: true });
+  }
+}
+
 async function waitForHealth(url: string, attempts = 100): Promise<void> {
   let lastError: unknown;
   for (let i = 0; i < attempts; i += 1) {
@@ -244,7 +251,6 @@ async function install(options: CliOptions): Promise<void> {
   config.selectedModels = selectedModels;
   console.log(`Selected ${selectedModels.length} CLIProxy models.`);
 
-  fs.mkdirSync(paths.runtimeHome, { recursive: true });
   const configBackup = backupConfig(paths.configToml);
   let launchInstalled = false;
 
@@ -254,6 +260,7 @@ async function install(options: CliOptions): Promise<void> {
     const catalogResult = await syncCatalog({
       catalogFile: paths.catalogFile,
       nativeCatalogFile: existingCatalog,
+      modelsConfigFile: DEFAULT_MODELS_FILE,
       proxyModels: proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
       prefix: config.prefix,
     });
@@ -299,7 +306,7 @@ async function install(options: CliOptions): Promise<void> {
     restoreBackup(paths.configToml, configBackup);
     fs.rmSync(paths.catalogFile, { force: true });
     deleteApiKey();
-    fs.rmSync(paths.runtimeHome, { recursive: true, force: true });
+    removeManagedRuntimeFiles(paths);
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(diagnostics ? `${message}; ${diagnostics}` : message);
   }
@@ -321,7 +328,7 @@ function uninstall(): void {
   }
   fs.rmSync(paths.catalogFile, { force: true });
   deleteApiKey();
-  fs.rmSync(paths.runtimeHome, { recursive: true, force: true });
+  removeManagedRuntimeFiles(paths);
 
   console.log("Uninstalled. Managed config.toml values were restored; the generated catalog was removed.");
   console.log("Codex auth.json was never changed.");
@@ -372,6 +379,7 @@ async function models(options: CliOptions): Promise<void> {
 
   const result = await syncCatalog({
     catalogFile: paths.catalogFile,
+    modelsConfigFile: DEFAULT_MODELS_FILE,
     proxyModels: proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
     prefix: config.prefix,
   });

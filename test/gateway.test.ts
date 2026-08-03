@@ -7,7 +7,14 @@ import { zstdCompressSync } from "node:zlib";
 import { decideRoute, isLoopbackUrl, joinUpstreamUrl } from "../src/gateway.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
 import { resolvePaths } from "../src/paths.ts";
-import { fetchCliProxyCatalog, mergeCatalog, loadNativeCatalog } from "../src/catalog.ts";
+import {
+  fetchCliProxyCatalog,
+  loadModelOverrides,
+  mergeCatalog,
+  loadNativeCatalog,
+  syncCatalog,
+} from "../src/catalog.ts";
+import { removeManagedRuntimeFiles } from "../src/cli.ts";
 import {
   applyModelPickerKey,
   parseModelSelection,
@@ -108,16 +115,99 @@ test("catalog prefixes CLIProxy models and preserves their metadata", () => {
   assert.equal(merged.models[1].supports_reasoning_summaries, true);
 });
 
-test("catalog marks display-name [1m] CLIProxy models as 1M context", () => {
-  const merged = mergeCatalog({ models: [{ slug: "gpt-5.5", priority: 0 }] }, { models: [{
+test("catalog applies ordered case-insensitive overrides before prefixing", () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-overrides-test-"));
+  const configFile = path.join(tempDir, "models.json");
+  fs.writeFileSync(configFile, JSON.stringify({
+    openai: [
+      {
+        name: "GPT-5.6-*",
+        context_window: 372000,
+        max_context_window: 372000,
+        effective_context_window_percent: 95,
+      },
+      { name: "gpt-5.6-sol", context_window: 373000 },
+    ],
+    "Z.AI": [{ name: "glm-5.2", context_window: 1_000_000, max_context_window: 1_000_000 }],
+  }));
+  const native = { models: [
+    { slug: "gpt-5.6-sol", context_window: 272000 },
+    { slug: "gpt-5.6-terra", context_window: 272000 },
+  ] };
+  const proxy = { models: [
+    { slug: "GPT-5.6-TERRA", context_window: 272000 },
+    { slug: "z.ai/GLM-5.2", context_window: 272000 },
+  ] };
+
+  try {
+    const merged = mergeCatalog(native, proxy, "cliproxy/", loadModelOverrides(configFile));
+    assert.equal(merged.models[0].context_window, 373000);
+    assert.equal(merged.models[0].max_context_window, 372000);
+    assert.equal(merged.models[1].context_window, 372000);
+    assert.equal(merged.models[2].slug, "cliproxy/GPT-5.6-TERRA");
+    assert.equal(merged.models[2].effective_context_window_percent, 95);
+    assert.equal(merged.models[3].slug, "cliproxy/z.ai/GLM-5.2");
+    assert.equal(merged.models[3].context_window, 1_000_000);
+    assert.equal(native.models[0].context_window, 272000);
+    assert.equal(proxy.models[1].context_window, 272000);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("display-name [1m] has no implicit context override", () => {
+  const merged = mergeCatalog({ models: [] }, { models: [{
     slug: "z.ai/glm-5.2",
     display_name: "glm-5.2[1m]",
     context_window: 272000,
-    max_context_window: 272000,
   }] });
-  assert.equal(merged.models[1].slug, "cliproxy/z.ai/glm-5.2");
-  assert.equal(merged.models[1].context_window, 1_000_000);
-  assert.equal(merged.models[1].max_context_window, 1_000_000);
+  assert.equal(merged.models[0].context_window, 272000);
+});
+
+test("runtime cleanup preserves user files", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-runtime-cleanup-test-"));
+  const paths = resolvePaths({ HOME: home });
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  for (const file of [paths.gatewayConfig, paths.stateFile, paths.stdoutLog, paths.stderrLog]) {
+    fs.writeFileSync(file, "test\n");
+  }
+  const userFile = path.join(paths.runtimeHome, "notes.txt");
+  fs.writeFileSync(userFile, "keep\n");
+  try {
+    removeManagedRuntimeFiles(paths);
+    assert.equal(fs.existsSync(paths.gatewayConfig), false);
+    assert.equal(fs.existsSync(paths.stateFile), false);
+    assert.equal(fs.existsSync(userFile), true);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("invalid model overrides leave the generated catalog unchanged", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-invalid-test-"));
+  const catalogFile = path.join(tempDir, "catalog.json");
+  const nativeCatalogFile = path.join(tempDir, "native.json");
+  const modelsConfigFile = path.join(tempDir, "models.json");
+  fs.writeFileSync(catalogFile, "keep\n");
+  fs.writeFileSync(nativeCatalogFile, '{"models":[]}\n');
+  fs.writeFileSync(modelsConfigFile, "{invalid\n");
+  try {
+    await assert.rejects(syncCatalog({
+      catalogFile,
+      nativeCatalogFile,
+      modelsConfigFile,
+      proxyModels: [],
+      prefix: "cliproxy/",
+    }), /Invalid model overrides/);
+    assert.equal(fs.readFileSync(catalogFile, "utf8"), "keep\n");
+
+    fs.writeFileSync(modelsConfigFile, JSON.stringify({ openai: [{ name: "gpt*bad" }] }));
+    assert.throws(() => loadModelOverrides(modelsConfigFile), /only one trailing \*/);
+    fs.writeFileSync(modelsConfigFile, JSON.stringify({ openai: [{ name: "gpt", slug: "other" }] }));
+    assert.throws(() => loadModelOverrides(modelsConfigFile), /may not override slug or priority/);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 import { createGatewayHandler } from "../src/gateway.ts";
