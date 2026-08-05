@@ -241,7 +241,7 @@ async function install(options: CliOptions): Promise<void> {
   const apiKey = getInstallApiKey(config.cliproxyBaseUrl, stringOption(options, "key-env"));
 
   const proxyCatalog = await fetchCliProxyCatalog(config.cliproxyBaseUrl, apiKey);
-  const availableModels = proxyCatalog.models.map((model) => model.slug);
+  const availableModels = proxyCatalog.models;
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);
   const selectedModels = await chooseModels({
     availableModels,
@@ -368,7 +368,7 @@ async function models(options: CliOptions): Promise<void> {
 
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
   const proxyCatalog = await fetchCliProxyCatalog(config.cliproxyBaseUrl, apiKey);
-  const availableModels = proxyCatalog.models.map((model) => model.slug);
+  const availableModels = proxyCatalog.models;
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);
   const selectedModels = await chooseModels({
     availableModels,

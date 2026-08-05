@@ -1,6 +1,6 @@
 import readline from "node:readline";
 import type { ReadStream, WriteStream } from "node:tty";
-import type { ModelCatalog } from "./types.ts";
+import type { ModelCatalog, ModelEntry } from "./types.ts";
 
 type TerminalInput = ReadStream;
 type TerminalOutput = WriteStream;
@@ -18,6 +18,15 @@ interface Keypress {
 
 function unique(values: string[]): string[] {
   return [...new Set(values)];
+}
+
+export function modelPickerEntries(models: ModelEntry[]): { slug: string; label: string }[] {
+  return [...new Map(models.map((model) => [model.slug, model])).values()]
+    .sort((left, right) => left.slug.localeCompare(right.slug))
+    .map((model) => ({
+      slug: model.slug,
+      label: `${model.display_name || model.slug}(${model.slug})`,
+    }));
 }
 
 export function parseModelSelection(input: unknown, availableModels: string[]): string[] | null {
@@ -87,29 +96,31 @@ export function applyModelPickerKey(
 
 function renderModelPicker(
   availableModels: string[],
+  modelLabels: ReadonlyMap<string, string>,
   state: PickerState,
   output: TerminalOutput,
   previousLines: number,
   message = "",
 ): number {
-  const visibleCount = Math.min(availableModels.length, Math.max(1, (output.rows || 24) - 3));
+  const visibleCount = Math.min(availableModels.length, Math.max(1, Math.min(10, (output.rows || 24) - 4)));
   const start = Math.min(
     Math.max(0, state.cursor - Math.floor(visibleCount / 2)),
     availableModels.length - visibleCount,
   );
   const end = start + visibleCount;
   const selected = new Set(state.selectedModels);
+  const maxWidth = Math.max(1, (output.columns || 80) - 1);
   const lines = [
     `Available CLIProxy models (${start + 1}-${end}/${availableModels.length}):`,
     ...availableModels.slice(start, end).map((model, offset) => {
       const index = start + offset;
       const pointer = index === state.cursor ? ">" : " ";
       const marker = selected.has(model) ? "x" : " ";
-      return `${pointer} [${marker}] ${String(index + 1).padStart(3, " ")}. ${model}`;
+      return `${pointer} [${marker}] ${String(index + 1).padStart(3, " ")}. ${modelLabels.get(model) || model}`;
     }),
     "↑/↓ move  Space toggle  Enter confirm  Ctrl+C cancel",
     message || `Selected: ${state.selectedModels.length}`,
-  ];
+  ].map((line) => line.length <= maxWidth ? line : `${line.slice(0, maxWidth - 1)}…`);
 
   if (previousLines > 0) output.write(`\x1b[${previousLines}F\x1b[0J`);
   output.write(`${lines.join("\n")}\n`);
@@ -118,6 +129,7 @@ function renderModelPicker(
 
 function chooseModelsWithKeyboard(
   availableModels: string[],
+  modelLabels: ReadonlyMap<string, string>,
   currentSelection: string[],
   requireNonEmpty: boolean,
   input: TerminalInput,
@@ -145,7 +157,7 @@ function chooseModelsWithKeyboard(
       if (key.name === "up" || key.name === "down" || key.name === "space" || value === " ") {
         const pickerKey: PickerKey = value === " " ? "space" : key.name as PickerKey;
         state = applyModelPickerKey(state, pickerKey, availableModels);
-        renderedLines = renderModelPicker(availableModels, state, output, renderedLines);
+        renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines);
         return;
       }
 
@@ -153,6 +165,7 @@ function chooseModelsWithKeyboard(
         if (requireNonEmpty && state.selectedModels.length === 0) {
           renderedLines = renderModelPicker(
             availableModels,
+            modelLabels,
             state,
             output,
             renderedLines,
@@ -170,12 +183,12 @@ function chooseModelsWithKeyboard(
     input.setRawMode(true);
     input.resume();
     output.write("\x1b[?25l");
-    renderedLines = renderModelPicker(availableModels, state, output, renderedLines);
+    renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines);
   });
 }
 
 interface ChooseModelsOptions {
-  availableModels: string[];
+  availableModels: ModelEntry[];
   currentSelection?: string[];
   selector?: string;
   requireNonEmpty?: boolean;
@@ -191,7 +204,9 @@ export async function chooseModels({
   input = process.stdin,
   output = process.stdout,
 }: ChooseModelsOptions): Promise<string[]> {
-  const available = unique(availableModels);
+  const entries = modelPickerEntries(availableModels);
+  const available = entries.map((model) => model.slug);
+  const modelLabels = new Map(entries.map((model) => [model.slug, model.label]));
   if (available.length === 0) throw new Error("CLIProxy returned no models");
 
   const current = available.filter((model) => currentSelection.includes(model));
@@ -206,7 +221,7 @@ export async function chooseModels({
     throw new Error("Interactive model selection requires a terminal; use --select all, model IDs, or number ranges");
   }
 
-  return chooseModelsWithKeyboard(available, current, requireNonEmpty, input, output);
+  return chooseModelsWithKeyboard(available, modelLabels, current, requireNonEmpty, input, output);
 }
 
 export function selectedModelsFromCatalog(catalog: ModelCatalog, prefix = "cliproxy/"): string[] {

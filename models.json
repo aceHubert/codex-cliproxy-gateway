@@ -10,41 +10,13 @@
   "deepseek": [
     {
       "name": "deepseek-v4-*",
-      "context_window": 1000000,
-      "max_context_window": 1000000,
-      "default_reasoning_level": "max",
-      "supported_reasoning_levels": [
-        {
-          "description": "Fast responses with lighter reasoning",
-          "effort": "low"
-        },
-        {
-          "description": "Greater reasoning depth for complex problems",
-          "effort": "high"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning depth for the hardest problems"
-        }
-      ]
+      "default_reasoning_level": "max"
     }
   ],
   "z.ai": [
     {
       "name": "glm-5.2[1m]",
-      "context_window": 1000000,
-      "max_context_window": 1000000,
-      "default_reasoning_level": "max",
-      "supported_reasoning_levels": [
-        {
-          "description": "Greater reasoning depth for complex problems",
-          "effort": "high"
-        },
-        {
-          "effort": "max",
-          "description": "Maximum reasoning depth for the hardest problems"
-        }
-      ]
+      "default_reasoning_level": "max"
     }
   ]
 }

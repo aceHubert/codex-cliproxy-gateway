@@ -1,9 +1,11 @@
 import test from "node:test";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
+import type { ReadStream, WriteStream } from "node:tty";
 import { decideRoute, isLoopbackUrl, joinUpstreamUrl } from "../src/gateway.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
 import { resolvePaths } from "../src/paths.ts";
@@ -17,6 +19,8 @@ import {
 import { removeManagedRuntimeFiles } from "../src/cli.ts";
 import {
   applyModelPickerKey,
+  chooseModels,
+  modelPickerEntries,
   parseModelSelection,
   selectedModelsFromCatalog,
 } from "../src/models.ts";
@@ -381,6 +385,16 @@ test("model selection supports indexes, ranges, IDs, all, and none", () => {
   assert.equal(parseModelSelection("", models), null);
 });
 
+test("model picker shows display name with model name and sorts by model name", () => {
+  assert.deepEqual(modelPickerEntries([
+    { slug: "z-model", display_name: "Alpha" },
+    { slug: "a-model", display_name: "Zulu" },
+  ]), [
+    { slug: "a-model", label: "Zulu(a-model)" },
+    { slug: "z-model", label: "Alpha(z-model)" },
+  ]);
+});
+
 test("keyboard model picker moves and toggles the focused model", () => {
   const models = ["alpha", "beta", "gamma"];
   let state = { cursor: 0, selectedModels: [] as string[] };
@@ -391,6 +405,44 @@ test("keyboard model picker moves and toggles the focused model", () => {
   state = applyModelPickerKey(state, "up", models);
   state = applyModelPickerKey(state, "space", models);
   assert.deepEqual(state, { cursor: 1, selectedModels: ["gamma"] });
+});
+
+test("keyboard model picker redraws a bounded single-line frame in place", async () => {
+  const writes: string[] = [];
+  const input = Object.assign(new EventEmitter(), {
+    isTTY: true,
+    isRaw: false,
+    setRawMode(value: boolean) { this.isRaw = value; return this; },
+    pause() { return this; },
+    resume() { return this; },
+  });
+  const output = {
+    isTTY: true,
+    rows: 24,
+    columns: 40,
+    write(value: string) { writes.push(value); return true; },
+  };
+  const models = Array.from({ length: 28 }, (_, index) => ({
+    slug: `model-${String(index + 1).padStart(2, "0")}`,
+    display_name: `Long display name ${index + 1}`,
+  }));
+
+  const selection = chooseModels({
+    availableModels: models,
+    input: input as unknown as ReadStream,
+    output: output as unknown as WriteStream,
+  });
+  input.emit("keypress", "", { name: "down" });
+  input.emit("keypress", " ", { name: "space" });
+  input.emit("keypress", "", { name: "enter" });
+
+  assert.deepEqual(await selection, ["model-02"]);
+  assert.equal(writes[0], "\x1b[?25l");
+  assert.deepEqual([writes[2], writes[4]], ["\x1b[13F\x1b[0J", "\x1b[13F\x1b[0J"]);
+  assert.ok([writes[1], writes[3], writes[5]].every(
+    (value) => value.split("\n").every((line) => line.length <= 39),
+  ));
+  assert.equal(writes.at(-1), "\x1b[?25h");
 });
 
 test("selected models can be recovered from an existing catalog", () => {
