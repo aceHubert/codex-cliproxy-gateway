@@ -23,6 +23,7 @@ export interface GatewayConfig {
   cliproxyBaseUrl: string;
   catalogPath: string;
   selectedModels?: string[];
+  requestLogging?: boolean;
 }
 
 export interface ResolvedPaths {

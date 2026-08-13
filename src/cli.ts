@@ -30,6 +30,7 @@ const DEFAULTS = {
   prefix: "cliproxy/",
   officialBaseUrl: "https://chatgpt.com/backend-api/codex",
   cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+  requestLogging: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
 interface BackupRecord {
@@ -58,6 +59,7 @@ Usage:
   codex-cliproxy start|stop|restart
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--select SELECTOR]
+  codex-cliproxy log on|off
   codex-cliproxy status
 
 Install options:
@@ -425,6 +427,28 @@ function serve(options: CliOptions): void {
   startGateway(loadJson<GatewayConfig>(configPath));
 }
 
+async function logToggle(enabled: boolean): Promise<void> {
+  requireMacOS();
+  const paths = resolvePaths();
+  if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
+  const config = loadJson<GatewayConfig>(paths.gatewayConfig);
+  config.requestLogging = enabled;
+  writeJson(paths.gatewayConfig, config);
+
+  // Update state.json if it exists
+  if (fs.existsSync(paths.stateFile)) {
+    const state = loadJson<InstallState>(paths.stateFile);
+    state.config = config;
+    writeJson(paths.stateFile, state);
+  }
+
+  restartLaunchAgent(paths.launchAgent);
+  const state = loadJson<InstallState>(paths.stateFile);
+  await waitForHealth(`http://${state.config.host}:${state.config.port}/healthz`);
+  console.log(`Request logging ${enabled ? "enabled" : "disabled"}. Gateway restarted.`);
+  if (enabled) console.log(`Request logs will be written to: ${paths.stdoutLog}`);
+}
+
 async function controlGateway(action: "start" | "stop" | "restart"): Promise<void> {
   requireMacOS();
   const paths = resolvePaths();
@@ -444,6 +468,13 @@ async function controlGateway(action: "start" | "stop" | "restart"): Promise<voi
   console.log(`Gateway ${action === "start" ? "started" : "restarted"}.`);
 }
 
+async function logCommand(positional: string[]): Promise<void> {
+  const sub = positional[1];
+  if (sub === "on") return logToggle(true);
+  if (sub === "off") return logToggle(false);
+  throw new Error('Usage: codex-cliproxy log on|off');
+}
+
 export async function runCli(args: string[]): Promise<void> {
   const { positional, options } = parseArgs(args);
   const command = positional[0];
@@ -451,7 +482,7 @@ export async function runCli(args: string[]): Promise<void> {
     usage();
     return;
   }
-  if (positional.length > 1) throw new Error(`Unexpected argument: ${positional[1]}`);
+  if (positional.length > 1 && command !== "log") throw new Error(`Unexpected argument: ${positional[1]}`);
 
   switch (command) {
     case "install":
@@ -470,6 +501,9 @@ export async function runCli(args: string[]): Promise<void> {
       break;
     case "models":
       await models(options);
+      break;
+    case "log":
+      await logCommand(positional);
       break;
     case "status":
       await status();

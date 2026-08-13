@@ -330,6 +330,249 @@ test("zstd CLIProxy request is decoded, routed, and rewritten", async () => {
   }
 });
 
+test("request logs start with an ISO request-time separator", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalLog = console.log;
+  const logs: string[] = [];
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  console.log = (message?: unknown) => logs.push(String(message));
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+      requestLogging: true,
+    }, "proxy-key");
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "test" }),
+    }));
+
+    const [separator, header] = logs[0].split("\n");
+    assert.match(separator, /^--\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z--$/);
+    assert.equal(header, "=== POST /v1/responses ===");
+  } finally {
+    globalThis.fetch = originalFetch;
+    console.log = originalLog;
+  }
+});
+
+test("non-GPT remote compaction v2 is summarized, wrapped once, and replayed as text", async () => {
+  const originalFetch = globalThis.fetch;
+  const captured: { url: string; options: RequestInit }[] = [];
+  globalThis.fetch = (async (url, options) => {
+    captured.push({ url: String(url), options: options ?? {} });
+    if (captured.length === 1) {
+      return Response.json({
+        id: "resp_summary",
+        status: "completed",
+        output: [{ type: "message", content: [{ type: "output_text", text: "保留这份交接摘要" }] }],
+      });
+    }
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer oauth-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/deepseek-v4",
+        stream: true,
+        stream_options: { include_usage: true },
+        tools: [{ type: "function", name: "read_file" }],
+        text: { format: { type: "json_schema" } },
+        input: [
+          { type: "message", role: "user", content: [{ type: "input_image", image_url: "data:image/png;base64,x" }] },
+          { type: "compaction_trigger" },
+        ],
+      }),
+    }));
+
+    assert.equal(captured[0].url, "https://cliproxy.example/v1/responses");
+    assert.equal(new Headers(captured[0].options.headers).get("accept"), "application/json");
+    const summaryRequest = JSON.parse(captured[0].options.body as string);
+    assert.equal(summaryRequest.model, "deepseek-v4");
+    assert.equal(summaryRequest.stream, false);
+    assert.equal(summaryRequest.stream_options, undefined);
+    assert.equal(summaryRequest.tools, undefined);
+    assert.equal(summaryRequest.text, undefined);
+    assert.deepEqual(summaryRequest.input.map((item: { type: string }) => item.type), ["message", "message"]);
+    assert.deepEqual(summaryRequest.input[0].content[0], {
+      type: "input_text",
+      text: "[image omitted for compaction]",
+    });
+
+    const frames = (await response.text())
+      .split("\n\n")
+      .map((frame) => frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6))
+      .filter((data): data is string => Boolean(data) && data !== "[DONE]")
+      .map((data) => JSON.parse(data));
+    const done = frames.find((event) => event.type === "response.output_item.done");
+    const completed = frames.find((event) => event.type === "response.completed");
+    assert.equal(done.item.type, "compaction");
+    assert.equal(completed.response.output.length, 1);
+    assert.equal(completed.response.output[0].id, done.item.id);
+    assert.equal(
+      Buffer.from(done.item.encrypted_content.slice("ocx1:".length), "base64").toString("utf8"),
+      "保留这份交接摘要",
+    );
+
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/deepseek-v4", input: [done.item] }),
+    }));
+    const replay = JSON.parse(captured[1].options.body as string);
+    assert.equal(replay.input[0].type, "message");
+    assert.match(replay.input[0].content[0].text, /保留这份交接摘要/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cliproxy GPT models keep native v2 and v1 compaction untouched", async () => {
+  const originalFetch = globalThis.fetch;
+  const captured: { url: string; options: RequestInit }[] = [];
+  globalThis.fetch = (async (url, options) => {
+    captured.push({ url: String(url), options: options ?? {} });
+    return new Response("passthrough", { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const input = [{ type: "compaction_trigger" }];
+    const v2 = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/GPT-5.6-sol", stream: true, input }),
+    }));
+    await handler(new Request("http://127.0.0.1:8320/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/gpt-5.6-sol", input: [] }),
+    }));
+
+    assert.equal(await v2.text(), "passthrough");
+    assert.equal(captured[0].url, "https://cliproxy.example/v1/responses");
+    assert.deepEqual(JSON.parse(captured[0].options.body as string).input, input);
+    assert.equal(captured[1].url, "https://cliproxy.example/v1/responses/compact");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("non-GPT /responses/compact returns replacement history", async () => {
+  const originalFetch = globalThis.fetch;
+  const captured: { url: string; options: RequestInit }[] = [];
+  globalThis.fetch = (async (url, options) => {
+    captured.push({ url: String(url), options: options ?? {} });
+    return Response.json({
+      status: "completed",
+      output: [{
+        type: "message",
+        content: [{ type: "output_text", text: captured.length === 1 ? "v1 摘要" : "v1 新摘要" }],
+      }],
+    });
+  }) as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/claude-opus-4-6",
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "最近的问题" }] }],
+      }),
+    }));
+
+    assert.equal(captured[0].url, "https://cliproxy.example/v1/responses");
+    assert.equal(JSON.parse(captured[0].options.body as string).stream, false);
+    const output = (await response.json() as { output: Array<{ content: Array<{ text: string }> }> }).output;
+    assert.equal(output.length, 2);
+    assert.equal(output[0].content[0].text, "最近的问题");
+    assert.match(output[1].content[0].text, /v1 摘要/);
+
+    const second = await handler(new Request("http://127.0.0.1:8320/v1/responses/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/claude-opus-4-6",
+        input: [
+          ...output,
+          { type: "message", role: "user", content: [{ type: "input_text", text: "后续问题" }] },
+        ],
+      }),
+    }));
+    const secondOutput = (await second.json() as { output: Array<{ content: Array<{ text: string }> }> }).output;
+    assert.equal(secondOutput.length, 3);
+    assert.deepEqual(secondOutput.slice(0, 2).map((item) => item.content[0].text), ["最近的问题", "后续问题"]);
+    assert.match(secondOutput[2].content[0].text, /v1 新摘要/);
+    assert.doesNotMatch(secondOutput[2].content[0].text, /v1 摘要$/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("incomplete non-GPT compaction never emits a replacement item", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({
+    status: "incomplete",
+    output: [{ type: "message", content: [{ type: "output_text", text: "截断摘要" }] }],
+  })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/deepseek-v4",
+        input: [{ type: "compaction_trigger" }],
+      }),
+    }));
+    assert.equal(response.status, 502);
+    assert.doesNotMatch(await response.text(), /encrypted_content/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 
 test("native catalog preserves an existing configured catalog", () => {
   const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-source-test-"));

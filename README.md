@@ -91,6 +91,8 @@ codex-cliproxy status
 codex-cliproxy start
 codex-cliproxy stop
 codex-cliproxy restart
+codex-cliproxy log on
+codex-cliproxy log off
 codex-cliproxy uninstall
 ```
 
@@ -101,6 +103,11 @@ Keychain API key.
 `models` lists the CLIProxy models currently selected for the Codex picker.
 
 `models --sync` fetches the current CLIProxy model list, marks the current selection, asks you to choose again, and rebuilds the picker catalog from the Codex bundled catalog. Press Enter to keep the checked models. Fully quit and reopen Codex Desktop afterward.
+
+Request logs are disabled after installation. Use `codex-cliproxy log on` to
+write them to `gateway.log`; each request starts with a separator such as
+`--2026-08-13T12:34:56.789Z--`. Use `codex-cliproxy log off` to disable them
+again.
 
 Model metadata overrides are applied to case-insensitive upstream model IDs
 before `cliproxy/` is added. The `openai` group leaves names unprefixed; other
