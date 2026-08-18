@@ -3,3 +3,5 @@ dist/
 node_modules/
 *.tgz
 *.zip
+__pycache__/
+*.pyc
