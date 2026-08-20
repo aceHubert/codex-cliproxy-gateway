@@ -9,6 +9,7 @@
   "files": [
     "dist/index.js",
     "models.json",
+    "schemas/gateway-config.schema.json",
     "README.md",
     "LICENSE"
   ],

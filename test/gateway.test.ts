@@ -6,17 +6,28 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
 import type { ReadStream, WriteStream } from "node:tty";
-import { decideRoute, isLoopbackUrl, joinUpstreamUrl } from "../src/gateway.ts";
+import { decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "../src/gateway.ts";
+import {
+  GATEWAY_CONFIG_SCHEMA_URL,
+  GATEWAY_CONFIG_VERSION,
+  gatewayConfigWarnings,
+  mergeMissingConfig,
+} from "../src/config.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
+import { httpLogFile, websocketLogFile } from "../src/request-log.ts";
 import { resolvePaths } from "../src/paths.ts";
 import {
   fetchCliProxyCatalog,
   loadModelOverrides,
   mergeCatalog,
-  loadNativeCatalog,
+  resolveModelMergeJson,
   syncCatalog,
 } from "../src/catalog.ts";
-import { removeManagedRuntimeFiles } from "../src/cli.ts";
+import {
+  formatErrorLog,
+  removeManagedRuntimeFiles,
+  syncGatewayConfigFile,
+} from "../src/cli.ts";
 import {
   applyModelPickerKey,
   chooseModels,
@@ -24,6 +35,30 @@ import {
   parseModelSelection,
   selectedModelsFromCatalog,
 } from "../src/models.ts";
+
+test("error logs include a timestamp separator and omit blank lines", () => {
+  assert.equal(
+    formatErrorLog(new Error("first\n\n  \nsecond"), new Date("2026-08-18T02:30:00.000Z")),
+    "--2026-08-18T02:30:00.000Z--\nError: first\nsecond",
+  );
+});
+
+test("error logs keep the error class name and optional label and stack", () => {
+  const failure = new TypeError("null is not an object");
+  failure.stack = "TypeError: null is not an object\n    at readableStream (:1:20)";
+  assert.equal(
+    formatErrorLog(failure, new Date("2026-08-19T04:00:00.000Z"), { label: "uncaughtException", stack: true }),
+    [
+      "--2026-08-19T04:00:00.000Z--",
+      "uncaughtException: TypeError: null is not an object",
+      "    at readableStream (:1:20)",
+    ].join("\n"),
+  );
+  assert.equal(
+    formatErrorLog("plain failure", new Date("2026-08-19T04:00:00.000Z")),
+    "--2026-08-19T04:00:00.000Z--\nError: plain failure",
+  );
+});
 
 test("only cliproxy prefix is routed away from official", () => {
   assert.deepEqual(decideRoute("cliproxy/claude-opus-4-6"), {
@@ -71,10 +106,15 @@ test("TOML patch preserves comments, tables, and unrelated formatting", () => {
 
 test("paths keep Codex files separate from gateway runtime files", () => {
   const paths = resolvePaths({ HOME: "/Users/test" });
-  assert.equal(paths.catalogFile, "/Users/test/.codex/cliproxy-catalog.json");
+  assert.equal(paths.catalogFile, "/Users/test/.codex-cliproxy-gateway/cliproxy-catalog.json");
+  assert.equal(paths.modelMergeFile, "/Users/test/.codex-cliproxy-gateway/models.json");
+  assert.equal(paths.upstreamModelsCacheFile, "/Users/test/.codex-cliproxy-gateway/models-cache.json");
+  assert.equal(paths.modelsCacheFile, "/Users/test/.codex/models_cache.json");
+  assert.equal(paths.staticCatalogFile, "/Users/test/.codex/cliproxy-catalog.json");
   assert.equal(paths.gatewayConfig, "/Users/test/.codex-cliproxy-gateway/config.json");
   assert.equal(paths.stateFile, "/Users/test/.codex-cliproxy-gateway/state.json");
   assert.equal(paths.stdoutLog, "/Users/test/.codex-cliproxy-gateway/gateway.log");
+  assert.equal(paths.logDir, "/Users/test/.codex-cliproxy-gateway/logs");
 });
 
 test("TOML uninstall restores only managed keys after manual edits", () => {
@@ -84,6 +124,115 @@ test("TOML uninstall restores only managed keys after manual edits", () => {
     restoreRootTomlKeys(current, backup, ["openai_base_url", "model_catalog_json"]),
     'openai_base_url = "https://old.example/v1" # original\nmodel = "gpt-new"\n',
   );
+});
+
+test("gateway config sync only adds missing values", () => {
+  const current = {
+    host: "user-host",
+    removed_option: true,
+    nested: { userValue: 1 },
+  };
+  const { config, added } = mergeMissingConfig(current, {
+    host: "127.0.0.1",
+    port: 8320,
+    nested: { userValue: 0, newValue: 2 },
+  });
+  assert.deepEqual(config, {
+    host: "user-host",
+    port: 8320,
+    removed_option: true,
+    nested: { userValue: 1, newValue: 2 },
+  });
+  assert.deepEqual(added, ["port", "nested.newValue"]);
+  assert.deepEqual(current, {
+    host: "user-host",
+    removed_option: true,
+    nested: { userValue: 1 },
+  });
+});
+
+test("gateway JSON Schema warns without rejecting obsolete config", () => {
+  const warnings = gatewayConfigWarnings({
+    $schema: GATEWAY_CONFIG_SCHEMA_URL,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    host: "127.0.0.1",
+    port: "8320",
+    mountPath: "v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "not a URL",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: "/tmp/catalog.json",
+    logDir: "",
+    selectedModels: ["one", "one"],
+    websocket: "yes",
+    removed_option: true,
+  });
+  assert.deepEqual(warnings, [
+    "$.port should be integer",
+    "$.mountPath has an invalid format",
+    "$.officialBaseUrl should be a valid URI",
+    "$.selectedModels should not contain duplicates",
+    "$.logDir should not be empty",
+    "$.websocket should be boolean",
+  ]);
+});
+
+test("command preflight syncs package version and only adds config", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-config-sync-test-"));
+  const paths = resolvePaths({ HOME: home });
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    configVersion: "0.1.0",
+    host: "user-host",
+    port: 9000,
+    mountPath: "/custom",
+    prefix: "user/",
+    officialBaseUrl: "https://official.example/v1",
+    cliproxyBaseUrl: "https://proxy.example/v1",
+    catalogPath: "/user/catalog.json",
+    removed_option: "keep",
+  }));
+  try {
+    syncGatewayConfigFile(paths);
+    const config = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+    assert.equal(config.configVersion, GATEWAY_CONFIG_VERSION);
+    assert.equal(config.$schema, GATEWAY_CONFIG_SCHEMA_URL);
+    assert.equal(config.host, "user-host");
+    assert.equal(config.port, 9000);
+    assert.equal(config.catalogPath, "/user/catalog.json");
+    assert.equal(config.requestLogging, false);
+    assert.equal(config.logDir, paths.logDir);
+    assert.equal(config.websocket, false);
+    assert.equal(config.removed_option, "keep");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("command preflight migrates only the managed legacy catalog path", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-legacy-catalog-path-"));
+  const paths = resolvePaths({ HOME: home });
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.mkdirSync(paths.codexHome, { recursive: true });
+  fs.writeFileSync(paths.staticCatalogFile, "keep\n");
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    configVersion: GATEWAY_CONFIG_VERSION,
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.staticCatalogFile,
+  }));
+  try {
+    syncGatewayConfigFile(paths);
+    const config = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+    assert.equal(config.catalogPath, paths.catalogFile);
+    assert.equal(fs.readFileSync(paths.staticCatalogFile, "utf8"), "keep\n");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("catalog prefixes CLIProxy models and preserves their metadata", () => {
@@ -168,11 +317,58 @@ test("display-name [1m] has no implicit context override", () => {
   assert.equal(merged.models[0].context_window, 272000);
 });
 
+test("model merge JSON resolves GitHub repositories and direct HTTP files", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "model-merge-json-test-"));
+  const cacheFile = path.join(tempDir, "cache", "models.json");
+  const bundledFile = path.join(tempDir, "bundled.json");
+  const url = "https://github.com/example/models/";
+  const originalFetch = globalThis.fetch;
+  const requestedUrls: string[] = [];
+  let downloads = 0;
+  fs.writeFileSync(bundledFile, '{"openai":[]}\n');
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requestedUrls.push(String(input));
+    downloads += 1;
+    return new Response(`{"openai":[{"name":"gpt-${downloads}"}]}`);
+  }) as unknown as typeof fetch;
+  try {
+    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile), bundledFile);
+    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile, url), cacheFile);
+    assert.equal(downloads, 1);
+    assert.equal(requestedUrls[0], `${url}releases/latest/download/models.json`);
+    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile, url), cacheFile);
+    assert.equal(downloads, 1);
+    await resolveModelMergeJson(cacheFile, bundledFile, "http://downloads.example/models.json", true);
+    assert.equal(downloads, 2);
+    assert.equal(requestedUrls[1], "http://downloads.example/models.json");
+    assert.match(fs.readFileSync(cacheFile, "utf8"), /gpt-2/);
+    globalThis.fetch = (async () => new Response("{invalid")) as unknown as typeof fetch;
+    await assert.rejects(resolveModelMergeJson(cacheFile, bundledFile, url, true), /Invalid model overrides/);
+    assert.match(fs.readFileSync(cacheFile, "utf8"), /gpt-2/);
+    await assert.rejects(
+      resolveModelMergeJson(cacheFile, bundledFile, "https://example.com/downloads/", true),
+      /file name/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("runtime cleanup preserves user files", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-runtime-cleanup-test-"));
   const paths = resolvePaths({ HOME: home });
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
-  for (const file of [paths.gatewayConfig, paths.stateFile, paths.stdoutLog, paths.stderrLog]) {
+  for (const file of [
+    paths.gatewayConfig,
+    paths.stateFile,
+    paths.catalogFile,
+    path.join(paths.runtimeHome, "catalog-metadata.json"),
+    paths.modelMergeFile,
+    paths.upstreamModelsCacheFile,
+    paths.stdoutLog,
+    paths.stderrLog,
+  ]) {
     fs.writeFileSync(file, "test\n");
   }
   const userFile = path.join(paths.runtimeHome, "notes.txt");
@@ -181,7 +377,26 @@ test("runtime cleanup preserves user files", () => {
     removeManagedRuntimeFiles(paths);
     assert.equal(fs.existsSync(paths.gatewayConfig), false);
     assert.equal(fs.existsSync(paths.stateFile), false);
+    assert.equal(fs.existsSync(paths.catalogFile), false);
+    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "catalog-metadata.json")), false);
+    assert.equal(fs.existsSync(paths.modelMergeFile), false);
+    assert.equal(fs.existsSync(paths.upstreamModelsCacheFile), false);
     assert.equal(fs.existsSync(userFile), true);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("uninstall cleanup preserves gateway config", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-runtime-config-test-"));
+  const paths = resolvePaths({ HOME: home });
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, '{"custom":true}\n');
+  fs.writeFileSync(paths.stateFile, "test\n");
+  try {
+    removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true });
+    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), '{"custom":true}\n');
+    assert.equal(fs.existsSync(paths.stateFile), false);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -190,15 +405,13 @@ test("runtime cleanup preserves user files", () => {
 test("invalid model overrides leave the generated catalog unchanged", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-invalid-test-"));
   const catalogFile = path.join(tempDir, "catalog.json");
-  const nativeCatalogFile = path.join(tempDir, "native.json");
   const modelsConfigFile = path.join(tempDir, "models.json");
   fs.writeFileSync(catalogFile, "keep\n");
-  fs.writeFileSync(nativeCatalogFile, '{"models":[]}\n');
   fs.writeFileSync(modelsConfigFile, "{invalid\n");
   try {
     await assert.rejects(syncCatalog({
       catalogFile,
-      nativeCatalogFile,
+      nativeCatalog: { models: [] },
       modelsConfigFile,
       proxyModels: [],
       prefix: "cliproxy/",
@@ -215,6 +428,50 @@ test("invalid model overrides leave the generated catalog unchanged", async () =
 });
 
 import { createGatewayHandler } from "../src/gateway.ts";
+
+test("official Realtime routes are reserved with 426 before generic forwarding", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = (async () => {
+    fetchCalls += 1;
+    return new Response("unexpected");
+  }) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const requests = [
+      new Request("http://127.0.0.1:8320/v1/live"),
+      new Request("http://127.0.0.1:8320/v1/live/rtc_test", { headers: { upgrade: "websocket" } }),
+      new Request("http://127.0.0.1:8320/v1/realtime?model=gpt-live", { headers: { upgrade: "websocket" } }),
+      new Request("http://127.0.0.1:8320/v1/realtime/calls/rtc_test", { method: "POST", body: "call" }),
+    ];
+
+    for (const request of requests) {
+      const response = await handler(request);
+      assert.equal(response.status, 426);
+      assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "official-realtime-not-implemented");
+      assert.equal((await response.json() as { error: { code: string } }).error.code, "official_realtime_proxy_not_implemented");
+    }
+    assert.equal(fetchCalls, 0);
+
+    const passthrough = await handler(new Request("http://127.0.0.1:8320/v1/realtime/transcription_sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    }));
+    assert.equal(passthrough.status, 200);
+    assert.equal(fetchCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test("official route preserves OAuth and exact model", async () => {
   const originalFetch = globalThis.fetch;
@@ -330,12 +587,56 @@ test("zstd CLIProxy request is decoded, routed, and rewritten", async () => {
   }
 });
 
+/** 日志落盘改为异步（避免读流阻塞 SSE），测试需轮询等待文件出现。 */
+async function waitForLogFile(dir: string, pattern: RegExp, timeoutMs = 2000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = fs.readdirSync(dir).find((name) => pattern.test(name));
+    if (found) return found;
+    if (Date.now() > deadline) {
+      throw new Error(`no log matching ${pattern}; found: ${fs.readdirSync(dir).join(", ") || "(empty)"}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/** 按"新出现的文件"等待，避免用当天日期写死正则——跨天就会失配。 */
+async function waitForNewLogFile(
+  dir: string,
+  before: ReadonlySet<string>,
+  prefix: string,
+  timeoutMs = 2000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = fs.readdirSync(dir).find((name) => name.startsWith(prefix) && !before.has(name));
+    if (found) return found;
+    if (Date.now() > deadline) {
+      throw new Error(`no new log with prefix ${prefix}; found: ${fs.readdirSync(dir).join(", ") || "(empty)"}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+function logTestConfig(logDir: string, maxRequestLogs = 0) {
+  return {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+    cliproxyBaseUrl: "https://cliproxy.example/v1",
+    catalogPath: "/tmp/missing-catalog.json",
+    requestLogging: true,
+    logDir,
+    maxRequestLogs,
+  };
+}
+
 test("request logs start with an ISO request-time separator", async () => {
   const originalFetch = globalThis.fetch;
-  const originalLog = console.log;
-  const logs: string[] = [];
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-test-"));
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
-  console.log = (message?: unknown) => logs.push(String(message));
   try {
     const handler = createGatewayHandler({
       host: "127.0.0.1",
@@ -346,19 +647,505 @@ test("request logs start with an ISO request-time separator", async () => {
       cliproxyBaseUrl: "https://cliproxy.example/v1",
       catalogPath: "/tmp/missing-catalog.json",
       requestLogging: true,
+      logDir,
     }, "proxy-key");
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: {
+        authorization: "Bearer secret-token",
+        "chatgpt-account-id": "secret-account",
+        "content-type": "application/json",
+      },
       body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "test" }),
     }));
 
-    const [separator, header] = logs[0].split("\n");
-    assert.match(separator, /^--\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z--$/);
+    const logFile = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    const [separator, header] = fs.readFileSync(path.join(logDir, logFile), "utf8").split("\n");
+    assert.match(separator, /^--\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}--$/);
     assert.equal(header, "=== POST /v1/responses ===");
+    const log = fs.readFileSync(path.join(logDir, logFile), "utf8");
+    assert.doesNotMatch(log, /secret-token|secret-account/);
   } finally {
     globalThis.fetch = originalFetch;
-    console.log = originalLog;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("official and live traffic land in their own route log files", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-route-log-"));
+  globalThis.fetch = (async () => new Response("sdp-answer", {
+    status: 201,
+    headers: { location: "/v1/realtime/calls/rtc_test" },
+  })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key", "builtin");
+
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer official-token", "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "hi" }),
+    }));
+    await handler(new Request("http://127.0.0.1:8320/v1/live", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer live-token",
+        "chatgpt-account-id": "live-account",
+        "x-oai-attestation": "attestation-secret-value",
+        "content-type": "application/sdp",
+      },
+      body: "v=0\r\n",
+    }));
+
+    const officialLog = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    assert.match(fs.readFileSync(path.join(logDir, officialLog), "utf8"), /=== POST \/v1\/responses ===/);
+
+    const liveLog = await waitForLogFile(logDir, /^cliproxy-v1-live-http-\d{14}\.log$/);
+    const live = fs.readFileSync(path.join(logDir, liveLog), "utf8");
+    assert.match(live, /=== POST \/v1\/live ===/);
+    // 上游实际去向只有 realtime 层知道，wrapper 看不到，必须由 call-create 事件补记。
+    assert.match(live, /\[realtime\] call-create https:\/\/chatgpt\.com\/backend-api\/codex\/realtime\/calls/);
+    assert.match(live, /"status":201/);
+    // attestation 是凭据，必须遮蔽。
+    assert.doesNotMatch(live, /attestation-secret-value/);
+    assert.match(live, /x-oai-attestation: \*\*\*/);
+
+    assert.equal(fs.readdirSync(logDir).some((name) => name.startsWith("cliproxy-cliproxy-")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("catalog and health probes are excluded from request logs", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-skip-log-"));
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    await handler(new Request("http://127.0.0.1:8320/healthz"));
+    await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    assert.deepEqual(fs.existsSync(logDir) ? fs.readdirSync(logDir) : [], []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("failed requests are written to both the route log and the error digest", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-error-log-"));
+  globalThis.fetch = (async () => {
+    throw new Error("upstream exploded");
+  }) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "hi" }),
+    }));
+    assert.equal(response.status, 502);
+
+    const errorLog = await waitForLogFile(logDir, /^cliproxy-error-\d{14}\.log$/);
+    const digest = fs.readFileSync(path.join(logDir, errorLog), "utf8");
+    assert.match(digest, /!!! POST \/v1\/responses -> 502 !!!/);
+    assert.match(digest, /message: Gateway upstream request failed/);
+    assert.match(digest, /duration: \d+ms/);
+
+    // 同一条错误也保留在路由日志里，便于回溯完整请求上下文。
+    const routeLog = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    assert.match(fs.readFileSync(path.join(logDir, routeLog), "utf8"), /-> 502 !!!/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("logging does not buffer streaming responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-stream-log-"));
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  globalThis.fetch = (async () => new Response(new ReadableStream({
+    async start(controller) {
+      controller.enqueue(new TextEncoder().encode("data: first\n\n"));
+      await gate;
+      controller.enqueue(new TextEncoder().encode("data: done\n\n"));
+      controller.close();
+    },
+  }), { status: 200 })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const response = await Promise.race([
+      handler(new Request("http://127.0.0.1:8320/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", stream: true }),
+      })),
+      new Promise<never>((_, reject) => setTimeout(
+        () => reject(new Error("handler blocked until the response stream finished")),
+        1000,
+      )),
+    ]);
+    assert.equal(response.status, 200);
+    release();
+    assert.match(await response.text(), /data: done/);
+  } finally {
+    release();
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("maxRequestLogs keeps only the newest files per group", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-cap-"));
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  try {
+    for (const stamp of ["20260101000001", "20260101000002", "20260101000003", "20260101000004"]) {
+      fs.writeFileSync(path.join(logDir, `cliproxy-v1-responses-http-${stamp}.log`), "old\n");
+    }
+    // 其它分组独立计数，不应被挤掉。
+    fs.writeFileSync(path.join(logDir, "cliproxy-v1-live-http-20260101000001.log"), "keep\n");
+    const seeded = new Set(fs.readdirSync(logDir));
+
+    const handler = createGatewayHandler(logTestConfig(logDir, 2), "proxy-key");
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "hi" }),
+    }));
+    const current = await waitForNewLogFile(logDir, seeded, "cliproxy-v1-responses-http-");
+
+    const remaining = fs.readdirSync(logDir).filter((name) => name.startsWith("cliproxy-v1-responses-http-")).sort();
+    assert.deepEqual(remaining, ["cliproxy-v1-responses-http-20260101000004.log", current].sort());
+    assert.equal(fs.existsSync(path.join(logDir, "cliproxy-v1-live-http-20260101000001.log")), true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("protocol negotiation 426 is logged but kept out of the error digest", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-426-log-"));
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    // Codex Desktop 每次会话都会先试探 Responses over WebSocket，被拒后降级到 HTTPS/SSE。
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: {
+        upgrade: "websocket",
+        connection: "Upgrade",
+        "openai-beta": "responses_websockets=2026-02-06",
+      },
+    }));
+    assert.equal(response.status, 426);
+
+    const routeLog = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    // 请求本身仍要留痕，只是不该被当成故障。
+    assert.match(fs.readFileSync(path.join(logDir, routeLog), "utf8"), /response status: 426/);
+    assert.equal(fs.readdirSync(logDir).some((name) => name.startsWith("cliproxy-error-")), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("routing hint decides the upstream and lets official traffic skip body decoding", async () => {
+  const originalFetch = globalThis.fetch;
+  const captured: string[] = [];
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    captured.push(String(url instanceof Request ? url.url : url));
+    return new Response("ok", { status: 200 });
+  }) as unknown as typeof fetch;
+  const config = {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/v1",
+    cliproxyBaseUrl: "https://proxy.example/v1",
+    catalogPath: "/tmp/missing-catalog.json",
+  };
+  try {
+    const handler = createGatewayHandler(config, "proxy-key");
+
+    // hint 指向 cliproxy：即便 payload 无前缀也要走 CLIProxy，并把 model 改写成去前缀的名字。
+    let sent: RequestInit | undefined;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      captured.push(String(url instanceof Request ? url.url : url));
+      sent = init;
+      return new Response("ok", { status: 200 });
+    }) as unknown as typeof fetch;
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6" },
+      body: JSON.stringify({ model: "claude-opus-4-6", input: "hi" }),
+    }));
+    assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
+    assert.equal(JSON.parse(String(sent?.body)).model, "claude-opus-4-6");
+
+    // hint 指向官方：body 是无法解压的垃圾字节，仍应原样透传而不是 400。
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": "gzip",
+        "x-codex-routing-hint": "model=gpt-5.6-luna",
+      },
+      body: new Uint8Array([1, 2, 3, 4, 5]),
+    }));
+    assert.equal(response.status, 200);
+    assert.equal(captured.at(-1), "https://official.example/v1/responses");
+
+    // 无 hint 时回落到 payload。
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "hi" }),
+    }));
+    assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
+
+    // 两者皆无时归官方。
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: "hi" }),
+    }));
+    assert.equal(captured.at(-1), "https://official.example/v1/responses");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("responses WebSocket target routes by hint and swaps auth for cliproxy", () => {
+  const config = {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+    cliproxyBaseUrl: "https://cliproxy.example/v1",
+    catalogPath: "/tmp/missing-catalog.json",
+  };
+  const probeHeaders = {
+    upgrade: "websocket",
+    authorization: "Bearer original-oauth",
+    "chatgpt-account-id": "acct-1",
+    "openai-beta": "responses_websockets=2026-02-06",
+    "sec-websocket-key": "handshake-material",
+    "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6",
+  };
+
+  // cliproxy 默认不放行：需显式开启 websocket 才转发到 CLIProxy。
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
+    config,
+    "proxy-key",
+  ), null, "cliproxy WebSocket must stay off by default");
+
+  // 开启后：走 CLIProxy，剥官方 OAuth 换 CLIProxy key，握手头不转发。
+  const cliproxy = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
+    { ...config, websocket: true },
+    "proxy-key",
+  );
+  assert.ok(cliproxy);
+  assert.equal(cliproxy.url, "wss://cliproxy.example/v1/responses");
+  assert.equal(cliproxy.headers.authorization, "Bearer proxy-key");
+  assert.equal(cliproxy.headers["chatgpt-account-id"], undefined);
+  assert.equal(cliproxy.headers["openai-beta"], "responses_websockets=2026-02-06");
+  assert.equal(cliproxy.headers["sec-websocket-key"], undefined);
+
+  // 官方 hint：OAuth 原样透传。
+  const official = responsesWebSocketTarget(new Request("http://127.0.0.1:8320/v1/responses", {
+    headers: { ...probeHeaders, "x-codex-routing-hint": "model=gpt-5.6-luna" },
+  }), config);
+  assert.ok(official);
+  assert.equal(official.url, "wss://chatgpt.com/backend-api/codex/responses");
+  assert.equal(official.headers.authorization, "Bearer original-oauth");
+  assert.equal(official.headers["chatgpt-account-id"], "acct-1");
+
+  // 无 hint 回落官方（与 HTTP 路由一致）。
+  const { ["x-codex-routing-hint"]: _hint, ...noHint } = probeHeaders;
+  const fallback = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: noHint }),
+    config,
+  );
+  assert.equal(fallback?.url, "wss://chatgpt.com/backend-api/codex/responses");
+
+  // 官方模型不受 websocket 开关控制，始终放行。
+  assert.ok(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "x-codex-routing-hint": "model=gpt-5.6-luna" },
+    }),
+    { ...config, websocket: false },
+  ), "official WebSocket must stay on regardless of the switch");
+
+  // cliproxy 关闭、realtime 保留路径、非 upgrade 请求：一律不转发，维持 426 行为。
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
+    { ...config, websocket: false },
+    "proxy-key",
+  ), null);
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/live/rtc_x", { headers: probeHeaders }),
+    config,
+  ), null);
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { authorization: "Bearer original-oauth" },
+    }),
+    config,
+  ), null);
+});
+
+test("log groups come from the request path and stay filesystem-safe", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-group-log-"));
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    // 同一路径下的两种上游必须落进同一个文件——按上游命名会因 fallback 而误导。
+    for (const model of ["gpt-5.6-luna", "cliproxy/claude-opus-4-6"]) {
+      await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model, input: "hi" }),
+      }));
+    }
+    const grouped = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    const text = fs.readFileSync(path.join(logDir, grouped), "utf8");
+    assert.equal(text.match(/=== POST \/v1\/responses ===/g)?.length, 2);
+    // 本地时间，不带时区后缀。
+    assert.match(text.split("\n")[0], /^--\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}--$/);
+
+    // 路径里的危险字符不得进入文件名。
+    await handler(new Request("http://127.0.0.1:8320/v1/..%2Fetc/passwd", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-luna" }),
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    for (const name of fs.readdirSync(logDir)) {
+      assert.doesNotMatch(name, /[/\\]|\.\./, `unsafe log file name: ${name}`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("responses WebSocket forwards every end-to-end header, dropping only handshake plumbing", () => {
+  const config = {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+    cliproxyBaseUrl: "https://proxy.example/v1",
+    catalogPath: "/tmp/missing-catalog.json",
+  };
+  // 取自真实 Codex Desktop 试探请求：白名单方案会静默丢掉后面这批 x-codex-* 元数据头。
+  const target = responsesWebSocketTarget(new Request("http://127.0.0.1:8320/v1/responses", {
+    headers: {
+      upgrade: "websocket",
+      connection: "Upgrade",
+      host: "127.0.0.1:8320",
+      "sec-websocket-key": "client-generated",
+      "sec-websocket-version": "13",
+      "sec-websocket-extensions": "permessage-deflate",
+      authorization: "Bearer official-oauth",
+      "chatgpt-account-id": "account",
+      "openai-beta": "responses_websockets=2026-02-06",
+      originator: "Codex Desktop",
+      version: "0.148.0-alpha.15",
+      "x-codex-routing-hint": "model=gpt-5.6-luna",
+      "x-codex-turn-metadata": '{"turn_id":"t1"}',
+      "x-codex-beta-features": "remote_compaction_v2",
+      "x-codex-window-id": "w1:0",
+      "x-client-request-id": "req-1",
+      "x-openai-internal-codex-responses-lite": "true",
+      "x-some-header-openai-adds-next-year": "future",
+    },
+  }), config)!;
+
+  assert.ok(target, "expected the responses WebSocket to be routed");
+  // 握手与逐跳头必须剥掉，否则上游握手会失败。
+  for (const dropped of [
+    "upgrade", "connection", "host",
+    "sec-websocket-key", "sec-websocket-version", "sec-websocket-extensions",
+  ]) {
+    assert.equal(target.headers[dropped], undefined, `${dropped} must not be forwarded`);
+  }
+  // 其余一律透传，包括今天还不认识的头。
+  for (const [name, value] of Object.entries({
+    authorization: "Bearer official-oauth",
+    "chatgpt-account-id": "account",
+    "openai-beta": "responses_websockets=2026-02-06",
+    version: "0.148.0-alpha.15",
+    "x-codex-turn-metadata": '{"turn_id":"t1"}',
+    "x-codex-beta-features": "remote_compaction_v2",
+    "x-codex-window-id": "w1:0",
+    "x-client-request-id": "req-1",
+    "x-openai-internal-codex-responses-lite": "true",
+    "x-some-header-openai-adds-next-year": "future",
+  })) {
+    assert.equal(target.headers[name], value, `${name} must be forwarded verbatim`);
+  }
+});
+
+test("log file names carry the transport, and one WebSocket session maps to one file", () => {
+  // HTTP 保持按秒滚动。
+  const a = httpLogFile("v1-responses", "20260820131423");
+  assert.equal(a.name, "cliproxy-v1-responses-http-20260820131423.log");
+  assert.equal(a.prefix, "cliproxy-v1-responses-http-");
+
+  // 同一 session 的多条连接（含 subagent 派生的 thread）必须落到同一个文件，
+  // 否则每秒一个文件会把一次会话拆成几十个碎片。
+  const session = "01a01960-3a52-7311-9258-f9144ad58b65";
+  const first = websocketLogFile("v1-responses", session);
+  const second = websocketLogFile("v1-responses", session);
+  assert.equal(first.name, `cliproxy-v1-responses-ws-${session}.log`);
+  assert.equal(second.name, first.name, "same session must reuse one file");
+
+  // 传输段不同 ⇒ 裁剪分组独立，HTTP 日志不会把 WebSocket 会话挤掉。
+  assert.notEqual(first.prefix, a.prefix);
+
+  // session-id 缺失时回落到建连时刻，仍是单文件。
+  assert.match(websocketLogFile("v1-live").name, /^cliproxy-v1-live-ws-\d{14}\.log$/);
+
+  // 不可信输入不得逃逸出日志目录。
+  const unsafe = websocketLogFile("v1-live", "../../etc/passwd");
+  assert.doesNotMatch(unsafe.name, /[/\\]|\.\./);
+});
+
+test("request logs keep bodies intact for post-mortem analysis", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-nolimit-log-"));
+  // 真实 Codex 请求体实测约 108KB；此前 50KB 截断会把 instructions 和 input 切掉。
+  const marker = "TAIL-MARKER-MUST-SURVIVE";
+  const bigInput = "x".repeat(120_000);
+  const bigReply = `${"y".repeat(120_000)}${marker}`;
+  globalThis.fetch = (async () => new Response(bigReply, { status: 200 })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: `${bigInput}${marker}` }),
+    }));
+
+    const file = await waitForLogFile(logDir, /^cliproxy-v1-responses-http-\d{14}\.log$/);
+    const log = fs.readFileSync(path.join(logDir, file), "utf8");
+    assert.doesNotMatch(log, /\[truncated \d+ chars\]/, "bodies must not be truncated");
+    assert.equal(log.match(new RegExp(marker, "g"))?.length, 2, "both request and response tails must survive");
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
   }
 });
 
@@ -574,45 +1361,33 @@ test("incomplete non-GPT compaction never emits a replacement item", async () =>
 });
 
 
-test("native catalog preserves an existing configured catalog", () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-source-test-"));
-  const catalogFile = path.join(codexHome, "custom-catalog.json");
-  fs.writeFileSync(catalogFile, JSON.stringify({
-    models: [{ slug: "gpt-5.4", display_name: "GPT-5.4" }],
-  }));
-  try {
-    assert.equal(loadNativeCatalog(catalogFile).models[0]?.slug, "gpt-5.4");
-  } finally {
-    fs.rmSync(codexHome, { recursive: true, force: true });
-  }
-});
-
-test("native catalog falls back to the Codex bundled catalog command", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bundled-model-test-"));
-  const fakeCodex = path.join(tempDir, "codex");
-  fs.writeFileSync(fakeCodex, '#!/bin/sh\nprintf \'%s\\n\' \'{"models":[{"slug":"gpt-bundled"}]}\'\n');
-  fs.chmodSync(fakeCodex, 0o755);
-  try {
-    assert.equal(loadNativeCatalog(path.join(tempDir, "missing.json"), fakeCodex).models[0]?.slug, "gpt-bundled");
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("unauthenticated local CLIProxy catalog is fetched once without an auth header", async () => {
+test("CLIProxy catalog uses the supplied client version", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = (async (url, options) => {
     calls += 1;
     const value = new URL(String(url));
-    assert.equal(value.searchParams.get("client_version"), "codex-cliproxy");
+    assert.equal(value.searchParams.get("client_version"), "2.0.0");
     assert.equal(new Headers(options?.headers).has("authorization"), false);
     return Response.json({ models: [{ slug: "claude-opus", display_name: "Claude Opus" }] });
   }) as typeof fetch;
   try {
-    const catalog = await fetchCliProxyCatalog("http://127.0.0.1:8317/v1", "");
+    const catalog = await fetchCliProxyCatalog("http://127.0.0.1:8317/v1", "", "2.0.0");
     assert.equal(catalog.models[0]?.display_name, "Claude Opus");
     assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("CLIProxy catalog falls back to client_version 0.0.0", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url) => {
+    assert.equal(new URL(String(url)).searchParams.get("client_version"), "0.0.0");
+    return Response.json({ models: [{ slug: "fallback-model" }] });
+  }) as typeof fetch;
+  try {
+    await fetchCliProxyCatalog("http://127.0.0.1:8317/v1", "");
   } finally {
     globalThis.fetch = originalFetch;
   }

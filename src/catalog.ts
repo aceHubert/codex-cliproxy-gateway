@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { execFileSync } from "node:child_process";
 import { atomicWrite } from "./toml.ts";
 import type { ModelCatalog, ModelEntry } from "./types.ts";
 
@@ -57,36 +56,84 @@ export function loadModelOverrides(file: string): ModelOverrideRule[] {
   return rules;
 }
 
-function normalizeCatalog(value: unknown): ModelCatalog {
+export async function resolveModelMergeJson(
+  cacheFile: string,
+  bundledFile: string,
+  url?: string,
+  refresh = false,
+): Promise<string> {
+  if (url && (refresh || !fs.existsSync(cacheFile))) {
+    let source: URL;
+    try {
+      source = new URL(url);
+    } catch {
+      throw new Error(`Invalid model_merge_json URL: ${url}`);
+    }
+    const parts = source.pathname.split("/").filter(Boolean);
+    const githubRepository = ["github.com", "www.github.com"].includes(source.hostname)
+      && parts.length === 2;
+    if (!["http:", "https:"].includes(source.protocol)
+      || source.username
+      || source.password
+      || parts.length === 0
+      || (!githubRepository && source.pathname.endsWith("/"))) {
+      throw new Error("model_merge_json must be a GitHub repository or an HTTP(S) URL with a file name");
+    }
+    if (githubRepository) {
+      source.hostname = "github.com";
+      source.pathname = `/${parts[0]}/${parts[1].replace(/\.git$/, "")}/releases/latest/download/models.json`;
+      source.search = "";
+      source.hash = "";
+    }
+
+    const response = await fetch(source, { redirect: "follow" });
+    if (!response.ok) throw new Error(`model_merge_json download returned HTTP ${response.status}`);
+    const contents = await response.text();
+    if (Buffer.byteLength(contents) > 16 * 1024 * 1024) {
+      throw new Error("model_merge_json download exceeds 16 MiB");
+    }
+    const stagingFile = `${cacheFile}.download`;
+    try {
+      atomicWrite(stagingFile, contents.endsWith("\n") ? contents : `${contents}\n`);
+      loadModelOverrides(stagingFile);
+      fs.renameSync(stagingFile, cacheFile);
+    } finally {
+      fs.rmSync(stagingFile, { force: true });
+    }
+  }
+  return fs.existsSync(cacheFile) ? cacheFile : bundledFile;
+}
+
+export function normalizeCatalog(value: unknown): ModelCatalog {
   if (Array.isArray(value)) return { models: value };
   if (value && typeof value === "object" && "models" in value && Array.isArray(value.models)) {
     return { models: value.models };
   }
-  throw new Error("Native Codex model catalog does not contain a models array");
+  throw new Error("Model catalog does not contain a models array");
 }
 
-export function loadNativeCatalog(catalogFile?: string, codexCommand = "codex"): ModelCatalog {
-  if (catalogFile && fs.existsSync(catalogFile)) {
-    return normalizeCatalog(JSON.parse(fs.readFileSync(catalogFile, "utf8")));
+export function invalidateModelsCache(file: string): void {
+  let current: Record<string, unknown> = { models: [] };
+  if (fs.existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
+    } catch {}
   }
-
-  try {
-    const output = execFileSync(codexCommand, ["debug", "models", "--bundled"], {
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return normalizeCatalog(JSON.parse(output));
-  } catch (error) {
-    throw new Error(
-      `Unable to load the bundled Codex model catalog: ${error instanceof Error ? error.message : String(error)}. Ensure the codex CLI is installed and supports "codex debug models --bundled".`,
-    );
-  }
+  atomicWrite(file, `${JSON.stringify({
+    ...current,
+    fetched_at: "2000-01-01T00:00:00Z",
+    client_version: "0.0.0",
+  }, null, 2)}\n`);
 }
 
-export async function fetchCliProxyCatalog(baseUrl: string, apiKey: string): Promise<ModelCatalog> {
+export async function fetchCliProxyCatalog(
+  baseUrl: string,
+  apiKey: string,
+  clientVersion = "0.0.0",
+): Promise<ModelCatalog> {
   const url = new URL(`${baseUrl.replace(/\/+$/, "")}/models`);
-  url.searchParams.set("client_version", "codex-cliproxy");
+  url.searchParams.set("client_version", clientVersion || "0.0.0");
   const response = await fetch(url, apiKey
     ? { headers: { authorization: `Bearer ${apiKey}` } }
     : undefined);
@@ -148,19 +195,24 @@ export function mergeCatalog(
 
 interface SyncCatalogOptions {
   catalogFile: string;
-  nativeCatalogFile?: string;
+  nativeCatalog: ModelCatalog;
   modelsConfigFile: string;
   proxyModels: ModelEntry[];
   prefix: string;
 }
 
-export async function syncCatalog({ catalogFile, nativeCatalogFile, modelsConfigFile, proxyModels, prefix }: SyncCatalogOptions) {
+export async function syncCatalog({
+  catalogFile,
+  nativeCatalog,
+  modelsConfigFile,
+  proxyModels,
+  prefix,
+}: SyncCatalogOptions) {
   const overrides = loadModelOverrides(modelsConfigFile);
-  const native = loadNativeCatalog(nativeCatalogFile);
-  const merged = mergeCatalog(native, { models: proxyModels }, prefix, overrides);
+  const merged = mergeCatalog(nativeCatalog, { models: proxyModels }, prefix, overrides);
   atomicWrite(catalogFile, `${JSON.stringify(merged, null, 2)}\n`);
   return {
-    nativeCount: native.models.length,
+    nativeCount: nativeCatalog.models.length,
     proxyCount: proxyModels.length,
     catalogFile,
   };

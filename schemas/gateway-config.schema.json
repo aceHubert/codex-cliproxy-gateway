@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/aceHubert/codex-cliproxy/main/schemas/gateway-config.schema.json",
+  "title": "codex-cliproxy gateway config",
+  "type": "object",
+  "required": [
+    "host",
+    "port",
+    "mountPath",
+    "prefix",
+    "officialBaseUrl",
+    "cliproxyBaseUrl",
+    "catalogPath",
+    "configVersion"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri"
+    },
+    "configVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "host": {
+      "type": "string",
+      "minLength": 1
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "mountPath": {
+      "type": "string",
+      "pattern": "^/"
+    },
+    "prefix": {
+      "type": "string"
+    },
+    "officialBaseUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "cliproxyBaseUrl": {
+      "type": "string",
+      "format": "uri"
+    },
+    "catalogPath": {
+      "type": "string",
+      "minLength": 1
+    },
+    "model_merge_json": {
+      "type": "string",
+      "format": "uri"
+    },
+    "selectedModels": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "requestLogging": {
+      "type": "boolean"
+    },
+    "logDir": {
+      "type": "string",
+      "minLength": 1
+    },
+    "maxRequestLogs": {
+      "description": "每个按路径分组的日志各自保留的最大文件数；0 表示不限制。",
+      "type": "integer",
+      "minimum": 0
+    },
+    "websocket": {
+      "description": "是否把 cliproxy/* 的 Responses over WebSocket 转发到 CLIProxy（默认 false，回 426 令客户端降级 HTTPS/SSE）。官方模型不受此开关控制，始终转发。",
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": true
+}

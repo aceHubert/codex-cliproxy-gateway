@@ -9,6 +9,7 @@ interface LaunchAgentOptions {
   bunPath: string;
   cliPath: string;
   configPath: string;
+  codexHome: string;
   stdoutLog: string;
   stderrLog: string;
   plistPath: string;
@@ -27,7 +28,7 @@ function plistArray(values: string[]): string {
   return `<array>\n${values.map((value) => `      <string>${xmlEscape(value)}</string>`).join("\n")}\n    </array>`;
 }
 
-export function renderLaunchAgent({ bunPath, cliPath, configPath, stdoutLog, stderrLog }: Omit<LaunchAgentOptions, "plistPath">): string {
+export function renderLaunchAgent({ bunPath, cliPath, configPath, codexHome, stdoutLog, stderrLog }: Omit<LaunchAgentOptions, "plistPath">): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -36,6 +37,11 @@ export function renderLaunchAgent({ bunPath, cliPath, configPath, stdoutLog, std
   <string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   ${plistArray([bunPath, cliPath, "serve", "--config", configPath])}
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>CODEX_HOME</key>
+    <string>${xmlEscape(codexHome)}</string>
+  </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>

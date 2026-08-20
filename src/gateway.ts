@@ -1,6 +1,30 @@
 import fs from "node:fs";
+import path from "node:path";
 import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
 import { readApiKey } from "./keychain.ts";
+import {
+  dialUpstreamWebSocket,
+  forwardedHeaders,
+  isRealtimeCallRequest,
+  proxyRealtimeCall,
+  realtimeAccessError,
+  realtimeWebSocketHandler,
+  realtimeWebSocketTarget,
+  websocketUrl,
+} from "./realtime.ts";
+import type { RealtimeProviderMode, RealtimeSocketData } from "./realtime.ts";
+import { normalizeCatalog } from "./catalog.ts";
+import {
+  logExchange,
+  logGatewayError,
+  logGroupFromPath,
+  logRealtimeEvent,
+  websocketLogFile,
+  localTime,
+  maskedHeaders,
+} from "./request-log.ts";
+import type { RequestLogSink } from "./request-log.ts";
+import { atomicWrite } from "./toml.ts";
 import type { GatewayConfig, ModelCatalog } from "./types.ts";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -27,7 +51,6 @@ Be concise, structured, and focused on helping the next LLM seamlessly continue 
 const SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work.\nHere is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
 const OPAQUE_COMPACTION_NOTE = "[earlier conversation was compacted; the summary is stored in a format this model cannot read]";
 const COMPACT_V1_RETAINED_CHAR_BUDGET = 80_000;
-const LOG_MAX_BODY = 50_000;
 
 type Route =
   | { kind: "cliproxy"; upstreamModel: string }
@@ -221,59 +244,30 @@ export function isLoopbackUrl(value: string): boolean {
   return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }
 
-function truncateBody(text: string, max = LOG_MAX_BODY): string {
-  return text.length <= max ? text : `${text.slice(0, max)}\n...[truncated ${text.length - max} chars]`;
+/** 未开启 requestLogging 时返回 undefined，日志函数据此整体短路。 */
+function resolveLogSink(config: GatewayConfig): RequestLogSink | undefined {
+  if (config.requestLogging !== true) return undefined;
+  return {
+    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
+  };
 }
 
-const SENSITIVE_HEADERS = new Set([
-  "authorization",
-  "x-api-key",
-  "x-goog-api-key",
-  "cookie",
-  "set-cookie",
-]);
-
-function headerLines(headers: Headers): string[] {
-  const lines: string[] = [];
-  headers.forEach((value, key) => lines.push(`  ${key}: ${SENSITIVE_HEADERS.has(key.toLowerCase()) ? "***" : value}`));
-  return lines;
-}
-
-async function logExchange(
-  requestTime: string,
-  method: string,
-  url: string,
-  reqHeaders: Headers,
-  reqBody: unknown,
-  status: number,
-  resHeaders: Headers,
-  resBody: string,
-): Promise<void> {
+/** 错误响应体形态不统一：{error:{message}}、{error:"..."}、{detail:"..."} 或纯文本都出现过。 */
+function errorMessageFromBody(body: string): string {
   try {
-    const lines = [
-      `--${requestTime}--`,
-      `=== ${method} ${url} ===`,
-      ``,
-      `--- request headers ---`,
-      ...headerLines(reqHeaders),
-      ``,
-      `--- request payload ---`,
-      `  ${truncateBody(typeof reqBody === "string" ? reqBody : JSON.stringify(reqBody ?? null))}`,
-      ``,
-      ``,
-      `--- response status: ${status} ---`,
-      `--- response headers ---`,
-      ...headerLines(resHeaders),
-      ``,
-      `--- response body ---`,
-      `  ${truncateBody(resBody)}`,
-      ``,
-      ``,
-    ];
-    console.log(lines.join("\n"));
+    const parsed: unknown = JSON.parse(body);
+    if (isRecord(parsed)) {
+      const error = parsed.error;
+      if (typeof error === "string") return error;
+      if (isRecord(error) && typeof error.message === "string") return error.message;
+      if (typeof parsed.detail === "string") return parsed.detail;
+      if (typeof parsed.message === "string") return parsed.message;
+    }
   } catch {
-    // Logging must never break the request flow.
+    // 非 JSON 响应体直接按原文记录。
   }
+  return body.trim() || "(empty response body)";
 }
 
 export function joinUpstreamUrl(baseUrl: string, incomingUrl: string, mountPath = "/v1"): string {
@@ -314,16 +308,89 @@ function copyResponseHeaders(response: Response): Headers {
   return headers;
 }
 
-async function readJsonBody(request: Request): Promise<{
-  bytes: ArrayBuffer | undefined;
-  json: Record<string, unknown> | undefined;
-}> {
-  if (request.method === "GET" || request.method === "HEAD") {
-    return { bytes: undefined, json: undefined };
+function isReservedOfficialRealtimePath(pathname: string, mountPath: string): boolean {  const livePath = `${mountPath}/live`;
+  const realtimePath = `${mountPath}/realtime`;
+  const realtimeCallsPath = `${realtimePath}/calls`;
+  return pathname === livePath
+    || pathname.startsWith(`${livePath}/`)
+    || pathname === realtimePath
+    || pathname === realtimeCallsPath
+    || pathname.startsWith(`${realtimeCallsPath}/`);
+}
+
+function officialRealtimeNotImplementedResponse(): Response {
+  return Response.json({
+    error: {
+      type: "unsupported_transport_error",
+      code: "official_realtime_proxy_not_implemented",
+      message: "Official Realtime /live proxying is not implemented yet.",
+    },
+  }, {
+    status: 426,
+    headers: { "x-codex-cliproxy-gateway": "official-realtime-not-implemented" },
+  });
+}
+
+/** 426 语义是"协商失败，请改用 HTTPS/SSE"——客户端会自动降级重试，不计入错误摘要。 */
+function websocketNotSupportedResponse(marker = "websocket-not-supported"): Response {
+  return new Response("WebSocket transport is not supported; retry with HTTPS/SSE.", {
+    status: 426,
+    headers: {
+      connection: "close",
+      "x-codex-cliproxy-gateway": marker,
+    },
+  });
+}
+
+/** Codex 在 x-codex-routing-hint 里给出完整模型名（含 cliproxy/ 前缀），GET 请求也带。 */
+function modelFromRoutingHint(request: Request): string | undefined {
+  return request.headers.get("x-codex-routing-hint")
+    ?.match(/(?:^|[;,\s])model=([^;,\s]+)/)?.[1] || undefined;
+}
+
+/**
+ * Responses over WebSocket 的转发目标：Codex 试探（GET + upgrade）带 x-codex-routing-hint，
+ * 据此选上游；realtime 保留路径与关闭开关时返回 null（维持原有 426 行为）。
+ */
+export function responsesWebSocketTarget(
+  request: Request,
+  config: GatewayConfig,
+  apiKey?: string,
+): { url: string; headers: Record<string, string>; routeKind: "cliproxy" | "official" } | null {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return null;
+  const mountPath = config.mountPath || "/v1";
+  if (isReservedOfficialRealtimePath(new URL(request.url).pathname, mountPath)) return null;
+  const prefix = config.prefix || "cliproxy/";
+  const route = decideRoute(modelFromRoutingHint(request), prefix);
+  // 官方模型无条件放行；CLIProxy 侧另有前缀剥离与拨号稳定性问题，默认不放行，由 websocket 显式开启。
+  if (route.kind === "cliproxy" && config.websocket !== true) return null;
+  const baseUrl = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
+  const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
+  const headers = forwardedHeaders(request.headers, false);
+  if (route.kind === "cliproxy") {
+    // 与 HTTP 路径的 copyRequestHeaders 对齐：剥官方 OAuth，注入 CLIProxy key。
+    delete headers.authorization;
+    delete headers["chatgpt-account-id"];
+    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
   }
-  const bytes = await request.arrayBuffer();
-  if (bytes.byteLength === 0) return { bytes, json: undefined };
-  const encoding = request.headers.get("content-encoding")?.toLowerCase().trim();
+  return { url, headers, routeKind: route.kind };
+}
+
+async function readBodyBytes(request: Request): Promise<ArrayBuffer | undefined> {
+  if (request.method === "GET" || request.method === "HEAD") return undefined;
+  return request.arrayBuffer();
+}
+
+/**
+ * 解压并解析请求体。仅在确实需要 payload 时调用——拿得到 routing hint 且路由是 official 时，
+ * 请求原样透传，没必要为了判路由而解压几十 KB，也就不会因解码失败误拒一个本可透传的请求。
+ */
+function decodeJsonBody(
+  bytes: ArrayBuffer | undefined,
+  headers: Headers,
+): Record<string, unknown> | undefined {
+  if (!bytes || bytes.byteLength === 0) return undefined;
+  const encoding = headers.get("content-encoding")?.toLowerCase().trim();
   const compressed = Buffer.from(bytes);
   const decoded = !encoding || encoding === "identity"
     ? compressed
@@ -339,33 +406,94 @@ async function readJsonBody(request: Request): Promise<{
   const text = new TextDecoder().decode(decoded);
   try {
     const value: unknown = JSON.parse(text);
-    return {
-      bytes,
-      json: value && typeof value === "object" && !Array.isArray(value)
-        ? value as Record<string, unknown>
-        : undefined,
-    };
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
   } catch {
-    if (request.headers.get("content-type")?.includes("application/json")) {
+    if (headers.get("content-type")?.includes("application/json")) {
       throw new Error("Invalid JSON request body");
     }
-    return { bytes, json: undefined };
+    return undefined;
   }
 }
 
-async function catalogModelsResponse(config: GatewayConfig): Promise<Response> {
+function validCatalog(value: unknown, requireNonEmpty = true): ModelCatalog {
+  const catalog = normalizeCatalog(value);
+  if ((requireNonEmpty && catalog.models.length === 0)
+    || !catalog.models.every((model) => model && typeof model.slug === "string" && model.slug)) {
+    throw new Error(`catalog does not contain a valid${requireNonEmpty ? " non-empty" : ""} models array`);
+  }
+  return catalog;
+}
+
+function readCatalog(file: string, requireNonEmpty = true): ModelCatalog {
+  return validCatalog(JSON.parse(fs.readFileSync(file, "utf8")), requireNonEmpty);
+}
+
+function mergeDynamicCatalog(native: ModelCatalog, config: GatewayConfig): ModelCatalog {
+  let proxyModels: ModelCatalog["models"] = [];
+  if (fs.existsSync(config.catalogPath)) {
+    proxyModels = readCatalog(config.catalogPath, false).models.filter((model) => model.slug.startsWith(config.prefix));
+  }
+  const nativeModels = native.models.filter((model) => !model.slug.startsWith(config.prefix));
+  const highestPriority = Math.max(0, ...nativeModels.map((model) => Number(model.priority) || 0));
+  return { models: [
+    ...nativeModels,
+    ...proxyModels.map((model, index) => ({ ...model, priority: highestPriority + 100 + index })),
+  ] };
+}
+
+async function catalogModelsResponse(
+  request: Request,
+  config: GatewayConfig,
+  cacheFile: string,
+): Promise<Response> {
+  const incomingUrl = new URL(request.url);
+  const clientVersion = incomingUrl.searchParams.get("client_version");
+  // ponytail: 当前只保留一份 last-good；需要同时服务多个账号或版本时再按二者分片。
+  let native: ModelCatalog | undefined;
+  let refreshError: unknown;
+
+  if (clientVersion) {
+    try {
+      const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "");
+      headers.delete("if-none-match");
+      headers.delete("if-modified-since");
+      const response = await fetch(joinUpstreamUrl(config.officialBaseUrl, request.url, config.mountPath), {
+        method: "GET",
+        headers,
+        redirect: "manual",
+        signal: request.signal,
+      });
+      if (!response.ok) throw new Error(`official /models returned HTTP ${response.status}`);
+      native = validCatalog(await response.json());
+      atomicWrite(cacheFile, `${JSON.stringify({
+        fetched_at: new Date().toISOString(),
+        client_version: clientVersion,
+        models: native.models,
+      }, null, 2)}\n`);
+    } catch (error) {
+      refreshError = error;
+    }
+  }
+
   try {
-    const catalog = JSON.parse(fs.readFileSync(config.catalogPath, "utf8")) as ModelCatalog;
-    const data = (catalog.models || []).map((model) => ({
-      id: model.slug,
-      object: "model",
-      owned_by: model.slug.startsWith(config.prefix) ? "cliproxy" : "openai",
-    }));
-    return Response.json({ object: "list", data });
+    native ||= readCatalog(cacheFile);
+    const catalog = mergeDynamicCatalog(native, config);
+    if (clientVersion) return Response.json(catalog);
+    return Response.json({
+      object: "list",
+      data: catalog.models.map((model) => ({
+        id: model.slug,
+        object: "model",
+        owned_by: model.slug.startsWith(config.prefix) ? "cliproxy" : "openai",
+      })),
+    });
   } catch (error) {
+    const detail = refreshError ?? error;
     return Response.json(
-      { error: { message: `Unable to read model catalog: ${error instanceof Error ? error.message : String(error)}` } },
-      { status: 500 },
+      { error: { message: `Unable to load model catalog: ${detail instanceof Error ? detail.message : String(detail)}` } },
+      { status: 502 },
     );
   }
 }
@@ -373,10 +501,13 @@ async function catalogModelsResponse(config: GatewayConfig): Promise<Response> {
 export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
+  realtimeProviderMode: RealtimeProviderMode = "invalid",
+  upstreamModelsCacheFile = path.join(path.dirname(config.catalogPath), "models-cache.json"),
 ): (request: Request) => Promise<Response> {
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
   const logging = config.requestLogging === true;
+  const sink = resolveLogSink(config);
 
   const handleCore = async (request: Request): Promise<Response> => {
     const incomingUrl = new URL(request.url);
@@ -386,30 +517,41 @@ export function createGatewayHandler(
     }
 
     if (incomingUrl.pathname === `${mountPath}/models` && request.method === "GET") {
-      return catalogModelsResponse(config);
+      return catalogModelsResponse(request, config, upstreamModelsCacheFile);
+    }
+
+    if (isRealtimeCallRequest(request, config)) {
+      return proxyRealtimeCall(request, config, realtimeProviderMode, sink);
+    }
+
+    // Reserved for the HTTP call-create adapter and bidirectional WebSocket bridge.
+    // A normal fetch passthrough cannot proxy these Realtime transports safely.
+    if (isReservedOfficialRealtimePath(incomingUrl.pathname, mountPath)) {
+      return officialRealtimeNotImplementedResponse();
     }
 
     if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
-      return new Response("WebSocket transport is not supported; retry with HTTPS/SSE.", {
-        status: 426,
-        headers: {
-          connection: "close",
-          "x-codex-cliproxy-gateway": "websocket-not-supported",
-        },
-      });
+      // startGateway 拦截不到时（无 server 的调用场景）的防御兜底；生产路径在 fetch 内已转发。
+      return websocketNotSupportedResponse();
     }
 
+    // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
+    const hinted = modelFromRoutingHint(request);
+    let route = hinted === undefined ? undefined : decideRoute(hinted, prefix);
     let bytes: ArrayBuffer | undefined;
     let json: Record<string, unknown> | undefined;
     try {
-      ({ bytes, json } = await readJsonBody(request));
+      bytes = await readBodyBytes(request);
+      if (route === undefined || route.kind === "cliproxy") {
+        json = decodeJsonBody(bytes, request.headers);
+        route ??= decideRoute(json?.model, prefix);
+      }
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
         { status: 400 },
       );
     }
-    const route = decideRoute(json?.model, prefix);
     const upstreamBase = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
     let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);
     const headers = copyRequestHeaders(request, route, apiKey);
@@ -489,9 +631,16 @@ export function createGatewayHandler(
   if (!logging) return handleCore;
 
   return async (request: Request): Promise<Response> => {
-    const requestTime = new Date().toISOString();
+    const requestTime = localTime();
+    const startedAt = Date.now();
+    const incoming = new URL(request.url);
+    // catalog 与健康检查不转发上游，且 healthz 会被 launchd 高频探活，不计入请求日志。
+    if (incoming.pathname === "/healthz" || incoming.pathname === `${mountPath}/models`) {
+      return handleCore(request);
+    }
+    // 分组按请求路径，不按上游：缺模型信息时路由会回落到 official，用它命名文件会误导排查。
+    const group = logGroupFromPath(incoming.pathname);
     let reqBody: unknown = null;
-    let isCliproxy = false;
     if (request.method !== "GET" && request.method !== "HEAD") {
       try {
         const clone = request.clone();
@@ -511,11 +660,7 @@ export function createGatewayHandler(
                     : buffer;
           const text = new TextDecoder().decode(decoded);
           try {
-            const parsed = JSON.parse(text);
-            if (isRecord(parsed) && typeof parsed.model === "string") {
-              isCliproxy = parsed.model.startsWith(prefix);
-            }
-            reqBody = parsed;
+            reqBody = JSON.parse(text);
           } catch {
             reqBody = text;
           }
@@ -526,37 +671,157 @@ export function createGatewayHandler(
     }
 
     const response = await handleCore(request);
+    const url = incoming.pathname + incoming.search;
 
-    if (!isCliproxy) return response;
-
-    const resBodyText = await response.clone().text().catch(() => "");
-    await logExchange(
-      requestTime,
-      request.method,
-      new URL(request.url).pathname + new URL(request.url).search,
-      request.headers,
-      reqBody,
-      response.status,
-      response.headers,
-      resBodyText,
-    );
+    // 必须异步消费 clone：await 会读完整个响应流，令 SSE 退化成一次性返回。
+    void response.clone().text().then((resBody) => {
+      const durationMs = Date.now() - startedAt;
+      logExchange(sink, group, {
+        requestTime,
+        method: request.method,
+        url,
+        reqHeaders: request.headers,
+        reqBody,
+        status: response.status,
+        resHeaders: response.headers,
+        resBody,
+        durationMs,
+      });
+      // 426 是协议协商（客户端会改用 HTTPS/SSE 重试），不是故障，不计入错误汇总。
+      if (response.status >= 400 && response.status !== 426) {
+        logGatewayError(sink, group, {
+          requestTime,
+          method: request.method,
+          url,
+          status: response.status,
+          message: errorMessageFromBody(resBody),
+          durationMs,
+        });
+      }
+    }).catch(() => {
+      // Logging must never break the request flow.
+    });
     return response;
   };
 }
 
-export function startGateway(config: GatewayConfig): Bun.Server<undefined> {
+/**
+ * upstream-first 桥接：先拨通上游、成功后才 upgrade 客户端，上游拒绝时错误以真实
+ * 状态返回而不是 101 后静默断开。返回 undefined 表示已完成 upgrade，直接结束 fetch。
+ */
+async function bridgeUpstreamWebSocket(
+  request: Request,
+  server: Bun.Server<RealtimeSocketData>,
+  target: {
+    url: string;
+    headers: Record<string, string>;
+    routeKind?: "cliproxy" | "official";
+    prefix?: string;
+  },
+  sink: RequestLogSink | undefined,
+  dialFailureResponse: (error: Error) => Response,
+): Promise<Response | undefined> {
+  const logGroup = logGroupFromPath(new URL(request.url).pathname);
+  // 整条 WebSocket 会话共用一个文件：多条连接（含 subagent 的 thread）共享 session-id，
+  // 按它聚合能把此前每秒一个文件的碎片收敛成每会话一个。
+  const logFile = websocketLogFile(logGroup, request.headers.get("session-id") ?? undefined);
+  const socket: RealtimeSocketData = {
+    url: target.url,
+    headers: target.headers,
+    queue: [],
+    queuedBytes: 0,
+    log: sink,
+    logFile,
+    routeKind: target.routeKind,
+    prefix: target.prefix,
+  };
+  const startedAt = Date.now();
+  let upstream: WebSocket;
+  try {
+    upstream = await dialUpstreamWebSocket(target.url, target.headers);
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    logRealtimeEvent(sink, logFile, {
+      event: "ws-dial-failed",
+      url: target.url,
+      // 握手请求不经过 logging wrapper，转发的头只能在这里留痕。
+      detail: {
+        durationMs: Date.now() - startedAt,
+        error: `${error.name}: ${error.message}`,
+        headers: maskedHeaders(target.headers),
+      },
+    });
+    return dialFailureResponse(error);
+  }
+  logRealtimeEvent(sink, logFile, {
+    event: "ws-dial",
+    url: target.url,
+    detail: { durationMs: Date.now() - startedAt, headers: maskedHeaders(target.headers) },
+  });
+  if (server.upgrade(request, { data: { ...socket, upstream } })) return undefined;
+  upstream.close(1000, "Client upgrade failed");
+  return new Response("WebSocket upgrade failed", { status: 400 });
+}
+
+export function startGateway(
+  config: GatewayConfig,
+  realtimeProviderMode: RealtimeProviderMode = "invalid",
+  upstreamModelsCacheFile = path.join(path.dirname(config.catalogPath), "models-cache.json"),
+): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
-  const server = Bun.serve({
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, upstreamModelsCacheFile);
+  const server = Bun.serve<RealtimeSocketData>({
     hostname: config.host,
     port: config.port,
     idleTimeout: 255,
-    fetch: createGatewayHandler(config, apiKey),
+    fetch(request, server) {
+      const target = realtimeWebSocketTarget(request, config);
+      if (target) {
+        const accessError = realtimeAccessError(request, realtimeProviderMode);
+        if (accessError) return accessError;
+        const sink = resolveLogSink(config);
+        return bridgeUpstreamWebSocket(request, server, target, sink, (error) => {
+          // sideband 拨号失败是真实故障：502 并进错误摘要（原先会退化成 101 后静默断开）。
+          const incoming = new URL(request.url);
+          const group = logGroupFromPath(incoming.pathname);
+          logGatewayError(sink, group, {
+            requestTime: localTime(),
+            method: request.method,
+            url: incoming.pathname + incoming.search,
+            status: 502,
+            message: `Realtime upstream WebSocket failed: ${error.message}`,
+            upstreamUrl: target.url,
+          });
+          return new Response("Realtime upstream WebSocket failed", {
+            status: 502,
+            headers: { "x-codex-cliproxy-gateway": "realtime-upstream-unavailable" },
+          });
+        });
+      }
+      // Responses over WebSocket：按 hint 选上游转发；拨号失败回 426 令客户端降级 HTTPS/SSE。
+      const wsTarget = responsesWebSocketTarget(request, config, apiKey);
+      if (wsTarget) {
+        return bridgeUpstreamWebSocket(
+          request,
+          server,
+          { ...wsTarget, prefix: config.prefix || "cliproxy/" },
+          resolveLogSink(config),
+          () => websocketNotSupportedResponse("websocket-upstream-unavailable"),
+        );
+      }
+      return handler(request);
+    },
+    websocket: realtimeWebSocketHandler,
   });
-  console.log(`codex-cliproxy gateway listening on ${server.url}`);
-  console.log(`native models -> ${config.officialBaseUrl}`);
-  console.log(`${config.prefix}* -> ${config.cliproxyBaseUrl}`);
+  console.log([
+    `--${new Date().toISOString()}--`,
+    `codex-cliproxy gateway listening on ${server.url}`,
+    `native models -> ${config.officialBaseUrl}`,
+    `${config.prefix}* -> ${config.cliproxyBaseUrl}`,
+    `realtime provider -> ${realtimeProviderMode}`,
+  ].join("\n"));
   return server;
 }
