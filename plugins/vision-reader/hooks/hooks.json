@@ -1,0 +1,19 @@
+{
+  "description": "Conditionally route image requests to a dedicated vision subagent.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/scripts/vision_router.py\" --platform codex",
+            "command_windows": "py -3 \"%PLUGIN_ROOT%\\scripts\\vision_router.py\" --platform codex",
+            "timeout": 5,
+            "statusMessage": "Checking vision routing",
+            "additionalContextLimit": 700
+          }
+        ]
+      }
+    ]
+  }
+}

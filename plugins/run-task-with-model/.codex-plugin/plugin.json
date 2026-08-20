@@ -1,0 +1,24 @@
+{
+  "name": "run-task-with-model",
+  "version": "0.1.0",
+  "description": "Resolve a model from the catalog and run a task in a new Codex thread.",
+  "author": {
+    "name": "aceHubert"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Run Task With Model",
+    "shortDescription": "Run a task in a new thread with a selected model.",
+    "longDescription": "Reads a custom catalog or the current Codex host model catalog, resolves the requested model and reasoning level, creates a user-visible thread with a complete task packet, and preserves the acceptance and PR authorization boundary.",
+    "developerName": "aceHubert",
+    "category": "Productivity",
+    "capabilities": [
+      "Tasks"
+    ],
+    "defaultPrompt": [
+      "Use $run-task-with-model to run this feature with deepseek high.",
+      "Dispatch the current request to a new thread on gpt-5.6-sol.",
+      "Resolve a model from the local catalog and run a task in a fresh thread."
+    ]
+  }
+}

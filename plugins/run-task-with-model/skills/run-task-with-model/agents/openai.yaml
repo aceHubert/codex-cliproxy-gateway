@@ -1,0 +1,6 @@
+interface:
+  display_name: "Run Task With Model"
+  short_description: "Resolve a model and run a task in a new Codex thread."
+  default_prompt: "Use $run-task-with-model to run this feature with deepseek high."
+policy:
+  allow_implicit_invocation: true

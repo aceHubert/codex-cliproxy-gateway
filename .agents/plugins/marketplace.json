@@ -1,0 +1,32 @@
+{
+  "name": "codex-cliproxy",
+  "interface": {
+    "displayName": "Codex CLIProxy"
+  },
+  "plugins": [
+    {
+      "name": "run-task-with-model",
+      "source": {
+        "source": "local",
+        "path": "./plugins/run-task-with-model"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "vision-reader",
+      "source": {
+        "source": "local",
+        "path": "./plugins/vision-reader"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

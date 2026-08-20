@@ -1,0 +1,21 @@
+{
+  "name": "vision-reader",
+  "version": "1.1.0",
+  "description": "Route image-bearing prompts from text-only Claude Code models to a dedicated vision subagent.",
+  "author": {
+    "name": "aceHubert"
+  },
+  "license": "MIT",
+  "keywords": ["claude-code", "vision", "subagent", "hooks", "deepseek"],
+  "agents": "./agents/vision-reader.claude.md",
+  "hooks": "./hooks/claude-hooks.json",
+  "userConfig": {
+    "vision_model": {
+      "type": "string",
+      "title": "Vision model",
+      "description": "Model used by the vision-reader subagent.",
+      "default": "sonnet",
+      "required": true
+    }
+  }
+}

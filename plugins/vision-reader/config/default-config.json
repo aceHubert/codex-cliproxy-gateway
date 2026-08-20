@@ -1,0 +1,10 @@
+{
+  "vision_agent": "vision_reader",
+  "scan_transcript_bytes": 262144,
+  "text_only_model_patterns": [
+    "^deepseek-",
+    "^deepseek/",
+    "^deepseek:"
+  ],
+  "image_extensions": [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".svg", ".heic", ".avif"]
+}
