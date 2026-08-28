@@ -367,14 +367,8 @@ export function responsesWebSocketTarget(
     : decideRoute(hintedModel, prefix);
   // CPA WebSocket 需要显式开启；official 路由不受开关影响。
   if (route.kind === "cliproxy" && config.websocket !== true) return null;
-  // CPA 的 WS 只放行兼容模型，让其余请求收到 426 后改走 HTTP/SSE。
-  // split 模式按剥前缀后的上游模型门控；CPA-only 沿用原始 hint。
-  const gatingModel = route.kind === "cliproxy"
-    ? (config.cpaOnly === true ? hintedModel : route.upstreamModel)
-    : undefined;
-  if (route.kind === "cliproxy" && gatingModel !== undefined && !/^(?:gpt-|codex-)/.test(gatingModel)) {
-    return null;
-  }
+  // 不按模型门控：CPA 对每个请求自行决定上游走 ws 还是 HTTP/SSE，
+  // 非 codex 凭据的模型会在上游静默退回 HTTP/SSE，网关无需替它预判。
   const baseUrl = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
   const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
   const headers = forwardedHeaders(request.headers, false);

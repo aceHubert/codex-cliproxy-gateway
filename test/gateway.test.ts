@@ -995,12 +995,14 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     "proxy-key",
   ), null, "cliproxy WebSocket must stay off by default");
 
-  // 不兼容模型（剥前缀后非 gpt-/codex-*）即使显式开启也回 426。
-  assert.equal(responsesWebSocketTarget(
+  // 非 gpt-/codex-* 模型同样放行，由 CPA 按请求退回 HTTP/SSE 上游。
+  const splitNonGpt = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
     { ...config, websocket: true },
     "proxy-key",
-  ), null);
+  );
+  assert.ok(splitNonGpt);
+  assert.equal(splitNonGpt.url, "wss://cliproxy.example/v1/responses");
 
   // split + websocket：兼容 CPA 模型放行，认证域与 CPA-only 相同。
   const splitCpa = responsesWebSocketTarget(
@@ -1042,14 +1044,16 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
   assert.equal(cliproxy.headers["x-goog-api-key"], undefined);
   assert.equal(cliproxy.headers["openai-beta"], "responses_websockets=2026-02-06");
   assert.equal(cliproxy.headers["sec-websocket-key"], undefined);
-  // 明知不兼容的第三方模型在网关处直接 426，不拨号 CLIProxy。
-  assert.equal(responsesWebSocketTarget(
+  // 第三方模型同样拨号 CLIProxy WebSocket，由 CPA 按请求决定上游传输。
+  const cpaNonGpt = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=free/glm-5.3-flash" },
     }),
     { ...config, cpaOnly: true, websocket: true },
     "proxy-key",
-  ), null);
+  );
+  assert.ok(cpaNonGpt);
+  assert.equal(cpaNonGpt.url, "wss://cliproxy.example/v1/responses");
   assert.ok(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=codex-auto-review" },
