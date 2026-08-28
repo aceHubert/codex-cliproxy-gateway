@@ -82,15 +82,13 @@ Installed files are split by responsibility:
 ~/.codex/
   config.toml
   config.toml.bak-cliproxy-gateway-YYYYMMDDHHmmss
-  cliproxy-catalog.json              # generated only by models --sync --static
   models_cache.json
 
 ~/.codex-cliproxy-gateway/
   config.json
   state.json
   models.json
-  models-cache.json                  # last successful official /models response
-  cliproxy-catalog.json
+  cliproxy-catalog.json              # selected CPA models with original IDs
   gateway.log
   gateway.error.log
   logs/
@@ -111,10 +109,12 @@ Fully quit and reopen Codex Desktop after installation.
 ```bash
 codex-cliproxy models
 codex-cliproxy models --sync
-codex-cliproxy models --sync --static
+codex-cliproxy models --sync --websocket
+codex-cliproxy models --sync --cpa-only
+codex-cliproxy models --sync --cpa-only --websocket
 codex-cliproxy models --sync --restart-codex
 codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo/releases/download/v2/models.json
-codex-cliproxy models --sync --static --restart-codex
+codex-cliproxy models --sync --cpa-only --websocket --restart-codex
 codex-cliproxy status
 codex-cliproxy start
 codex-cliproxy stop
@@ -137,7 +137,11 @@ defaults and keeps existing configuration.
 
 `models` lists the CLIProxy models currently selected for the Codex picker.
 
-`models --sync` fetches the current CLIProxy model list, rebuilds the local routed-model overlay, removes the managed `model_catalog_json`, and expires only the freshness fields in Codex's `models_cache.json`. Codex then refreshes the official native catalog through the gateway; each successful `/v1/models` response updates the last-good `models-cache.json`. `models --sync --static` requires that cache, merges it with the selected CLIProxy models into `~/.codex/cliproxy-catalog.json`, and configures `model_catalog_json`. Use `--restart-codex` after any sync to refresh the current model picker immediately; it is especially required when entering or leaving static mode. Stopping app-server may interrupt active tasks.
+`models --sync` fetches the current CLIProxy model list, rebuilds the local routed-model overlay, removes the managed `model_catalog_json`, and expires only the freshness fields in Codex's `models_cache.json`. Codex then refreshes the official native catalog through the gateway on each `/v1/models` request.
+
+For split-mode automation, `models --sync --select pass` skips the picker and reuses the locally saved selection; pass another selector value to change it.
+
+`models --sync --cpa-only` configures `model_catalog_json` to use `~/.codex-cliproxy-gateway/cliproxy-catalog.json`, which always stores the selected CPA models with their original IDs. Add `--websocket` to enable CPA Responses WebSocket in either mode; only `gpt-*` and `codex-*` CPA models are allowed, and without it CPA requests use HTTP/SSE. Official Responses WebSocket stays enabled regardless of the switch. When one reused WebSocket connection switches between official and CLIProxy models, the gateway closes the old bridge with `1012` so Codex reconnects to the correct upstream with fresh authentication. Realtime `/live` and `/realtime` keep their existing dedicated handling. Plain `models --sync` removes `model_catalog_json`; `/v1/models` then adds `cliproxy/` only in its response and merges the CPA rows with the official catalog. If the CPA catalog is missing, invalid, or still contains legacy prefixed IDs, `/v1/models` returns the official catalog alone until the next sync. This fallback changes only the visible directory; CPA-only inference remains routed to CPA. Use `--restart-codex` when switching modes so existing subagents do not retain stale model IDs.
 
 Request logs are disabled after installation. Use `codex-cliproxy log on` to
 write them to timestamped files under `logs/`; each request starts with a separator such as
@@ -230,7 +234,7 @@ launchctl kickstart -k "gui/$(id -u)/codex-cliproxy-gateway"
 
 ## Realtime transport
 
-Installation points both `experimental_realtime_ws_base_url` and `experimental_realtime_webrtc_call_base_url` at the local gateway. The gateway snapshots the Codex provider at startup: the built-in provider supports ChatGPT account authentication and official API keys, while an explicitly configured provider is rejected before its credentials can leave the machine. `/v1/live` and `/v1/realtime` WebSockets are bridged with the authentication from each handshake. CLIProxy routing remains HTTP/SSE-only; unrelated or unsupported WebSocket paths still receive `426`.
+Installation points both `experimental_realtime_ws_base_url` and `experimental_realtime_webrtc_call_base_url` at the local gateway. The gateway snapshots the Codex provider at startup: the built-in provider supports ChatGPT account authentication and official API keys, while an explicitly configured provider is rejected before its credentials can leave the machine. `/v1/live` and `/v1/realtime` WebSockets are bridged with the authentication from each handshake. CPA Responses WebSocket is off by default and requires `models --sync --websocket`; split mode and CPA-only mode share this switch. Unrelated or unsupported WebSocket paths still receive `426`.
 
 ## Publishing
 
@@ -249,4 +253,4 @@ The package has no runtime dependencies.
 
 ## Model catalog refresh
 
-Dynamic mode does not configure `model_catalog_json`. Codex periodically requests `/v1/models`; the gateway forwards the request and OAuth headers to the official backend, atomically records the latest valid native catalog in `~/.codex-cliproxy-gateway/models-cache.json`, and adds the locally selected `cliproxy/` rows. Official failures use the last-good cache without overwriting it. Static mode is opt-in through `models --sync --static` and never uses `codex debug models` as its native source.
+Split mode does not configure `model_catalog_json`. Codex periodically requests `/v1/models`; the gateway forwards the request and OAuth headers to the official backend, then adds a `cliproxy/` prefix to the raw CPA rows only in the response. CPA-only points `model_catalog_json` at that same raw CPA catalog and never merges official rows into it.

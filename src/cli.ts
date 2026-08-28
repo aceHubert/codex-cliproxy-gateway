@@ -20,7 +20,6 @@ import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
 import {
   fetchCliProxyCatalog,
   invalidateModelsCache,
-  normalizeCatalog,
   resolveModelMergeJson,
   syncCatalog,
 } from "./catalog.ts";
@@ -53,6 +52,7 @@ const DEFAULTS = {
   requestLogging: false,
   maxRequestLogs: 0,
   websocket: false,
+  cpaOnly: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
 interface BackupRecord {
@@ -85,7 +85,7 @@ Usage:
   codex-cliproxy uninstall
   codex-cliproxy start|stop|restart
   codex-cliproxy serve [--config PATH]
-  codex-cliproxy models [--sync] [--static] [--select SELECTOR] [--restart-codex]
+  codex-cliproxy models [--sync] [--cpa-only] [--websocket] [--select SELECTOR] [--restart-codex]
   codex-cliproxy log on|off
   codex-cliproxy status
 
@@ -95,13 +95,14 @@ Install options:
   --prefix PREFIX      default: ${DEFAULTS.prefix}
   --official-url URL   default: existing openai_base_url or official Codex
   --key-env NAME       read the API key from this environment variable
-  --select SELECTOR     model numbers/ranges, exact IDs, all, or none
+  --select SELECTOR     model numbers/ranges, exact IDs, all, none; use pass to reuse the previous selection
   --model-merge-json URL  GitHub repository or HTTP(S) models.json URL
 
 Models:
   models                list models currently shown through CLIProxy
   models --sync         refresh CLIProxy models and use dynamic official models
-  --static              build and enable a static catalog from the official cache
+  --cpa-only            use a static CPA-only catalog with original model IDs
+  --websocket           enable CPA Responses WebSocket; requires --sync
   --model-merge-json URL  update the cached models.json override
   --restart-codex       stop Codex app-server after sync to refresh the model picker;
                         active tasks may error and require recovery or reopening
@@ -109,6 +110,7 @@ Models:
 Routing:
   cliproxy/*  -> CLIProxyAPI; prefix stripped and auth replaced
   everything else -> official Codex backend; OAuth header preserved
+  --cpa-only -> every model uses CLIProxyAPI with its original ID
 `);
 }
 
@@ -122,11 +124,15 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const key = value.slice(2);
-    if (["help", "sync", "static", "restart-codex"].includes(key)) {
+    if (["help", "sync", "cpa-only", "websocket", "restart-codex"].includes(key)) {
       options[key] = true;
       continue;
     }
     const next = args[i + 1];
+    if (key === "select" && (next === undefined || next.startsWith("--"))) {
+      options.select = true;
+      continue;
+    }
     if (next === undefined || next.startsWith("--")) throw new Error(`--${key} requires a value`);
     options[key] = next;
     i += 1;
@@ -253,7 +259,6 @@ export function removeManagedRuntimeFiles(
     paths.catalogFile,
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
-    paths.upstreamModelsCacheFile,
     paths.stdoutLog,
     paths.stderrLog,
   ]) {
@@ -308,6 +313,17 @@ function gatewayDefaults(paths: ResolvedPaths, officialBaseUrl = DEFAULTS.offici
   };
 }
 
+export function applyRoutingMode(
+  config: GatewayConfig,
+  paths: ResolvedPaths,
+  cpaOnly: boolean,
+  websocket = false,
+): void {
+  config.cpaOnly = cpaOnly;
+  config.websocket = websocket;
+  config.catalogPath = paths.catalogFile;
+}
+
 function mergedGatewayConfig(
   paths: ResolvedPaths,
   current: Record<string, unknown>,
@@ -318,7 +334,7 @@ function mergedGatewayConfig(
     current,
     gatewayDefaults(paths, officialBaseUrl) as unknown as Record<string, unknown>,
   );
-  if (merged.config.catalogPath === paths.staticCatalogFile) {
+  if (merged.config.catalogPath === path.join(paths.codexHome, "cliproxy-catalog.json")) {
     merged.config.catalogPath = paths.catalogFile;
   }
   return {
@@ -345,10 +361,8 @@ export function managedCodexToml(source: string, gatewayBaseUrl: string): string
 async function rebuildCatalog(
   paths: ResolvedPaths,
   config: GatewayConfig,
-  nativeCatalog: ModelCatalog,
   proxyModels: ModelCatalog["models"],
   refreshModelMerge = false,
-  catalogFile = config.catalogPath,
 ) {
   const modelsConfigFile = await resolveModelMergeJson(
     paths.modelMergeFile,
@@ -357,44 +371,12 @@ async function rebuildCatalog(
     refreshModelMerge,
   );
   const result = await syncCatalog({
-    catalogFile,
-    nativeCatalog,
+    catalogFile: config.catalogPath,
     modelsConfigFile,
     proxyModels,
-    prefix: config.prefix,
   });
   fs.rmSync(path.join(paths.runtimeHome, "catalog-metadata.json"), { force: true });
   return result;
-}
-
-function loadUpstreamModelsCache(file: string): { catalog: ModelCatalog; clientVersion: string } {
-  if (!fs.existsSync(file)) {
-    throw new Error(`Official models cache not found: ${file}. Run dynamic mode and wait for Codex to refresh /models.`);
-  }
-  let value: unknown;
-  try {
-    value = JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (error) {
-    throw new Error(`Invalid official models cache ${file}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  const catalog = normalizeCatalog(value);
-  if (catalog.models.length === 0
-    || !catalog.models.every((model) => model && typeof model.slug === "string" && model.slug)) {
-    throw new Error(`Invalid official models cache ${file}: expected a non-empty models array`);
-  }
-  const clientVersion = value && typeof value === "object" && "client_version" in value
-    && typeof value.client_version === "string"
-    ? value.client_version
-    : "0.0.0";
-  return { catalog, clientVersion };
-}
-
-function optionalUpstreamModelsCache(file: string): ReturnType<typeof loadUpstreamModelsCache> | undefined {
-  try {
-    return loadUpstreamModelsCache(file);
-  } catch {
-    return undefined;
-  }
 }
 
 async function install(options: CliOptions): Promise<void> {
@@ -433,13 +415,13 @@ async function install(options: CliOptions): Promise<void> {
     (existingBaseUrl || DEFAULTS.officialBaseUrl).replace(/\/+$/, ""),
   );
   config.configVersion = GATEWAY_CONFIG_VERSION;
+  applyRoutingMode(config, paths, false);
   const apiKey = getInstallApiKey(config.cliproxyBaseUrl, stringOption(options, "key-env"));
 
-  const officialCache = optionalUpstreamModelsCache(paths.upstreamModelsCacheFile);
   const proxyCatalog = await fetchCliProxyCatalog(
     config.cliproxyBaseUrl,
     apiKey,
-    officialCache?.clientVersion ?? "0.0.0",
+    "0.0.0",
   );
   const availableModels = proxyCatalog.models;
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);
@@ -461,7 +443,6 @@ async function install(options: CliOptions): Promise<void> {
     const catalogResult = await rebuildCatalog(
       paths,
       config,
-      { models: [] },
       proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
       Boolean(modelMergeJson),
     );
@@ -520,14 +501,15 @@ function uninstall(): void {
 
   uninstallLaunchAgent(paths.launchAgent);
   const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  const removeStaticCatalog = readRootTomlString(currentToml, "model_catalog_json") === paths.staticCatalogFile;
+  const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
+  const removeLegacyCatalog = readRootTomlString(currentToml, "model_catalog_json") === legacyCatalogFile;
   if (hash(currentToml) === state.installedConfigHash) {
     restoreBackup(paths.configToml, state.configBackup);
   } else {
     const backupToml = fs.readFileSync(state.configBackup.backup, "utf8");
     atomicWrite(paths.configToml, restoreRootTomlKeys(currentToml, backupToml, MANAGED_CONFIG_KEYS));
   }
-  if (removeStaticCatalog) fs.rmSync(paths.staticCatalogFile, { force: true });
+  if (removeLegacyCatalog) fs.rmSync(legacyCatalogFile, { force: true });
   deleteApiKey();
   invalidateModelsCache(paths.modelsCacheFile);
   removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true });
@@ -541,7 +523,10 @@ function configuredSelectedModels(paths: ResolvedPaths, config: GatewayConfig): 
   const catalogFile = config.catalogPath;
   if (!fs.existsSync(catalogFile)) return [];
   try {
-    return selectedModelsFromCatalog(loadJson<ModelCatalog>(catalogFile), config.prefix);
+    return selectedModelsFromCatalog(loadJson<ModelCatalog>(catalogFile), "")
+      .map((model) => config.prefix && model.startsWith(config.prefix)
+        ? model.slice(config.prefix.length)
+        : model);
   } catch {
     return [];
   }
@@ -554,17 +539,23 @@ function printCurrentModels(config: GatewayConfig, selectedModels: string[]): vo
     return;
   }
   for (const model of selectedModels) {
-    console.log(`  ${config.prefix}${model}`);
+    console.log(`  ${config.cpaOnly === true ? "" : config.prefix}${model}`);
   }
 }
 
 async function models(options: CliOptions): Promise<void> {
   const restartCodex = options["restart-codex"] === true;
-  const staticMode = options.static === true;
+  const cpaOnly = options["cpa-only"] === true;
+  const websocket = options.websocket === true;
+  const selector = stringOption(options, "select");
+  const reuseSelection = options.select === true || selector?.toLowerCase() === "pass";
   const modelMergeJson = stringOption(options, "model-merge-json");
   const paths = resolvePaths();
   if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
   const config = loadGatewayConfig(paths.gatewayConfig);
+  const previousCpaOnly = config.cpaOnly === true;
+  const previousWebsocket = config.websocket === true;
+  const previousCatalogPath = config.catalogPath;
   if (modelMergeJson) config.model_merge_json = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
 
@@ -573,58 +564,51 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
-  const officialCache = staticMode
-    ? loadUpstreamModelsCache(paths.upstreamModelsCacheFile)
-    : optionalUpstreamModelsCache(paths.upstreamModelsCacheFile);
-
+  applyRoutingMode(config, paths, cpaOnly, websocket);
+  if (reuseSelection && cpaOnly) {
+    throw new Error("--select without a value is only supported in split mode");
+  }
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
-  if (configuredCatalog && ![paths.catalogFile, paths.staticCatalogFile].includes(configuredCatalog)) {
+  const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
+  if (configuredCatalog && ![paths.catalogFile, legacyCatalogFile].includes(configuredCatalog)) {
     throw new Error(`Refusing to replace unmanaged model_catalog_json: ${configuredCatalog}`);
   }
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
   const proxyCatalog = await fetchCliProxyCatalog(
     config.cliproxyBaseUrl,
     apiKey,
-    officialCache?.clientVersion ?? "0.0.0",
+    "0.0.0",
   );
   const availableModels = proxyCatalog.models;
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);
-  const selectedModels = await chooseModels({
-    availableModels,
-    currentSelection,
-    selector: stringOption(options, "select"),
-    requireNonEmpty: false,
-  });
+  const selectedModels = reuseSelection
+    ? availableModels.map((model) => model.slug).filter((model) => currentSelection.includes(model))
+    : await chooseModels({
+      availableModels,
+      currentSelection,
+      selector,
+      requireNonEmpty: cpaOnly,
+    });
+  if (reuseSelection && selectedModels.length === 0) {
+    throw new Error("No previous local model selection is available; pass --select SELECTOR");
+  }
 
   const selectedProxyModels = proxyCatalog.models.filter((model) => selectedModels.includes(model.slug));
-  const staticResult = staticMode
-    ? await rebuildCatalog(
-      paths,
-      config,
-      officialCache!.catalog,
-      selectedProxyModels,
-      Boolean(modelMergeJson),
-      paths.staticCatalogFile,
-    )
-    : undefined;
   const result = await rebuildCatalog(
     paths,
     config,
-    { models: [] },
     selectedProxyModels,
-    Boolean(modelMergeJson) && !staticMode,
+    Boolean(modelMergeJson),
   );
   config.selectedModels = selectedModels;
   writeGatewayConfig(paths.gatewayConfig, config);
 
-  const patchedToml = staticMode
-    ? patchRootToml(source, { model_catalog_json: paths.staticCatalogFile })
+  const patchedToml = cpaOnly
+    ? patchRootToml(source, { model_catalog_json: paths.catalogFile })
     : restoreRootTomlKeys(source, "", ["model_catalog_json"]);
   if (patchedToml !== source) atomicWrite(paths.configToml, patchedToml);
-  if (!staticMode && configuredCatalog === paths.staticCatalogFile) {
-    fs.rmSync(paths.staticCatalogFile, { force: true });
-  }
+  if (configuredCatalog === legacyCatalogFile) fs.rmSync(legacyCatalogFile, { force: true });
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.version = 4;
@@ -632,19 +616,26 @@ async function models(options: CliOptions): Promise<void> {
     if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
     writeJson(paths.stateFile, state);
   }
-  if (!staticMode) invalidateModelsCache(paths.modelsCacheFile);
+  const routingChanged = previousCpaOnly !== cpaOnly
+    || previousWebsocket !== config.websocket
+    || previousCatalogPath !== config.catalogPath;
+  if (routingChanged && fs.existsSync(paths.launchAgent)) {
+    restartLaunchAgent(paths.launchAgent);
+    console.log("Gateway restarted to apply the routing mode.");
+  }
+  if (!cpaOnly) invalidateModelsCache(paths.modelsCacheFile);
 
-  if (staticResult) {
-    console.log(`Static catalog synced: ${staticResult.nativeCount} native + ${staticResult.proxyCount} selected CLIProxy models.`);
+  if (cpaOnly) {
+    console.log(`CPA-only catalog synced: ${result.proxyCount} selected models.`);
   } else {
-    console.log(`Dynamic CLIProxy overlay synced: ${result.proxyCount} selected models.`);
+    console.log(`CPA catalog synced for dynamic split routing: ${result.proxyCount} selected models.`);
   }
   printCurrentModels(config, selectedModels);
   if (!restartCodex) {
-    if (staticMode) {
-      console.log("Static catalog configured; restart Codex to load it, or rerun with --restart-codex for immediate effect.");
-    } else if (configuredCatalog === paths.staticCatalogFile) {
-      console.log("Dynamic model management configured; restart Codex to leave static mode, or rerun with --restart-codex.");
+    if (cpaOnly) {
+      console.log("CPA-only catalog configured; restart Codex to load it, or rerun with --restart-codex.");
+    } else if (configuredCatalog === legacyCatalogFile || configuredCatalog === paths.catalogFile) {
+      console.log("Dynamic split routing configured; restart Codex to leave CPA-only mode, or rerun with --restart-codex.");
     } else {
       console.log("Dynamic catalog synced; Codex refreshes /models periodically, but the current model picker may require --restart-codex.");
     }
@@ -695,6 +686,8 @@ async function status(): Promise<void> {
     authJsonModified: false,
     cachedCatalogPath: config?.catalogPath ?? paths.catalogFile,
     cachedCatalogPresent: fs.existsSync(config?.catalogPath ?? paths.catalogFile),
+    cpaOnly: config?.cpaOnly === true,
+    websocket: config?.websocket === true,
   }, null, 2));
 }
 
@@ -706,7 +699,6 @@ function serve(options: CliOptions): void {
   startGateway(
     loadGatewayConfig(configPath),
     loadRealtimeProviderMode(paths.configToml),
-    paths.upstreamModelsCacheFile,
   );
 }
 
@@ -775,7 +767,7 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
   if (!fs.existsSync(configFile)) return;
 
   const current = loadGatewayConfig(configFile);
-  const legacyCatalogPath = current.catalogPath === paths.staticCatalogFile;
+  const legacyCatalogPath = current.catalogPath === path.join(paths.codexHome, "cliproxy-catalog.json");
   if (legacyCatalogPath) current.catalogPath = paths.catalogFile;
   if (current.configVersion === GATEWAY_CONFIG_VERSION) {
     if (legacyCatalogPath) {
@@ -828,11 +820,18 @@ export async function runCli(args: string[]): Promise<void> {
   if (command === "models" && options["restart-codex"] === true && options.sync !== true) {
     throw new Error("--restart-codex requires models --sync");
   }
-  if (command === "models" && options.static === true && options.sync !== true) {
-    throw new Error("--static requires models --sync");
-  }
   if (command === "models" && stringOption(options, "model-merge-json") && options.sync !== true) {
     throw new Error("--model-merge-json requires models --sync");
+  }
+  if (options["cpa-only"] === true && (command !== "models" || options.sync !== true)) {
+    throw new Error("--cpa-only requires models --sync");
+  }
+  if (options.websocket === true && (command !== "models" || options.sync !== true)) {
+    throw new Error("--websocket requires models --sync");
+  }
+  if (command !== "models"
+    && (options.select === true || stringOption(options, "select")?.toLowerCase() === "pass")) {
+    throw new Error("--select pass requires models --sync");
   }
   if (command === "log" && !["on", "off"].includes(positional[1] || "")) {
     throw new Error('Usage: codex-cliproxy log on|off');

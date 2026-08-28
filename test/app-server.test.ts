@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
   isCodexAppServerProcess,
   parseWindowsCommandLine,
@@ -105,6 +108,24 @@ test("restart-codex requires an explicit catalog sync", async () => {
   await assert.rejects(runCli(["models", "--restart-codex"]), /requires models --sync/);
 });
 
-test("static catalog mode is only accepted with an explicit catalog sync", async () => {
-  await assert.rejects(runCli(["models", "--static"]), /requires models --sync/);
+test("CPA-only mode is only accepted with an explicit catalog sync", async () => {
+  await assert.rejects(runCli(["models", "--cpa-only"]), /requires models --sync/);
+});
+
+test("WebSocket mode requires an explicit catalog sync", async () => {
+  await assert.rejects(runCli(["models", "--websocket"]), /requires models --sync/);
+  // split 模式的 --websocket 已通过参数校验；隔离 HOME 确认命令止步于未安装错误。
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ws-param-matrix-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  try {
+    await assert.rejects(runCli(["models", "--sync", "--websocket"]), /Gateway is not installed/);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousCodexHome !== undefined) process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });

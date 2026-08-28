@@ -13,7 +13,7 @@ import {
   websocketUrl,
 } from "./realtime.ts";
 import type { RealtimeProviderMode, RealtimeSocketData } from "./realtime.ts";
-import { normalizeCatalog } from "./catalog.ts";
+import { mergeCatalog, normalizeCatalog } from "./catalog.ts";
 import {
   logExchange,
   logGatewayError,
@@ -24,7 +24,6 @@ import {
   maskedHeaders,
 } from "./request-log.ts";
 import type { RequestLogSink } from "./request-log.ts";
-import { atomicWrite } from "./toml.ts";
 import type { GatewayConfig, ModelCatalog } from "./types.ts";
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -293,6 +292,7 @@ function copyRequestHeaders(request: Request, route: Route, apiKey: string): Hea
   headers.delete("accept-encoding");
   if (route.kind === "cliproxy") {
     headers.delete("authorization");
+    headers.delete("chatgpt-account-id");
     headers.delete("x-api-key");
     headers.delete("x-goog-api-key");
     headers.delete("content-encoding");
@@ -361,9 +361,20 @@ export function responsesWebSocketTarget(
   const mountPath = config.mountPath || "/v1";
   if (isReservedOfficialRealtimePath(new URL(request.url).pathname, mountPath)) return null;
   const prefix = config.prefix || "cliproxy/";
-  const route = decideRoute(modelFromRoutingHint(request), prefix);
-  // 官方模型无条件放行；CLIProxy 侧另有前缀剥离与拨号稳定性问题，默认不放行，由 websocket 显式开启。
+  const hintedModel = modelFromRoutingHint(request);
+  const route = config.cpaOnly === true
+    ? { kind: "cliproxy", upstreamModel: "" } as const
+    : decideRoute(hintedModel, prefix);
+  // CPA WebSocket 需要显式开启；official 路由不受开关影响。
   if (route.kind === "cliproxy" && config.websocket !== true) return null;
+  // CPA 的 WS 只放行兼容模型，让其余请求收到 426 后改走 HTTP/SSE。
+  // split 模式按剥前缀后的上游模型门控；CPA-only 沿用原始 hint。
+  const gatingModel = route.kind === "cliproxy"
+    ? (config.cpaOnly === true ? hintedModel : route.upstreamModel)
+    : undefined;
+  if (route.kind === "cliproxy" && gatingModel !== undefined && !/^(?:gpt-|codex-)/.test(gatingModel)) {
+    return null;
+  }
   const baseUrl = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
   const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
   const headers = forwardedHeaders(request.headers, false);
@@ -371,6 +382,8 @@ export function responsesWebSocketTarget(
     // 与 HTTP 路径的 copyRequestHeaders 对齐：剥官方 OAuth，注入 CLIProxy key。
     delete headers.authorization;
     delete headers["chatgpt-account-id"];
+    delete headers["x-api-key"];
+    delete headers["x-goog-api-key"];
     if (apiKey) headers.authorization = `Bearer ${apiKey}`;
   }
   return { url, headers, routeKind: route.kind };
@@ -431,68 +444,73 @@ function readCatalog(file: string, requireNonEmpty = true): ModelCatalog {
 }
 
 function mergeDynamicCatalog(native: ModelCatalog, config: GatewayConfig): ModelCatalog {
-  let proxyModels: ModelCatalog["models"] = [];
-  if (fs.existsSync(config.catalogPath)) {
-    proxyModels = readCatalog(config.catalogPath, false).models.filter((model) => model.slug.startsWith(config.prefix));
+  const proxy = readCatalog(config.catalogPath);
+  if (config.prefix && proxy.models.some((model) => model.slug.startsWith(config.prefix))) {
+    throw new Error("CPA catalog contains legacy prefixed model IDs; run models --sync");
   }
-  const nativeModels = native.models.filter((model) => !model.slug.startsWith(config.prefix));
-  const highestPriority = Math.max(0, ...nativeModels.map((model) => Number(model.priority) || 0));
-  return { models: [
-    ...nativeModels,
-    ...proxyModels.map((model, index) => ({ ...model, priority: highestPriority + 100 + index })),
-  ] };
+  return config.cpaOnly === true ? proxy : mergeCatalog(native, proxy, config.prefix);
+}
+
+function modelCatalogResponse(
+  catalog: ModelCatalog,
+  clientVersion: string | null,
+  owner: "cliproxy" | "mixed" | "openai",
+  prefix = "cliproxy/",
+): Response {
+  if (clientVersion) return Response.json(catalog);
+  return Response.json({
+    object: "list",
+    data: catalog.models.map((model) => ({
+      id: model.slug,
+      object: "model",
+      owned_by: owner === "mixed"
+        ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
+        : owner,
+    })),
+  });
 }
 
 async function catalogModelsResponse(
   request: Request,
   config: GatewayConfig,
-  cacheFile: string,
 ): Promise<Response> {
   const incomingUrl = new URL(request.url);
   const clientVersion = incomingUrl.searchParams.get("client_version");
-  // ponytail: 当前只保留一份 last-good；需要同时服务多个账号或版本时再按二者分片。
-  let native: ModelCatalog | undefined;
-  let refreshError: unknown;
-
-  if (clientVersion) {
+  if (config.cpaOnly === true) {
     try {
-      const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "");
-      headers.delete("if-none-match");
-      headers.delete("if-modified-since");
-      const response = await fetch(joinUpstreamUrl(config.officialBaseUrl, request.url, config.mountPath), {
-        method: "GET",
-        headers,
-        redirect: "manual",
-        signal: request.signal,
-      });
-      if (!response.ok) throw new Error(`official /models returned HTTP ${response.status}`);
-      native = validCatalog(await response.json());
-      atomicWrite(cacheFile, `${JSON.stringify({
-        fetched_at: new Date().toISOString(),
-        client_version: clientVersion,
-        models: native.models,
-      }, null, 2)}\n`);
-    } catch (error) {
-      refreshError = error;
-    }
+      const catalog = mergeDynamicCatalog({ models: [] }, config);
+      return modelCatalogResponse(catalog, clientVersion, "cliproxy");
+    } catch {}
   }
-
-  try {
-    native ||= readCatalog(cacheFile);
-    const catalog = mergeDynamicCatalog(native, config);
-    if (clientVersion) return Response.json(catalog);
-    return Response.json({
-      object: "list",
-      data: catalog.models.map((model) => ({
-        id: model.slug,
-        object: "model",
-        owned_by: model.slug.startsWith(config.prefix) ? "cliproxy" : "openai",
-      })),
+  const refreshOfficial = async (): Promise<ModelCatalog> => {
+    const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "");
+    headers.delete("if-none-match");
+    headers.delete("if-modified-since");
+    const response = await fetch(joinUpstreamUrl(config.officialBaseUrl, request.url, config.mountPath), {
+      method: "GET",
+      headers,
+      redirect: "manual",
+      signal: request.signal,
     });
+    if (!response.ok) throw new Error(`official /models returned HTTP ${response.status}`);
+    return validCatalog(await response.json());
+  };
+  try {
+    const native = await refreshOfficial();
+    try {
+      const catalog = mergeDynamicCatalog(native, config);
+      return modelCatalogResponse(
+        catalog,
+        clientVersion,
+        config.cpaOnly === true ? "cliproxy" : "mixed",
+        config.prefix,
+      );
+    } catch {
+      return modelCatalogResponse(native, clientVersion, "openai");
+    }
   } catch (error) {
-    const detail = refreshError ?? error;
     return Response.json(
-      { error: { message: `Unable to load model catalog: ${detail instanceof Error ? detail.message : String(detail)}` } },
+      { error: { message: `Unable to load model catalog: ${error instanceof Error ? error.message : String(error)}` } },
       { status: 502 },
     );
   }
@@ -502,7 +520,6 @@ export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
   realtimeProviderMode: RealtimeProviderMode = "invalid",
-  upstreamModelsCacheFile = path.join(path.dirname(config.catalogPath), "models-cache.json"),
 ): (request: Request) => Promise<Response> {
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
@@ -513,11 +530,17 @@ export function createGatewayHandler(
     const incomingUrl = new URL(request.url);
 
     if (incomingUrl.pathname === "/healthz") {
-      return Response.json({ ok: true, prefix, port: config.port });
+      return Response.json({
+        ok: true,
+        cpaOnly: config.cpaOnly === true,
+        websocket: config.websocket === true,
+        prefix,
+        port: config.port,
+      });
     }
 
     if (incomingUrl.pathname === `${mountPath}/models` && request.method === "GET") {
-      return catalogModelsResponse(request, config, upstreamModelsCacheFile);
+      return catalogModelsResponse(request, config);
     }
 
     if (isRealtimeCallRequest(request, config)) {
@@ -535,6 +558,37 @@ export function createGatewayHandler(
       return websocketNotSupportedResponse();
     }
 
+    if (config.cpaOnly === true) {
+      const headers = copyRequestHeaders(request, { kind: "cliproxy", upstreamModel: "" }, apiKey);
+      const contentEncoding = request.headers.get("content-encoding");
+      if (contentEncoding) headers.set("content-encoding", contentEncoding);
+      try {
+        const upstream = await fetch(joinUpstreamUrl(config.cliproxyBaseUrl, request.url, mountPath), {
+          method: request.method,
+          headers,
+          body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+          redirect: "manual",
+          signal: request.signal,
+        });
+        return new Response(upstream.body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: copyResponseHeaders(upstream),
+        });
+      } catch (error) {
+        return Response.json(
+          {
+            error: {
+              message: "Gateway upstream request failed",
+              route: "cliproxy",
+              detail: error instanceof Error ? error.message : String(error),
+            },
+          },
+          { status: 502 },
+        );
+      }
+    }
+
     // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
     const hinted = modelFromRoutingHint(request);
     let route = hinted === undefined ? undefined : decideRoute(hinted, prefix);
@@ -546,6 +600,7 @@ export function createGatewayHandler(
         json = decodeJsonBody(bytes, request.headers);
         route ??= decideRoute(json?.model, prefix);
       }
+      route ??= decideRoute(json?.model, prefix);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
@@ -766,13 +821,12 @@ async function bridgeUpstreamWebSocket(
 export function startGateway(
   config: GatewayConfig,
   realtimeProviderMode: RealtimeProviderMode = "invalid",
-  upstreamModelsCacheFile = path.join(path.dirname(config.catalogPath), "models-cache.json"),
 ): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, upstreamModelsCacheFile);
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode);
   const server = Bun.serve<RealtimeSocketData>({
     hostname: config.host,
     port: config.port,
@@ -807,7 +861,7 @@ export function startGateway(
         return bridgeUpstreamWebSocket(
           request,
           server,
-          { ...wsTarget, prefix: config.prefix || "cliproxy/" },
+          { ...wsTarget, prefix: config.cpaOnly === true ? "" : config.prefix || "cliproxy/" },
           resolveLogSink(config),
           () => websocketNotSupportedResponse("websocket-upstream-unavailable"),
         );
@@ -816,11 +870,16 @@ export function startGateway(
     },
     websocket: realtimeWebSocketHandler,
   });
+  const routingSummary = config.cpaOnly === true
+    ? [`all models -> ${config.cliproxyBaseUrl}`]
+    : [
+      `native models -> ${config.officialBaseUrl}`,
+      `${config.prefix}* -> ${config.cliproxyBaseUrl}`,
+    ];
   console.log([
     `--${new Date().toISOString()}--`,
     `codex-cliproxy gateway listening on ${server.url}`,
-    `native models -> ${config.officialBaseUrl}`,
-    `${config.prefix}* -> ${config.cliproxyBaseUrl}`,
+    ...routingSummary,
     `realtime provider -> ${realtimeProviderMode}`,
   ].join("\n"));
   return server;

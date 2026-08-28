@@ -195,24 +195,21 @@ export function mergeCatalog(
 
 interface SyncCatalogOptions {
   catalogFile: string;
-  nativeCatalog: ModelCatalog;
   modelsConfigFile: string;
   proxyModels: ModelEntry[];
-  prefix: string;
 }
 
 export async function syncCatalog({
   catalogFile,
-  nativeCatalog,
   modelsConfigFile,
   proxyModels,
-  prefix,
 }: SyncCatalogOptions) {
   const overrides = loadModelOverrides(modelsConfigFile);
-  const merged = mergeCatalog(nativeCatalog, { models: proxyModels }, prefix, overrides);
-  atomicWrite(catalogFile, `${JSON.stringify(merged, null, 2)}\n`);
+  const output: ModelCatalog = {
+    models: proxyModels.map((model) => applyModelOverrides(model, overrides)),
+  };
+  atomicWrite(catalogFile, `${JSON.stringify(output, null, 2)}\n`);
   return {
-    nativeCount: nativeCatalog.models.length,
     proxyCount: proxyModels.length,
     catalogFile,
   };

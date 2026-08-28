@@ -31,10 +31,12 @@ export interface GatewayConfig {
   /** 每类日志保留的最大文件数；0 表示不限制。 */
   maxRequestLogs?: number;
   /**
-   * 是否把 cliproxy/* 的 Responses over WebSocket 转发到 CLIProxy（默认 false，回 426 走 HTTPS/SSE）。
-   * 官方模型不受此开关控制，始终转发。
+   * 是否允许 CPA Responses WebSocket；false 时 CPA 路由回 426 走 HTTP/SSE。
+   * official Responses WebSocket 不受此开关影响。
    */
   websocket?: boolean;
+  /** 是否启用 CPA-only 纯转发：目录和请求均只使用 CLIProxy，模型名不加前缀。 */
+  cpaOnly?: boolean;
 }
 
 export interface ResolvedPaths {
@@ -46,9 +48,7 @@ export interface ResolvedPaths {
   stateFile: string;
   catalogFile: string;
   modelMergeFile: string;
-  upstreamModelsCacheFile: string;
   modelsCacheFile: string;
-  staticCatalogFile: string;
   stdoutLog: string;
   stderrLog: string;
   logDir: string;

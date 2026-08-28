@@ -5,12 +5,12 @@
 Codex `app-server` 在启动时读取 `model_catalog_json`，并在内存中构建静态模型目录；
 后续静态 catalog 更新后，它不会自动重读。动态模式不配置该字段，会周期请求
 `/models`。启用静态目录或删除已加载的静态配置时，需要停止旧 `app-server` 才能切换
-模型管理器；动态 `/models` 即使更新了缓存，已打开的模型选择器也可能继续持有旧快照。
+模型管理器；动态 `/models` 即使返回了新目录，已打开的模型选择器也可能继续持有旧快照。
 
 这里实现的不是“OpenCodex 重启 Codex App”，而是：
 
 ```text
-更新磁盘 catalog/cache
+更新磁盘 catalog 或配置
   -> 停止匹配的旧 Codex app-server
   -> 等待 Codex App 自动拉起新 app-server，或由用户新开会话触发
   -> 新进程重新读取磁盘 catalog
@@ -18,9 +18,9 @@ Codex `app-server` 在启动时读取 `model_catalog_json`，并在内存中构�
 
 ## 触发策略
 
-1. 不带 `--restart-codex` 的 sync 只更新配置和缓存，不发送任何信号。
+1. 不带 `--restart-codex` 的 sync 只更新配置和目录，不发送任何信号。
 2. 用户在任意 `models --sync` 中显式传入 `--restart-codex` 时，才允许停止进程；
-   静态模式切换需要它，动态模式可用它立即刷新当前模型选择器。
+   CPA-only 静态目录切换需要它，动态 split 模式可用它立即刷新当前模型选择器。
 3. 必须在日志中说明 active turn 可能被中断；这是显式同意边界。
 
 ## 进程匹配

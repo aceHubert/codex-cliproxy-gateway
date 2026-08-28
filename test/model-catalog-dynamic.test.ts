@@ -13,13 +13,11 @@ import {
 } from "../src/catalog.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
-test("dynamic /models refreshes official cache and merges only CLIProxy rows", async () => {
+test("dynamic /models refreshes official catalog and merges only CLIProxy rows", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-response-"));
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
-  const cachePath = path.join(directory, "runtime", "models-cache.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [
-    { slug: "gpt-stale", context_window: 200000 },
-    { slug: "cliproxy/test-model", context_window: 100000 },
+    { slug: "test-model", context_window: 100000 },
   ] }));
   const config: GatewayConfig = {
     host: "127.0.0.1",
@@ -31,13 +29,15 @@ test("dynamic /models refreshes official cache and merges only CLIProxy rows", a
     catalogPath,
   };
   const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
   let captured: { url: string; headers: Headers } | undefined;
   globalThis.fetch = (async (url: string | URL | Request, options?: RequestInit) => {
+    fetchCount += 1;
     captured = { url: String(url), headers: new Headers(options?.headers) };
     return Response.json({ models: [{ slug: "gpt-fresh", context_window: 300000, priority: 7 }] });
   }) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(config, "test-key", "invalid", cachePath);
+    const handler = createGatewayHandler(config, "test-key", "invalid");
     const codex = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=1.2.3", {
       headers: {
         authorization: "Bearer oauth-token",
@@ -48,20 +48,12 @@ test("dynamic /models refreshes official cache and merges only CLIProxy rows", a
     assert.equal(codex.status, 200);
     assert.deepEqual(await codex.json(), { models: [
       { slug: "gpt-fresh", context_window: 300000, priority: 7 },
-      { slug: "cliproxy/test-model", context_window: 100000, priority: 107 },
+      { slug: "cliproxy/test-model", display_name: "test-model", context_window: 100000, priority: 107 },
     ] });
     assert.equal(captured?.url, "https://official.example/codex/models?client_version=1.2.3");
     assert.equal(captured?.headers.get("authorization"), "Bearer oauth-token");
     assert.equal(captured?.headers.get("chatgpt-account-id"), "account-1");
     assert.equal(captured?.headers.get("if-none-match"), null);
-    const writtenCache = JSON.parse(fs.readFileSync(cachePath, "utf8"));
-    assert.match(writtenCache.fetched_at, /^2026-/);
-    assert.deepEqual(writtenCache, {
-      fetched_at: writtenCache.fetched_at,
-      client_version: "1.2.3",
-      models: [{ slug: "gpt-fresh", context_window: 300000, priority: 7 }],
-    });
-
     const openai = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     assert.deepEqual(await openai.json(), {
       object: "list",
@@ -70,23 +62,17 @@ test("dynamic /models refreshes official cache and merges only CLIProxy rows", a
         { id: "cliproxy/test-model", object: "model", owned_by: "cliproxy" },
       ],
     });
+    assert.equal(fetchCount, 2);
   } finally {
     globalThis.fetch = originalFetch;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
-test("dynamic /models keeps last-good cache when official refresh fails", async () => {
+test("dynamic /models returns 502 when official refresh fails", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-fallback-"));
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
-  const cachePath = path.join(directory, "models-cache.json");
-  fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: "cliproxy/test-model" }] }));
-  const cached = {
-    fetched_at: "2026-08-18T00:00:00Z",
-    client_version: "1.2.2",
-    models: [{ slug: "gpt-last-good" }],
-  };
-  fs.writeFileSync(cachePath, JSON.stringify(cached));
+  fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: "test-model" }] }));
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
   try {
@@ -100,15 +86,97 @@ test("dynamic /models keeps last-good cache when official refresh fails", async 
       catalogPath,
     }, "test-key");
     const response = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=1.2.3"));
+    assert.equal(response.status, 502);
+    assert.match(await response.text(), /official \/models returned HTTP 503/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("CPA-only /models uses the local CPA catalog without contacting official", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-only-models-response-"));
+  const catalogPath = path.join(directory, "cliproxy-catalog.json");
+  fs.writeFileSync(catalogPath, JSON.stringify({ models: [
+    { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" },
+  ] }));
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("official must not be contacted in CPA-only mode");
+  }) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://official.example/codex",
+      cliproxyBaseUrl: "https://proxy.example/v1",
+      catalogPath,
+      cpaOnly: true,
+      selectedModels: ["gpt-5.6-sol"],
+    }, "test-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=1.2.3"));
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { models: [
-      { slug: "gpt-last-good" },
-      { slug: "cliproxy/test-model", priority: 100 },
+      { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" },
     ] });
-    assert.deepEqual(JSON.parse(fs.readFileSync(cachePath, "utf8")), cached);
+    const openai = await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    assert.deepEqual(await openai.json(), {
+      object: "list",
+      data: [{ id: "gpt-5.6-sol", object: "model", owned_by: "cliproxy" }],
+    });
+    assert.deepEqual(await (await handler(new Request("http://127.0.0.1:8320/healthz"))).json(), {
+      ok: true,
+      cpaOnly: true,
+      websocket: false,
+      prefix: "cliproxy/",
+      port: 8320,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
-    fs.rmSync(cachePath);
-    const unavailable = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=1.2.3"));
+test("missing or invalid CPA catalog falls back to the official catalog", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-catalog-official-fallback-"));
+  const catalogPath = path.join(directory, "cliproxy-catalog.json");
+  const baseConfig: GatewayConfig = {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    cliproxyBaseUrl: "https://proxy.example/v1",
+    catalogPath,
+    cpaOnly: true,
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-official" }] })) as unknown as typeof fetch;
+  try {
+    const missing = createGatewayHandler(baseConfig, "test-key", "invalid");
+    const cpaOnly = await missing(new Request("http://127.0.0.1:8320/v1/models"));
+    assert.equal(cpaOnly.status, 200);
+    assert.deepEqual(await cpaOnly.json(), {
+      object: "list",
+      data: [{ id: "gpt-official", object: "model", owned_by: "openai" }],
+    });
+    const cpaOnlyCodex = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
+    assert.deepEqual(await cpaOnlyCodex.json(), { models: [{ slug: "gpt-official" }] });
+
+    fs.writeFileSync(catalogPath, "{invalid\n");
+    const split = createGatewayHandler({ ...baseConfig, cpaOnly: false }, "test-key", "invalid");
+    const invalid = await split(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
+    assert.equal(invalid.status, 200);
+    assert.deepEqual(await invalid.json(), { models: [{ slug: "gpt-official" }] });
+
+    fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: "cliproxy/legacy-model" }] }));
+    const legacy = await split(new Request("http://127.0.0.1:8320/v1/models?client_version=3"));
+    assert.deepEqual(await legacy.json(), { models: [{ slug: "gpt-official" }] });
+
+    globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
+    const unavailable = await split(new Request("http://127.0.0.1:8320/v1/models?client_version=2"));
     assert.equal(unavailable.status, 502);
     assert.match(await unavailable.text(), /official \/models returned HTTP 503/);
   } finally {
@@ -139,8 +207,8 @@ test("models cache invalidation preserves models and resets freshness fields", (
   }
 });
 
-test("static sync requires official cache and switches back to dynamic mode", async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "models-static-mode-"));
+test("CPA-only sync writes a static raw catalog and plain sync restores dynamic split mode", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "models-cpa-only-mode-"));
   const previousHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
   const originalFetch = globalThis.fetch;
@@ -160,30 +228,30 @@ test("static sync requires official cache and switches back to dynamic mode", as
     selectedModels: [],
   }));
   fs.writeFileSync(paths.configToml, 'model = "gpt-native"\n');
-  let fetchCalls = 0;
+  const clientVersions: string[] = [];
   globalThis.fetch = (async (url: string | URL | Request) => {
-    fetchCalls += 1;
-    assert.equal(new URL(String(url)).searchParams.get("client_version"), "9.9.9");
+    clientVersions.push(new URL(String(url)).searchParams.get("client_version") ?? "");
     return Response.json({ models: [{ slug: "proxy-model", context_window: 100000 }] });
   }) as unknown as typeof fetch;
 
   try {
-    await assert.rejects(
-      runCli(["models", "--sync", "--static", "--select", "proxy-model"]),
-      /Official models cache not found/,
-    );
-    assert.equal(fetchCalls, 0);
+    await runCli(["models", "--sync", "--cpa-only", "--select", "proxy-model"]);
+    const cpaCatalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8"));
+    assert.deepEqual(cpaCatalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), paths.catalogFile);
+    const cpaConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+    assert.equal(cpaConfig.catalogPath, paths.catalogFile);
+    assert.deepEqual(cpaConfig.selectedModels, ["proxy-model"]);
+    assert.equal(cpaConfig.cpaOnly, true);
+    assert.equal(cpaConfig.websocket, false);
+    assert.deepEqual(clientVersions, ["0.0.0"]);
 
-    fs.writeFileSync(paths.upstreamModelsCacheFile, JSON.stringify({
-      fetched_at: "2026-08-18T00:00:00Z",
-      client_version: "9.9.9",
-      models: [{ slug: "gpt-official", context_window: 300000 }],
-    }));
-    await runCli(["models", "--sync", "--static", "--select", "proxy-model"]);
-    assert.deepEqual(JSON.parse(fs.readFileSync(paths.staticCatalogFile, "utf8")).models.map(
-      (model: { slug: string }) => model.slug,
-    ), ["gpt-official", "cliproxy/proxy-model"]);
-    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), paths.staticCatalogFile);
+    await runCli(["models", "--sync", "--cpa-only", "--websocket", "--select", "proxy-model"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).websocket, true);
+    await assert.rejects(
+      runCli(["models", "--sync", "--cpa-only", "--select", "none"]),
+      /Select at least one CLIProxy model/,
+    );
 
     fs.writeFileSync(paths.modelsCacheFile, JSON.stringify({
       fetched_at: "2026-08-18T00:00:00Z",
@@ -192,23 +260,34 @@ test("static sync requires official cache and switches back to dynamic mode", as
     }));
     await runCli(["models", "--sync", "--select", "proxy-model"]);
     assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
-    assert.equal(fs.existsSync(paths.staticCatalogFile), false);
     assert.deepEqual(JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")).models.map(
       (model: { slug: string }) => model.slug,
-    ), ["cliproxy/proxy-model"]);
+    ), ["proxy-model"]);
     assert.deepEqual(JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")), {
       fetched_at: "2000-01-01T00:00:00Z",
       client_version: "0.0.0",
       models: [{ slug: "gpt-visible" }],
     });
+    const splitConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+    assert.equal(splitConfig.cpaOnly, false);
+    assert.equal(splitConfig.websocket, false);
+    assert.equal(splitConfig.catalogPath, paths.catalogFile);
+
+    // split 模式显式 --websocket 写入 true；未传参数回写 false 形成回滚路径。
+    await runCli(["models", "--sync", "--websocket", "--select", "pass"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).websocket, true);
+
+    await runCli(["models", "--sync", "--select", "pass"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).selectedModels, ["proxy-model"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).websocket, false);
 
     fs.writeFileSync(paths.configToml, 'model_catalog_json = "/tmp/user-catalog.json"\n');
-    const callsBeforeRefusal = fetchCalls;
+    const callsBeforeRefusal = clientVersions.length;
     await assert.rejects(
       runCli(["models", "--sync", "--select", "proxy-model"]),
       /Refusing to replace unmanaged model_catalog_json/,
     );
-    assert.equal(fetchCalls, callsBeforeRefusal);
+    assert.equal(clientVersions.length, callsBeforeRefusal);
   } finally {
     globalThis.fetch = originalFetch;
     if (previousHome === undefined) delete process.env.HOME;

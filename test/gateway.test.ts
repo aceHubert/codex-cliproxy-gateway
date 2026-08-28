@@ -6,7 +6,7 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
 import type { ReadStream, WriteStream } from "node:tty";
-import { decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "../src/gateway.ts";
+import { createGatewayHandler, decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "../src/gateway.ts";
 import {
   GATEWAY_CONFIG_SCHEMA_URL,
   GATEWAY_CONFIG_VERSION,
@@ -24,6 +24,7 @@ import {
   syncCatalog,
 } from "../src/catalog.ts";
 import {
+  applyRoutingMode,
   formatErrorLog,
   removeManagedRuntimeFiles,
   syncGatewayConfigFile,
@@ -97,7 +98,7 @@ test("TOML patch preserves comments, tables, and unrelated formatting", () => {
   const source = '# header\nmodel = "gpt-5.6-sol" # keep\n\n[features]\nfast_mode = true\n';
   const result = patchRootToml(source, {
     openai_base_url: "http://127.0.0.1:8320/v1",
-    model_catalog_json: "/Users/test/.codex/cliproxy-catalog.json",
+    model_catalog_json: "/Users/test/.codex-cliproxy-gateway/cliproxy-catalog.json",
   });
   assert.match(result, /model = "gpt-5.6-sol" # keep/);
   assert.match(result, /\[features\]\nfast_mode = true/);
@@ -108,9 +109,7 @@ test("paths keep Codex files separate from gateway runtime files", () => {
   const paths = resolvePaths({ HOME: "/Users/test" });
   assert.equal(paths.catalogFile, "/Users/test/.codex-cliproxy-gateway/cliproxy-catalog.json");
   assert.equal(paths.modelMergeFile, "/Users/test/.codex-cliproxy-gateway/models.json");
-  assert.equal(paths.upstreamModelsCacheFile, "/Users/test/.codex-cliproxy-gateway/models-cache.json");
   assert.equal(paths.modelsCacheFile, "/Users/test/.codex/models_cache.json");
-  assert.equal(paths.staticCatalogFile, "/Users/test/.codex/cliproxy-catalog.json");
   assert.equal(paths.gatewayConfig, "/Users/test/.codex-cliproxy-gateway/config.json");
   assert.equal(paths.stateFile, "/Users/test/.codex-cliproxy-gateway/state.json");
   assert.equal(paths.stdoutLog, "/Users/test/.codex-cliproxy-gateway/gateway.log");
@@ -119,7 +118,7 @@ test("paths keep Codex files separate from gateway runtime files", () => {
 
 test("TOML uninstall restores only managed keys after manual edits", () => {
   const backup = 'openai_base_url = "https://old.example/v1" # original\nmodel = "gpt-old"\n';
-  const current = 'openai_base_url = "http://127.0.0.1:8320/v1"\nmodel_catalog_json = "/Users/test/.codex/cliproxy-catalog.json"\nmodel = "gpt-new"\n';
+  const current = 'openai_base_url = "http://127.0.0.1:8320/v1"\nmodel_catalog_json = "/Users/test/.codex-cliproxy-gateway/cliproxy-catalog.json"\nmodel = "gpt-new"\n';
   assert.equal(
     restoreRootTomlKeys(current, backup, ["openai_base_url", "model_catalog_json"]),
     'openai_base_url = "https://old.example/v1" # original\nmodel = "gpt-new"\n',
@@ -165,6 +164,7 @@ test("gateway JSON Schema warns without rejecting obsolete config", () => {
     logDir: "",
     selectedModels: ["one", "one"],
     websocket: "yes",
+    cpaOnly: "yes",
     removed_option: true,
   });
   assert.deepEqual(warnings, [
@@ -174,6 +174,7 @@ test("gateway JSON Schema warns without rejecting obsolete config", () => {
     "$.selectedModels should not contain duplicates",
     "$.logDir should not be empty",
     "$.websocket should be boolean",
+    "$.cpaOnly should be boolean",
   ]);
 });
 
@@ -209,12 +210,32 @@ test("command preflight syncs package version and only adds config", () => {
   }
 });
 
+test("routing mode reset makes reinstall use dynamic split configuration", () => {
+  const paths = resolvePaths({ HOME: "/Users/test" });
+  const config = {
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    cpaOnly: true,
+    websocket: true,
+  };
+  applyRoutingMode(config, paths, false);
+  assert.equal(config.cpaOnly, false);
+  assert.equal(config.websocket, false);
+  assert.equal(config.catalogPath, paths.catalogFile);
+});
+
 test("command preflight migrates only the managed legacy catalog path", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-legacy-catalog-path-"));
   const paths = resolvePaths({ HOME: home });
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
-  fs.writeFileSync(paths.staticCatalogFile, "keep\n");
+  const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
+  fs.writeFileSync(legacyCatalogFile, "keep\n");
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",
@@ -223,13 +244,13 @@ test("command preflight migrates only the managed legacy catalog path", () => {
     prefix: "cliproxy/",
     officialBaseUrl: "https://chatgpt.com/backend-api/codex",
     cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
-    catalogPath: paths.staticCatalogFile,
+    catalogPath: legacyCatalogFile,
   }));
   try {
     syncGatewayConfigFile(paths);
     const config = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
     assert.equal(config.catalogPath, paths.catalogFile);
-    assert.equal(fs.readFileSync(paths.staticCatalogFile, "utf8"), "keep\n");
+    assert.equal(fs.readFileSync(legacyCatalogFile, "utf8"), "keep\n");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -365,7 +386,6 @@ test("runtime cleanup preserves user files", () => {
     paths.catalogFile,
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
-    paths.upstreamModelsCacheFile,
     paths.stdoutLog,
     paths.stderrLog,
   ]) {
@@ -380,7 +400,6 @@ test("runtime cleanup preserves user files", () => {
     assert.equal(fs.existsSync(paths.catalogFile), false);
     assert.equal(fs.existsSync(path.join(paths.runtimeHome, "catalog-metadata.json")), false);
     assert.equal(fs.existsSync(paths.modelMergeFile), false);
-    assert.equal(fs.existsSync(paths.upstreamModelsCacheFile), false);
     assert.equal(fs.existsSync(userFile), true);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
@@ -411,10 +430,8 @@ test("invalid model overrides leave the generated catalog unchanged", async () =
   try {
     await assert.rejects(syncCatalog({
       catalogFile,
-      nativeCatalog: { models: [] },
       modelsConfigFile,
       proxyModels: [],
-      prefix: "cliproxy/",
     }), /Invalid model overrides/);
     assert.equal(fs.readFileSync(catalogFile, "utf8"), "keep\n");
 
@@ -426,8 +443,6 @@ test("invalid model overrides leave the generated catalog unchanged", async () =
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
-
-import { createGatewayHandler } from "../src/gateway.ts";
 
 test("official Realtime routes are reserved with 426 before generic forwarding", async () => {
   const originalFetch = globalThis.fetch;
@@ -499,6 +514,37 @@ test("official route preserves OAuth and exact model", async () => {
     assert.equal(captured.url, "https://chatgpt.com/backend-api/codex/responses");
     assert.equal(new Headers(captured.options.headers).get("authorization"), "Bearer oauth-token");
     assert.equal(JSON.parse(new TextDecoder().decode(captured.options.body as ArrayBuffer)).model, "codex-auto-review");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("non-boolean cpaOnly never enables CPA routing", async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamUrl = "";
+  globalThis.fetch = (async (url) => {
+    upstreamUrl = String(url);
+    return new Response("ok");
+  }) as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://official.example/codex",
+      cliproxyBaseUrl: "https://proxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+      cpaOnly: "false" as unknown as boolean,
+      websocket: true,
+    }, "");
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5.6-sol" }),
+    }));
+    assert.equal(upstreamUrl, "https://official.example/codex/responses");
+    assert.equal((await (await handler(new Request("http://127.0.0.1:8320/healthz"))).json()).cpaOnly, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -935,30 +981,87 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     upgrade: "websocket",
     authorization: "Bearer original-oauth",
     "chatgpt-account-id": "acct-1",
+    "x-api-key": "openai-key",
+    "x-goog-api-key": "google-key",
     "openai-beta": "responses_websockets=2026-02-06",
     "sec-websocket-key": "handshake-material",
     "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6",
   };
 
-  // cliproxy 默认不放行：需显式开启 websocket 才转发到 CLIProxy。
+  // split 模式默认关闭 CPA WebSocket；显式开启后按剥前缀模型门控。
   assert.equal(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
     config,
     "proxy-key",
   ), null, "cliproxy WebSocket must stay off by default");
 
-  // 开启后：走 CLIProxy，剥官方 OAuth 换 CLIProxy key，握手头不转发。
-  const cliproxy = responsesWebSocketTarget(
+  // 不兼容模型（剥前缀后非 gpt-/codex-*）即使显式开启也回 426。
+  assert.equal(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
     { ...config, websocket: true },
+    "proxy-key",
+  ), null);
+
+  // split + websocket：兼容 CPA 模型放行，认证域与 CPA-only 相同。
+  const splitCpa = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna" },
+    }),
+    { ...config, websocket: true },
+    "proxy-key",
+  );
+  assert.ok(splitCpa);
+  assert.equal(splitCpa.url, "wss://cliproxy.example/v1/responses");
+  assert.equal(splitCpa.headers.authorization, "Bearer proxy-key");
+  assert.equal(splitCpa.headers["chatgpt-account-id"], undefined);
+  assert.equal(splitCpa.headers["x-api-key"], undefined);
+  assert.equal(splitCpa.headers["x-goog-api-key"], undefined);
+  assert.ok(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "x-codex-routing-hint": "model=cliproxy/codex-auto-review" },
+    }),
+    { ...config, websocket: true },
+    "proxy-key",
+  ));
+
+  // CPA-only + websocket：符合 CPA 侧约定的模型交给 CLIProxy，剥官方 OAuth 与其他 API key。
+  const cpaAllowedHeaders = {
+    ...probeHeaders,
+    "x-codex-routing-hint": "model=gpt-5.6-luna",
+  };
+  const cliproxy = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: cpaAllowedHeaders }),
+    { ...config, cpaOnly: true, websocket: true },
     "proxy-key",
   );
   assert.ok(cliproxy);
   assert.equal(cliproxy.url, "wss://cliproxy.example/v1/responses");
   assert.equal(cliproxy.headers.authorization, "Bearer proxy-key");
   assert.equal(cliproxy.headers["chatgpt-account-id"], undefined);
+  assert.equal(cliproxy.headers["x-api-key"], undefined);
+  assert.equal(cliproxy.headers["x-goog-api-key"], undefined);
   assert.equal(cliproxy.headers["openai-beta"], "responses_websockets=2026-02-06");
   assert.equal(cliproxy.headers["sec-websocket-key"], undefined);
+  // 明知不兼容的第三方模型在网关处直接 426，不拨号 CLIProxy。
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "x-codex-routing-hint": "model=free/glm-5.3-flash" },
+    }),
+    { ...config, cpaOnly: true, websocket: true },
+    "proxy-key",
+  ), null);
+  assert.ok(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "x-codex-routing-hint": "model=codex-auto-review" },
+    }),
+    { ...config, cpaOnly: true, websocket: true },
+    "proxy-key",
+  ));
+  assert.equal(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", { headers: cpaAllowedHeaders }),
+    { ...config, cpaOnly: true, websocket: false },
+    "proxy-key",
+  ), null);
 
   // 官方 hint：OAuth 原样透传。
   const official = responsesWebSocketTarget(new Request("http://127.0.0.1:8320/v1/responses", {
@@ -1001,6 +1104,55 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     }),
     config,
   ), null);
+});
+
+test("CPA-only mode forwards HTTP and WebSocket models without prefix routing", async () => {
+  const originalFetch = globalThis.fetch;
+  let captured: { url: string; options: RequestInit } | undefined;
+  globalThis.fetch = (async (url, options) => {
+    captured = { url: String(url), options: options ?? {} };
+    return new Response("ok", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const config = {
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      cliproxyBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+      cpaOnly: true,
+      websocket: true,
+    };
+    const handler = createGatewayHandler(config, "proxy-key");
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer oauth-token",
+        "chatgpt-account-id": "acct-1",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "gpt-5.6-sol", input: "test" }),
+    }));
+    assert.ok(captured);
+    assert.equal(captured.url, "https://cliproxy.example/v1/responses");
+    assert.equal(new Headers(captured.options.headers).get("authorization"), "Bearer proxy-key");
+    assert.equal(new Headers(captured.options.headers).get("chatgpt-account-id"), null);
+    assert.equal((await new Response(captured.options.body).json() as { model: string }).model, "gpt-5.6-sol");
+
+    const target = responsesWebSocketTarget(new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: {
+        upgrade: "websocket",
+        authorization: "Bearer oauth-token",
+        "x-codex-routing-hint": "model=gpt-5.6-sol",
+      },
+    }), config, "proxy-key");
+    assert.equal(target?.url, "wss://cliproxy.example/v1/responses");
+    assert.equal(target?.routeKind, "cliproxy");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("log groups come from the request path and stay filesystem-safe", async () => {

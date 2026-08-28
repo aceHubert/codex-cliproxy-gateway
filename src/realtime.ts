@@ -67,6 +67,7 @@ export function checkFrameRouting(
   routeKind: "cliproxy" | "official",
   prefix: string,
 ): string | null {
+  if (!prefix) return frame;
   let payload: unknown;
   try {
     payload = JSON.parse(frame);

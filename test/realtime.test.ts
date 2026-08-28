@@ -466,6 +466,11 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
     '{"type":"response.cancel"}',
   );
   assert.equal(checkFrameRouting("not json at all", "official", "cliproxy/"), "not json at all");
+  assert.equal(
+    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-sol"}', "cliproxy", ""),
+    '{"type":"response.create","model":"gpt-5.6-sol"}',
+    "CPA-only sockets forward every model without route switching",
+  );
 });
 
 test("WebSocket bridge records lifecycle events into the live route log", () => {
@@ -501,6 +506,38 @@ test("WebSocket bridge records lifecycle events into the live route log", () => 
   } finally {
     fs.rmSync(logDir, { recursive: true, force: true });
   }
+});
+
+test("route mismatch closes downstream 1012 without sending the frame upstream", () => {
+  const sent: unknown[] = [];
+  let upstreamClosed: { code: number; reason: string } | undefined;
+  const upstream = {
+    readyState: WebSocket.OPEN,
+    send(frame: unknown) { sent.push(frame); },
+    close(code: number, reason: string) { upstreamClosed = { code, reason }; },
+  } as unknown as WebSocket;
+  const downstreamClosed: Array<{ code: number; reason: string }> = [];
+  const socket = {
+    data: {
+      url: "wss://official.example/v1/responses",
+      headers: {},
+      upstream,
+      queue: [],
+      queuedBytes: 0,
+      routeKind: "official",
+      prefix: "cliproxy/",
+    },
+    close(code: number, reason: string) { downstreamClosed.push({ code, reason }); },
+  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+
+  realtimeWebSocketHandler.message?.(
+    socket,
+    '{"type":"response.create","model":"cliproxy/gpt-5.6-luna"}',
+  );
+
+  assert.deepEqual(sent, []);
+  assert.deepEqual(downstreamClosed, [{ code: 1012, reason: "Model routing changed; reconnect required" }]);
+  assert.deepEqual(upstreamClosed, { code: 1000, reason: "Model routing changed" });
 });
 
 // 升级转发的前提：拨号上游是异步的，必须确认 Bun 允许在 fetch 内 await 之后再
