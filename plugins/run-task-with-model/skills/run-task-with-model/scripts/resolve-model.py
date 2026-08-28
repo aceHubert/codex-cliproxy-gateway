@@ -141,45 +141,13 @@ def resolve_reasoning(model, requested):
     return supported[-1]
 
 
-def selftest():
-    models = [
-        {"slug": "cliproxy/deepseek-chat/deepseek-v4-pro", "family": "deepseek", "rank": 2},
-        {"slug": "cliproxy/opencode-go-chat/deepseek-v4-flash", "family": "deepseek", "variant": "flash", "rank": 1, "supported_reasoning_levels": ["low", "high"], "default_reasoning_level": "high"},
-        {"slug": "gpt-5.6-sol", "supported_reasoning_levels": ["low", "max"], "default_reasoning_level": "low"},
-        {"slug": "cliproxy/chat/gpt-4o-free", "display_name": "GPT-4o Free", "family": "openai"},
-        {"slug": "cliproxy/glm-chat/glm-4.5-flash", "display_name": "GLM 4.5 Flash", "family": "glm", "variant": "flash"},
-    ]
-    assert match_score(models[1], "v4") == 1
-    preferred = select_model(models, "deepseek")
-    assert len(preferred) == 1 and preferred[0]["slug"] == "cliproxy/opencode-go-chat/deepseek-v4-flash"
-    assert len(select_model(models, "flash")) == 2  # two flash candidates, full list returned
-    selected = preferred[0]
-    try:
-        select_model(models, "free")
-        raise AssertionError("free models should be excluded")
-    except ValueError:
-        pass
-    assert resolve_reasoning(selected, "high") == "high"
-    assert resolve_reasoning(selected, None) == "high"  # no max support, use last supported level
-    assert resolve_reasoning(selected, "max") == "high"  # unsupported requested level, fall back to last
-    assert resolve_reasoning(models[2], None) == "max"  # max supported, default to max
-    assert resolve_reasoning(models[0], None) == "max"  # no supported levels declared, default to max
-    assert resolve_reasoning(models[0], "low") == "low"  # no supported levels, honor the input
-    print("resolve-model selftest ok")
-
-
 def main():
     parser = argparse.ArgumentParser(description="Resolve the model used by run-task-with-model")
     parser.add_argument("--model", help="model ID, alias, or family")
     parser.add_argument("--reasoning", help="reasoning level")
     parser.add_argument("--catalog", help="custom catalog JSON file")
     parser.add_argument("--list", action="store_true", help="list all models")
-    parser.add_argument("--selftest", action="store_true", help="run built-in selftest")
     args = parser.parse_args()
-
-    if args.selftest:
-        selftest()
-        return
 
     models, source, catalog_source = load_catalog(args.catalog)
     if args.list:

@@ -26,6 +26,11 @@ python3 <directory containing this SKILL.md>/scripts/resolve-model.py \
   --reasoning max
 ```
 
+Always run the resolver outside the sandbox by setting the tool invocation's
+`sandbox_permissions=require_escalated`. This is required because sandboxed
+`codex debug models` may silently fall back to the bundled catalog and report
+gateway models as unavailable.
+
 3. When a single model is returned, use `model`, `display_name`, and `reasoning` directly; do not re-negotiate the model or reasoning level.
 
 4. Only when `candidates` is returned (multiple matches) must you call `request_user_input` to let the user pick one of the listed options (each with its own `reasoning`), then rerun the resolver with the chosen full slug. When a `message` is returned, no model matched; tell the user and stop.

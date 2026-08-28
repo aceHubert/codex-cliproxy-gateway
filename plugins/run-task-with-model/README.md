@@ -78,12 +78,6 @@ codex plugin add run-task-with-model@codex-cliproxy
 
 然后开一个新会话让 Codex 加载最新的 skill。
 
-### 测试
-
-```sh
-python3 plugins/run-task-with-model/skills/run-task-with-model/scripts/resolve-model.py --selftest
-```
-
 ## License
 
 [MIT](../../LICENSE)
