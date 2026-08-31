@@ -9,6 +9,8 @@ import {
   stopCodexAppServers,
 } from "../src/app-server.ts";
 import { runCli } from "../src/cli.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
+import { resolvePaths } from "../src/paths.ts";
 import type { ProcessIdentity } from "../src/app-server.ts";
 
 function appServer(pid: number, overrides: Partial<ProcessIdentity> = {}): ProcessIdentity {
@@ -105,27 +107,122 @@ test("process enumeration failure remains unknown", async () => {
 });
 
 test("restart-codex requires an explicit catalog sync", async () => {
-  await assert.rejects(runCli(["models", "--restart-codex"]), /requires models --sync/);
+  await assert.rejects(runCli(["models", "--restart-codex"]), /--restart-codex requires models --sync/);
 });
 
-test("CPA-only mode is only accepted with an explicit catalog sync", async () => {
-  await assert.rejects(runCli(["models", "--cpa-only"]), /requires models --sync/);
+test("config.toml-mutating commands accept restart-codex", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "restart-codex-options-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+
+  try {
+    fs.writeFileSync(paths.stateFile, "{}");
+    await assert.rejects(runCli(["install", "--restart-codex"]), /Already installed/);
+
+    fs.rmSync(paths.stateFile);
+    await assert.rejects(runCli(["uninstall", "--restart-codex"]), /No managed installation found/);
+    await assert.rejects(runCli(["restart", "--restart-codex"]), /Gateway is not installed/);
+    await assert.rejects(runCli(["models", "--sync", "--restart-codex"]), /Gateway is not installed/);
+    await assert.rejects(runCli(["status", "--restart-codex"]), /Unknown option --restart-codex/);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
-test("WebSocket mode requires an explicit catalog sync", async () => {
-  await assert.rejects(runCli(["models", "--websocket"]), /requires models --sync/);
-  // split 模式的 --websocket 已通过参数校验；隔离 HOME 确认命令止步于未安装错误。
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "ws-param-matrix-"));
+test("误改的 codex-restart 参数不再作为别名接受", async () => {
+  await assert.rejects(runCli(["models", "--codex-restart"]), /--codex-restart requires a value/);
+  for (const command of ["install", "uninstall", "restart", "models"]) {
+    await assert.rejects(runCli([command, "--codex-restart", "true"]), /Unknown option --codex-restart/);
+  }
+});
+
+test("cpa-only switch requires models --sync", async () => {
+  await assert.rejects(runCli(["models", "--cpa-only"]), /--cpa-only requires models --sync/);
+});
+
+test("unknown options are rejected instead of silently ignored", async () => {
+  await assert.rejects(runCli(["models", "--log", "on"]), /Unknown option --log for command "models"/);
+  await assert.rejects(runCli(["models", "--sync", "--websocket", "on"]), /Unknown option --websocket for command "models"/);
+  await assert.rejects(runCli(["config", "--logg", "on"]), /Unknown option --logg for command "config"/);
+  await assert.rejects(runCli(["config", "--cpa-only"]), /Unknown option --cpa-only for command "config"/);
+  // 隔离 HOME 确认 config 命令止步于未安装错误，而非参数报错。
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-command-"));
   const previousHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
   process.env.HOME = home;
   delete process.env.CODEX_HOME;
   try {
-    await assert.rejects(runCli(["models", "--sync", "--websocket"]), /Gateway is not installed/);
+    await assert.rejects(runCli(["config", "--log", "on"]), /Gateway is not installed/);
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;
     if (previousCodexHome !== undefined) process.env.CODEX_HOME = previousCodexHome;
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("config writes every requested update while a query stays read-only", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-always-reload-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousLog = console.log;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  console.log = () => {};
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    $schema: GATEWAY_CONFIG_SCHEMA_URL,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    selectedModels: [],
+    requestLogging: true,
+    maxRequestLogs: 0,
+    cpaOnly: false,
+    logDir: paths.logDir,
+  }));
+
+  try {
+    const beforeUpdate = fs.statSync(paths.gatewayConfig).ino;
+    await runCli(["config", "--log", "on"]);
+    const afterUpdate = fs.statSync(paths.gatewayConfig).ino;
+    assert.notEqual(afterUpdate, beforeUpdate, "matching config updates must still rewrite the config");
+
+    await runCli(["config"]);
+    assert.equal(
+      fs.statSync(paths.gatewayConfig).ino,
+      afterUpdate,
+      "a config query must not rewrite the config",
+    );
+  } finally {
+    console.log = previousLog;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("websocket and bare select flags no longer exist", async () => {
+  await assert.rejects(runCli(["models", "--sync", "--websocket"]), /--websocket requires a value/);
+  await assert.rejects(runCli(["models", "--sync", "--select"]), /--select requires a value/);
 });

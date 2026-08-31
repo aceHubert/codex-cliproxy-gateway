@@ -190,6 +190,38 @@ export function logGatewayError(sink: RequestLogSink | undefined, group: string,
   append(sink, errorLogFile(), text);
 }
 
+export interface ConfigChange {
+  field: string;
+  before: unknown;
+  after: unknown;
+}
+
+export interface ConfigChangeEntry {
+  command: string;
+  changes: ConfigChange[];
+}
+
+/**
+ * 配置审计：CLI 每次真实改动配置都落一条，与请求日志同目录、同保留策略。
+ * 审计不依赖 requestLogging 开关，关闭请求日志后仍能追溯配置变更。
+ */
+export function logConfigChange(sink: RequestLogSink | undefined, entry: ConfigChangeEntry): void {
+  if (!sink || entry.changes.length === 0) return;
+  const lines = [
+    `--${localTime()}--`,
+    `=== config changed by \`${entry.command}\` ===`,
+    ...entry.changes.map((change) =>
+      `  ${change.field}: ${JSON.stringify(change.before)} -> ${JSON.stringify(change.after)}`),
+    ``,
+  ];
+  append(sink, configAuditLogFile(), `${lines.join("\n")}\n`);
+}
+
+function configAuditLogFile(at = fileStamp()): LogFileRef {
+  const prefix = `${LOG_PREFIX}-config-`;
+  return { name: `${prefix}${at}.log`, prefix };
+}
+
 export interface RealtimeEntry {
   event: string;
   url: string;

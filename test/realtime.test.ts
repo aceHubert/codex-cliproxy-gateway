@@ -443,8 +443,8 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
   );
   assert.equal(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "cliproxy", "cliproxy/"),
-    null,
-    "official frame on a cliproxy socket must be rejected too",
+    '{"type":"response.create","model":"gpt-5.6-luna"}',
+    "an unprefixed title model stays on the established CPA route",
   );
 
   // 前缀是网关加的，CLIProxy 模型表里没有，必须与 HTTP 路径一样剥掉。
@@ -517,6 +517,7 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
     close(code: number, reason: string) { upstreamClosed = { code, reason }; },
   } as unknown as WebSocket;
   const downstreamClosed: Array<{ code: number; reason: string }> = [];
+  let pinned = 0;
   const socket = {
     data: {
       url: "wss://official.example/v1/responses",
@@ -526,6 +527,7 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
       queuedBytes: 0,
       routeKind: "official",
       prefix: "cliproxy/",
+      pinCpaThread() { pinned += 1; },
     },
     close(code: number, reason: string) { downstreamClosed.push({ code, reason }); },
   } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
@@ -536,8 +538,35 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
   );
 
   assert.deepEqual(sent, []);
+  assert.equal(pinned, 1);
   assert.deepEqual(downstreamClosed, [{ code: 1012, reason: "Model routing changed; reconnect required" }]);
   assert.deepEqual(upstreamClosed, { code: 1000, reason: "Model routing changed" });
+});
+
+test("CPA route keeps an unprefixed Luna title frame on the CPA upstream", () => {
+  const sent: unknown[] = [];
+  const upstream = {
+    readyState: WebSocket.OPEN,
+    send(frame: unknown) { sent.push(frame); },
+    close() { throw new Error("CPA title frame must not close the upstream"); },
+  } as unknown as WebSocket;
+  const socket = {
+    data: {
+      url: "wss://cliproxy.example/v1/responses",
+      headers: {},
+      upstream,
+      queue: [],
+      queuedBytes: 0,
+      routeKind: "cliproxy",
+      prefix: "cliproxy/",
+    },
+    close() { throw new Error("CPA title frame must not close the downstream"); },
+  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  const frame = '{"type":"response.create","model":"gpt-5.6-luna","input":[]}';
+
+  realtimeWebSocketHandler.message?.(socket, frame);
+
+  assert.deepEqual(sent, [frame]);
 });
 
 // 升级转发的前提：拨号上游是异步的，必须确认 Bun 允许在 fetch 内 await 之后再
@@ -816,6 +845,59 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
       .join("");
     assert.match(logText, /ws-dial-failed/);
   } finally {
+    gateway.stop(true);
+    upstream.stop(true);
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("slow upstream handshakes within the dial budget still bridge instead of 426", { timeout: 30_000 }, async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-slow-"));
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, server) {
+      // 5.8s 卡在旧 5s 截断与新预算之间，复现经 CF 偶发的慢握手（实测 5771ms 那次）。
+      await Bun.sleep(5_800);
+      if (server.upgrade(request)) return;
+      return new Response("upgrade failed", { status: 400 });
+    },
+    websocket: {
+      message(ws, message) { ws.send(message); },
+    },
+  });
+  const gateway = startGateway(
+    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    "builtin",
+  );
+  const url = new URL("/v1/responses", gateway.url);
+  url.protocol = "ws:";
+  const ClientWebSocket = WebSocket as unknown as new (
+    url: string | URL,
+    options: Bun.WebSocketOptions,
+  ) => WebSocket;
+  const client = new ClientWebSocket(url, {
+    headers: {
+      "openai-beta": "responses_websockets=2026-02-06",
+      "x-codex-routing-hint": "model=gpt-5.6-luna",
+    },
+  });
+  try {
+    const reply = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("slow handshake bridge timed out")), 15_000);
+      client.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("client socket errored; expected the slow handshake to bridge"));
+      };
+      client.onopen = () => client.send("slow-handshake-echo");
+      client.onmessage = (event) => {
+        clearTimeout(timer);
+        resolve(event.data);
+      };
+    });
+    assert.equal(reply, "slow-handshake-echo");
+  } finally {
+    client.close();
     gateway.stop(true);
     upstream.stop(true);
     fs.rmSync(logDir, { recursive: true, force: true });

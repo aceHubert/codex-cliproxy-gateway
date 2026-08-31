@@ -286,11 +286,48 @@ export function decideRoute(model: unknown, prefix = "cliproxy/"): Route {
   return { kind: "official", upstreamModel: model };
 }
 
-function copyRequestHeaders(request: Request, route: Route, apiKey: string): Headers {
+function requestThreadId(request: Request, header = "thread-id"): string | undefined {
+  const threadId = request.headers.get(header)?.trim();
+  return threadId && threadId.length <= 128 ? threadId : undefined;
+}
+
+function rememberCpaThread(cpaThreads: Set<string>, threadId: string): void {
+  // ponytail: 仅保留进程内 thread UUID；实测内存成为问题时再加持久化清理策略。
+  cpaThreads.add(threadId);
+}
+
+function decideThreadRoute(
+  request: Request,
+  model: unknown,
+  prefix: string,
+  cpaThreads: Set<string>,
+): Route {
+  const route = decideRoute(model, prefix);
+  const threadId = requestThreadId(request);
+  if (route.kind === "cliproxy") {
+    if (threadId) rememberCpaThread(cpaThreads, threadId);
+    return route;
+  }
+  const parentThreadId = requestThreadId(request, "x-codex-parent-thread-id");
+  if (!(threadId && cpaThreads.has(threadId)) && !(parentThreadId && cpaThreads.has(parentThreadId))) {
+    return route;
+  }
+  if (threadId) rememberCpaThread(cpaThreads, threadId);
+  return { kind: "cliproxy", upstreamModel: typeof model === "string" ? model : "" };
+}
+
+function stripRoutingHintPrefix(value: string, prefix: string): string {
+  return value.replace(/((?:^|[;,\s])model=)([^;,\s]+)/, (match, marker, model) =>
+    model.startsWith(prefix) ? `${marker}${model.slice(prefix.length)}` : match);
+}
+
+function copyRequestHeaders(request: Request, route: Route, apiKey: string, prefix: string): Headers {
   const headers = new Headers(request.headers);
   for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
   headers.delete("accept-encoding");
   if (route.kind === "cliproxy") {
+    const routingHint = headers.get("x-codex-routing-hint");
+    if (routingHint) headers.set("x-codex-routing-hint", stripRoutingHintPrefix(routingHint, prefix));
     headers.delete("authorization");
     headers.delete("chatgpt-account-id");
     headers.delete("x-api-key");
@@ -350,12 +387,13 @@ function modelFromRoutingHint(request: Request): string | undefined {
 
 /**
  * Responses over WebSocket 的转发目标：Codex 试探（GET + upgrade）带 x-codex-routing-hint，
- * 据此选上游；realtime 保留路径与关闭开关时返回 null（维持原有 426 行为）。
+ * 据此选上游；realtime 保留路径返回 null（维持原有 426 行为）。
  */
 export function responsesWebSocketTarget(
   request: Request,
   config: GatewayConfig,
   apiKey?: string,
+  cpaThreads = new Set<string>(),
 ): { url: string; headers: Record<string, string>; routeKind: "cliproxy" | "official" } | null {
   if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return null;
   const mountPath = config.mountPath || "/v1";
@@ -364,15 +402,15 @@ export function responsesWebSocketTarget(
   const hintedModel = modelFromRoutingHint(request);
   const route = config.cpaOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
-    : decideRoute(hintedModel, prefix);
-  // CPA WebSocket 需要显式开启；official 路由不受开关影响。
-  if (route.kind === "cliproxy" && config.websocket !== true) return null;
-  // 不按模型门控：CPA 对每个请求自行决定上游走 ws 还是 HTTP/SSE，
-  // 非 codex 凭据的模型会在上游静默退回 HTTP/SSE，网关无需替它预判。
+    : decideThreadRoute(request, hintedModel, prefix, cpaThreads);
+  // 不做任何网关侧门控：CPA WebSocket 升级一律桥接 CLIProxy，由上游按请求决定
+  // 走 ws 还是 HTTP/SSE；上游不支持时握手失败，拨号失败路径回 426 令客户端降级。
   const baseUrl = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
   const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
   const headers = forwardedHeaders(request.headers, false);
   if (route.kind === "cliproxy") {
+    const routingHint = headers["x-codex-routing-hint"];
+    if (routingHint) headers["x-codex-routing-hint"] = stripRoutingHintPrefix(routingHint, prefix);
     // 与 HTTP 路径的 copyRequestHeaders 对齐：剥官方 OAuth，注入 CLIProxy key。
     delete headers.authorization;
     delete headers["chatgpt-account-id"];
@@ -477,7 +515,7 @@ async function catalogModelsResponse(
     } catch {}
   }
   const refreshOfficial = async (): Promise<ModelCatalog> => {
-    const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "");
+    const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "", config.prefix);
     headers.delete("if-none-match");
     headers.delete("if-modified-since");
     const response = await fetch(joinUpstreamUrl(config.officialBaseUrl, request.url, config.mountPath), {
@@ -514,6 +552,7 @@ export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
   realtimeProviderMode: RealtimeProviderMode = "invalid",
+  cpaThreads = new Set<string>(),
 ): (request: Request) => Promise<Response> {
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
@@ -527,7 +566,6 @@ export function createGatewayHandler(
       return Response.json({
         ok: true,
         cpaOnly: config.cpaOnly === true,
-        websocket: config.websocket === true,
         prefix,
         port: config.port,
       });
@@ -553,7 +591,7 @@ export function createGatewayHandler(
     }
 
     if (config.cpaOnly === true) {
-      const headers = copyRequestHeaders(request, { kind: "cliproxy", upstreamModel: "" }, apiKey);
+      const headers = copyRequestHeaders(request, { kind: "cliproxy", upstreamModel: "" }, apiKey, prefix);
       const contentEncoding = request.headers.get("content-encoding");
       if (contentEncoding) headers.set("content-encoding", contentEncoding);
       try {
@@ -585,16 +623,16 @@ export function createGatewayHandler(
 
     // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
     const hinted = modelFromRoutingHint(request);
-    let route = hinted === undefined ? undefined : decideRoute(hinted, prefix);
+    let route = hinted === undefined ? undefined : decideThreadRoute(request, hinted, prefix, cpaThreads);
     let bytes: ArrayBuffer | undefined;
     let json: Record<string, unknown> | undefined;
     try {
       bytes = await readBodyBytes(request);
       if (route === undefined || route.kind === "cliproxy") {
         json = decodeJsonBody(bytes, request.headers);
-        route ??= decideRoute(json?.model, prefix);
+        route ??= decideThreadRoute(request, json?.model, prefix, cpaThreads);
       }
-      route ??= decideRoute(json?.model, prefix);
+      route ??= decideThreadRoute(request, json?.model, prefix, cpaThreads);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
@@ -603,7 +641,7 @@ export function createGatewayHandler(
     }
     const upstreamBase = route.kind === "cliproxy" ? config.cliproxyBaseUrl : config.officialBaseUrl;
     let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);
-    const headers = copyRequestHeaders(request, route, apiKey);
+    const headers = copyRequestHeaders(request, route, apiKey, prefix);
 
     let body: ArrayBuffer | string | undefined = bytes;
     if (route.kind === "cliproxy" && json && typeof json === "object") {
@@ -766,6 +804,7 @@ async function bridgeUpstreamWebSocket(
     headers: Record<string, string>;
     routeKind?: "cliproxy" | "official";
     prefix?: string;
+    pinCpaThread?: () => void;
   },
   sink: RequestLogSink | undefined,
   dialFailureResponse: (error: Error) => Response,
@@ -783,6 +822,7 @@ async function bridgeUpstreamWebSocket(
     logFile,
     routeKind: target.routeKind,
     prefix: target.prefix,
+    pinCpaThread: target.pinCpaThread,
   };
   const startedAt = Date.now();
   let upstream: WebSocket;
@@ -820,7 +860,8 @@ export function startGateway(
     throw new Error("The gateway server must run with Bun");
   }
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode);
+  const cpaThreads = new Set<string>();
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads);
   const server = Bun.serve<RealtimeSocketData>({
     hostname: config.host,
     port: config.port,
@@ -849,13 +890,18 @@ export function startGateway(
           });
         });
       }
-      // Responses over WebSocket：按 hint 选上游转发；拨号失败回 426 令客户端降级 HTTPS/SSE。
-      const wsTarget = responsesWebSocketTarget(request, config, apiKey);
+      // Responses over WebSocket：按 hint + thread 粘性选上游；拨号失败回 426 降级 HTTPS/SSE。
+      const wsTarget = responsesWebSocketTarget(request, config, apiKey, cpaThreads);
       if (wsTarget) {
+        const threadId = requestThreadId(request);
         return bridgeUpstreamWebSocket(
           request,
           server,
-          { ...wsTarget, prefix: config.cpaOnly === true ? "" : config.prefix || "cliproxy/" },
+          {
+            ...wsTarget,
+            prefix: config.cpaOnly === true ? "" : config.prefix || "cliproxy/",
+            pinCpaThread: threadId ? () => rememberCpaThread(cpaThreads, threadId) : undefined,
+          },
           resolveLogSink(config),
           () => websocketNotSupportedResponse("websocket-upstream-unavailable"),
         );

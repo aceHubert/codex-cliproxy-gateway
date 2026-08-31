@@ -56,11 +56,14 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   routeKind?: "cliproxy" | "official";
   /** cliproxy 模型前缀，用于逐帧校验与剥离。 */
   prefix?: string;
+  /** official 连接首次收到明确的 cliproxy/* 帧时，固定该 thread 的后续路由。 */
+  pinCpaThread?: () => void;
 }
 
 /**
  * 校验帧的模型与连接路由是否一致。
- * 返回改写后的帧；返回 null 表示串话（模型该走另一个上游），调用方需断开让客户端重连。
+ * official 只拒绝明确的 cliproxy/*；CPA thread 已固定路由，无前缀标题/系统帧继续走 CPA。
+ * 返回改写后的帧；返回 null 表示 official 收到 CPA 帧，调用方需固定 thread 后重连。
  */
 export function checkFrameRouting(
   frame: string,
@@ -75,9 +78,9 @@ export function checkFrameRouting(
     return frame; // 非 JSON 帧原样透传
   }
   if (!isRecord(payload) || typeof payload.model !== "string") return frame;
-  const wanted = payload.model.startsWith(prefix) ? "cliproxy" : "official";
-  if (wanted !== routeKind) return null;
-  if (routeKind !== "cliproxy") return frame;
+  const prefixed = payload.model.startsWith(prefix);
+  if (routeKind === "official") return prefixed ? null : frame;
+  if (!prefixed) return frame;
   // 前缀是网关加的，上游模型表里没有，必须与 HTTP 路径一样剥掉再转发。
   payload.model = payload.model.slice(prefix.length);
   return JSON.stringify(payload);
@@ -347,7 +350,9 @@ export function websocketUrl(url: URL): URL {
   return url;
 }
 
-const UPSTREAM_DIAL_TIMEOUT_MS = 5_000;
+// 经 CF 的上游握手实测 1.2–5.8s：按 5s 截断会把"慢但能成功"的握手变成 426，而 Codex 收到
+// 426 后会退避到纯 SSE 约十分钟，代价远高于多等几秒；10s 覆盖实测最慢成功值约 1.7 倍。
+const UPSTREAM_DIAL_TIMEOUT_MS = 10_000;
 
 /**
  * 拨号上游 WebSocket，握手成功才 resolve。调用方必须先拨通、再 server.upgrade 客户端，
@@ -505,6 +510,7 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
     if (ws.data.routeKind && typeof frame === "string") {
       const routed = checkFrameRouting(frame, ws.data.routeKind, ws.data.prefix ?? "cliproxy/");
       if (routed === null) {
+        if (ws.data.routeKind === "official") ws.data.pinCpaThread?.();
         logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
           event: "ws-route-mismatch",
           url: ws.data.url,

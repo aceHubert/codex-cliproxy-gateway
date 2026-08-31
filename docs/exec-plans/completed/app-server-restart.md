@@ -1,5 +1,13 @@
 # Codex app-server 安全停止
 
+> **历史决策（2026-08-30）**：参数名曾统一为 `--codex-restart`，并从
+> `models --sync` 扩展到所有会操作受管 `~/.codex/config.toml` 的命令：
+> `install`、`uninstall`、`restart` 与 `models --sync`。下文保留首次实现时的
+> 历史范围。
+>
+> **恢复（2026-08-31）**：上述更名已撤销，当前参数名恢复为 `--restart-codex`；
+> 下文的操作提示与示例均使用当前名称。
+
 ## 目标
 
 在模型目录同步完成后，仅在用户显式同意时安全停止当前用户的旧 Codex
@@ -44,3 +52,6 @@ app-server，使后续由 Codex App 拉起的进程重新读取磁盘目录。
 - 2026-08-17：复用现有 `models --sync`，仅新增 `--restart-codex`，不增加重复命令。
 - 2026-08-17：macOS 使用 Bun FFI 调用原生 sysctl 读取精确 argv，避免 `ps comm` 截断。
 - 2026-08-17：只停止旧进程，不主动启动或声称已重启。
+- 2026-08-30（历史决策，2026-08-31 已恢复）：参数更名为 `--codex-restart`，并扩展到 `install`、`uninstall`、
+  `restart` 与 `models --sync`；每个命令都在完成 `config.toml` 写入后再停止
+  Codex app-server。

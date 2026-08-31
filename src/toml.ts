@@ -117,13 +117,24 @@ export function readRootTomlString(source: string, key: string): string | undefi
   const match = lines[index].match(ASSIGN_RE);
   if (!match) return undefined;
   const raw = match[4].trim();
-  const jsonString = raw.match(/^"(?:[^"\\]|\\.)*"/)?.[0];
-  if (!jsonString) return undefined;
-  try {
-    return JSON.parse(jsonString);
-  } catch {
-    return undefined;
+  const basic = raw.match(/^"(?:[^"\\]|\\.)*"/);
+  if (basic) {
+    try {
+      return JSON.parse(basic[0]);
+    } catch {
+      return undefined;
+    }
   }
+  // TOML literal string：单引号内没有转义，内容原样返回。
+  const literal = raw.match(/^'[^'\n]*'/);
+  if (literal) return literal[0].slice(1, -1);
+  return undefined;
+}
+
+/** 键是否存在于根表：用于区分「值不可解析」与「键不存在」，防止把受管键误判为缺失。 */
+export function hasRootTomlKey(source: string, key: string): boolean {
+  const lines = source.match(/.*(?:\r?\n|$)/g)?.filter(Boolean) ?? [];
+  return findRootKey(lines, key) >= 0;
 }
 
 export function atomicWrite(file: string, contents: string, mode = 0o600): void {

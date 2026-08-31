@@ -18,10 +18,25 @@ Codex `app-server` 在启动时读取 `model_catalog_json`，并在内存中构�
 
 ## 触发策略
 
-1. 不带 `--restart-codex` 的 sync 只更新配置和目录，不发送任何信号。
-2. 用户在任意 `models --sync` 中显式传入 `--restart-codex` 时，才允许停止进程；
-   CPA-only 静态目录切换需要它，动态 split 模式可用它立即刷新当前模型选择器。
+1. 不带 `--restart-codex` 的命令不枚举或停止 Codex app-server。路由模式
+   实际变化时，CLI 仍会自动重启网关；`config` 写入任何配置后也统一重启
+   网关。这些是与 Codex 进程无关的另一层动作。
+2. `install`、`uninstall`、`restart` 和 `models --sync` 都会操作受管的
+   `~/.codex/config.toml`，因此统一接受 `--restart-codex`。只有显式传入该参数时
+   才允许停止 Codex app-server；
+   CPA-only 静态目录切换或更新需要重新加载 app-server，动态 split 模式可用
+   该参数立即刷新当前模型选择器。不使用该参数时，由用户手动重启 Codex
+   或等待它自身刷新。
 3. 必须在日志中说明 active turn 可能被中断；这是显式同意边界。
+4. 手工修改 `config.json` 或 `config.toml` 不会触发任何网关重启或 Codex
+   app-server 刷新。
+
+## 两层重启边界
+
+- **网关重启**：模式在 split 与 CPA-only 之间变化、每次带参数的 `config`
+  配置写入，或显式执行 `codex-cliproxy restart` 时发生。
+- **Codex app-server 刷新**：只由 `--restart-codex` 或用户重启 Codex 触发。
+  `--restart-codex` 只停止旧进程，不声称已启动新进程。
 
 ## 进程匹配
 

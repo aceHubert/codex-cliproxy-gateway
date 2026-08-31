@@ -74,10 +74,6 @@
       "type": "integer",
       "minimum": 0
     },
-    "websocket": {
-      "description": "是否允许 CPA Responses WebSocket；false 时 CPA 路由回 426 令客户端降级 HTTP/SSE。official Responses WebSocket 不受影响。",
-      "type": "boolean"
-    },
     "cpaOnly": {
       "description": "是否只使用 CLIProxy 并纯转发模型名，不添加 cliproxy/ 前缀。",
       "type": "boolean"

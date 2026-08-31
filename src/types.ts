@@ -30,11 +30,6 @@ export interface GatewayConfig {
   logDir?: string;
   /** 每类日志保留的最大文件数；0 表示不限制。 */
   maxRequestLogs?: number;
-  /**
-   * 是否允许 CPA Responses WebSocket；false 时 CPA 路由回 426 走 HTTP/SSE。
-   * official Responses WebSocket 不受此开关影响。
-   */
-  websocket?: boolean;
   /** 是否启用 CPA-only 纯转发：目录和请求均只使用 CLIProxy，模型名不加前缀。 */
   cpaOnly?: boolean;
 }

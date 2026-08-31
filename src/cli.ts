@@ -15,6 +15,7 @@ import {
   restoreRootTomlKeys,
   atomicWrite,
   readRootTomlString,
+  hasRootTomlKey,
 } from "./toml.ts";
 import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
 import {
@@ -26,6 +27,8 @@ import {
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
+import { logConfigChange } from "./request-log.ts";
+import type { ConfigChange, RequestLogSink } from "./request-log.ts";
 import { stopCodexAppServers } from "./app-server.ts";
 import {
   installLaunchAgent,
@@ -51,7 +54,6 @@ const DEFAULTS = {
   cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
   requestLogging: false,
   maxRequestLogs: 0,
-  websocket: false,
   cpaOnly: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
@@ -67,6 +69,8 @@ interface InstallState {
   installedConfigHash: string;
   gatewayBaseUrl: string;
   config: GatewayConfig;
+  /** 配置已写入但网关重启未成功；下一次写配置或 models --sync 会再次重启。 */
+  pendingRestart?: boolean;
 }
 
 const MANAGED_CONFIG_KEYS = [
@@ -81,12 +85,13 @@ function usage() {
   console.log(`codex-cliproxy - Bun gateway for Codex Desktop and CLI
 
 Usage:
-  codex-cliproxy install [options]
-  codex-cliproxy uninstall
-  codex-cliproxy start|stop|restart
+  codex-cliproxy install [options] [--restart-codex]
+  codex-cliproxy uninstall [--restart-codex]
+  codex-cliproxy start|stop
+  codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
-  codex-cliproxy models [--sync] [--cpa-only] [--websocket] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy log on|off
+  codex-cliproxy models [--sync] [--cpa-only] [--select SELECTOR] [--restart-codex]
+  codex-cliproxy config [--log on|off]
   codex-cliproxy status
 
 Install options:
@@ -95,22 +100,30 @@ Install options:
   --prefix PREFIX      default: ${DEFAULTS.prefix}
   --official-url URL   default: existing openai_base_url or official Codex
   --key-env NAME       read the API key from this environment variable
-  --select SELECTOR     model numbers/ranges, exact IDs, all, none; use pass to reuse the previous selection
+  --select SELECTOR     model numbers/ranges, exact IDs, all, or none
   --model-merge-json URL  GitHub repository or HTTP(S) models.json URL
+  --restart-codex       stop Codex app-server after config.toml is updated
 
 Models:
   models                list models currently shown through CLIProxy
-  models --sync         refresh CLIProxy models and use dynamic official models
-  --cpa-only            use a static CPA-only catalog with original model IDs
-  --websocket           enable CPA Responses WebSocket; requires --sync
+  models --sync         refresh models in dynamic split routing
+  models --sync --cpa-only
+                        switch to a static CPA-only catalog with original model IDs
+  --select SELECTOR     model numbers/ranges, exact IDs, all, or none
   --model-merge-json URL  update the cached models.json override
   --restart-codex       stop Codex app-server after sync to refresh the model picker;
                         active tasks may error and require recovery or reopening
+
+Config:
+  config                print the current gateway settings
+  config --log on|off   toggle request logging; restarts the gateway automatically
 
 Routing:
   cliproxy/*  -> CLIProxyAPI; prefix stripped and auth replaced
   everything else -> official Codex backend; OAuth header preserved
   --cpa-only -> every model uses CLIProxyAPI with its original ID
+  CPA Responses WebSocket is always bridged to CLIProxy; the upstream decides
+  per request whether to accept it or fall back to HTTP/SSE.
 `);
 }
 
@@ -124,15 +137,11 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const key = value.slice(2);
-    if (["help", "sync", "cpa-only", "websocket", "restart-codex"].includes(key)) {
+    if (["help", "sync", "cpa-only", "restart-codex"].includes(key)) {
       options[key] = true;
       continue;
     }
     const next = args[i + 1];
-    if (key === "select" && (next === undefined || next.startsWith("--"))) {
-      options.select = true;
-      continue;
-    }
     if (next === undefined || next.startsWith("--")) throw new Error(`--${key} requires a value`);
     options[key] = next;
     i += 1;
@@ -317,11 +326,134 @@ export function applyRoutingMode(
   config: GatewayConfig,
   paths: ResolvedPaths,
   cpaOnly: boolean,
-  websocket = false,
 ): void {
   config.cpaOnly = cpaOnly;
-  config.websocket = websocket;
   config.catalogPath = paths.catalogFile;
+}
+
+/** 审计只跟踪这些字段；其余键（如 $schema、configVersion）不属于用户可见配置。 */
+const AUDITED_FIELDS = [
+  "cpaOnly",
+  "requestLogging",
+  "logDir",
+  "maxRequestLogs",
+  "port",
+  "prefix",
+  "officialBaseUrl",
+  "cliproxyBaseUrl",
+  "catalogPath",
+  "model_merge_json",
+  "selectedModels",
+] as const;
+
+function diffConfig(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): ConfigChange[] {
+  return AUDITED_FIELDS.flatMap((field) =>
+    JSON.stringify(before[field] ?? null) === JSON.stringify(after[field] ?? null)
+      ? []
+      : [{ field, before: before[field] ?? null, after: after[field] ?? null }]);
+}
+
+/** 与网关 resolveLogSink 同一套目录与保留策略，但不依赖 requestLogging 开关。 */
+function configAuditSink(config: GatewayConfig): RequestLogSink {
+  return {
+    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
+  };
+}
+
+/** 审计落盘前脱敏：URL 的 query 可能携带 token，只保留 origin 与路径。diff 仍按原始值比较。 */
+function sanitizeAuditValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    const url = new URL(value);
+    if (!url.search) return value;
+    return `${url.origin}${url.pathname}?…`;
+  } catch {
+    return value;
+  }
+}
+
+function recordConfigAudit(
+  command: string,
+  config: GatewayConfig,
+  before: Record<string, unknown>,
+  extraChanges: ConfigChange[] = [],
+): void {
+  const changes = [...diffConfig(before, config as unknown as Record<string, unknown>), ...extraChanges]
+    .map((change) => ({
+      field: change.field,
+      before: sanitizeAuditValue(change.before),
+      after: sanitizeAuditValue(change.after),
+    }));
+  logConfigChange(configAuditSink(config), { command, changes });
+}
+
+/**
+ * config.toml 的 model_catalog_json 增删：CPA-only 指向网关目录文件，split 模式移除。
+ * models --sync 共用，含非受管值守卫。
+ */
+function applyModelCatalogToml(
+  source: string,
+  cpaOnly: boolean,
+  paths: ResolvedPaths,
+): { patchedToml: string; previousCatalog: string | null } {
+  const configuredCatalog = readRootTomlString(source, "model_catalog_json");
+  const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
+  if (configuredCatalog && ![paths.catalogFile, legacyCatalogFile].includes(configuredCatalog)) {
+    throw new Error(`Refusing to replace unmanaged model_catalog_json: ${configuredCatalog}`);
+  }
+  // 键存在但值不可解析（多行字符串等写法）时显式拒绝，绝不当作缺失后覆盖或删除。
+  if (configuredCatalog === undefined && hasRootTomlKey(source, "model_catalog_json")) {
+    throw new Error("model_catalog_json exists but its value cannot be parsed; fix ~/.codex/config.toml manually");
+  }
+  const patchedToml = cpaOnly
+    ? patchRootToml(source, { model_catalog_json: paths.catalogFile })
+    : restoreRootTomlKeys(source, "", ["model_catalog_json"]);
+  return { patchedToml, previousCatalog: configuredCatalog ?? null };
+}
+
+/** 重启网关并在 state.json 留 pendingRestart 标记：失败后重跑同一命令会自动重试。 */
+async function restartGatewayOnce(paths: ResolvedPaths, config: GatewayConfig): Promise<void> {
+  const markPending = (pending: boolean): void => {
+    if (!fs.existsSync(paths.stateFile)) return;
+    const state = loadJson<InstallState>(paths.stateFile);
+    state.pendingRestart = pending;
+    writeJson(paths.stateFile, state);
+  };
+  markPending(true);
+  try {
+    restartLaunchAgent(paths.launchAgent);
+    await waitForHealth(`http://${config.host}:${config.port}/healthz`);
+  } catch (error) {
+    // 标记保留：重跑同一命令或 codex-cliproxy restart 都会补上这次重启。
+    throw error;
+  }
+  markPending(false);
+}
+
+/** 上次配置写入后重启未成功时，先补一次重启再继续当前操作。 */
+async function retryPendingRestart(paths: ResolvedPaths, config: GatewayConfig): Promise<void> {
+  if (!fs.existsSync(paths.stateFile) || !fs.existsSync(paths.launchAgent)) return;
+  const state = loadJson<InstallState>(paths.stateFile);
+  if (state.pendingRestart !== true) return;
+  await restartGatewayOnce(paths, config);
+  console.log("Gateway restarted to apply previously saved configuration.");
+}
+
+/** config.toml 变更后可选停止旧 app-server，由 Codex 自行拉起新进程重读配置。 */
+async function refreshCodexAppServer(): Promise<void> {
+  console.log("Stopping Codex app-server may interrupt active turns. This command does not start a replacement process.");
+  const stopResult = await stopCodexAppServers();
+  for (const result of stopResult.results) console.log(`Codex app-server PID ${result.pid}: ${result.status}`);
+  console.log("The Codex App may relaunch app-server; reopen the model picker or start a new session if the UI stays stale.");
+  if (stopResult.scan === "unknown") throw new Error(`Codex app-server state is unknown: ${stopResult.error}`);
+  if (stopResult.results.length === 0) console.log("No matching current-user Codex app-server process was found.");
+  if (stopResult.results.some(({ status }) => status !== "stopped")) {
+    throw new Error("One or more Codex app-server processes were not stopped");
+  }
 }
 
 function mergedGatewayConfig(
@@ -478,9 +610,8 @@ async function install(options: CliOptions): Promise<void> {
 
     await waitForHealth(`http://${config.host}:${config.port}/healthz`);
     invalidateModelsCache(paths.modelsCacheFile);
+    recordConfigAudit("install", config, currentGatewayConfig);
 
-    console.log(`Installed. Gateway: ${gatewayBaseUrl}`);
-    console.log("Codex ChatGPT OAuth was not modified. Fully quit and reopen Codex Desktop.");
   } catch (error) {
     const diagnostics = launchInstalled ? gatewayStartupDiagnostics(paths) : "";
     if (launchInstalled) uninstallLaunchAgent(paths.launchAgent);
@@ -491,9 +622,14 @@ async function install(options: CliOptions): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(diagnostics ? `${message}; ${diagnostics}` : message);
   }
+
+  console.log(`Installed. Gateway: http://${config.host}:${config.port}${config.mountPath}`);
+  console.log("Codex ChatGPT OAuth was not modified.");
+  if (options["restart-codex"] === true) await refreshCodexAppServer();
+  else console.log("Fully quit and reopen Codex Desktop, or reinstall with --restart-codex.");
 }
 
-function uninstall(): void {
+async function uninstall(options: CliOptions): Promise<void> {
   requireMacOS();
   const paths = resolvePaths();
   if (!fs.existsSync(paths.stateFile)) throw new Error("No managed installation found");
@@ -516,6 +652,7 @@ function uninstall(): void {
 
   console.log("Uninstalled. Managed config.toml values were restored; config.json was preserved.");
   console.log("Codex auth.json was never changed.");
+  if (options["restart-codex"] === true) await refreshCodexAppServer();
 }
 
 function configuredSelectedModels(paths: ResolvedPaths, config: GatewayConfig): string[] {
@@ -545,16 +682,15 @@ function printCurrentModels(config: GatewayConfig, selectedModels: string[]): vo
 
 async function models(options: CliOptions): Promise<void> {
   const restartCodex = options["restart-codex"] === true;
+  // 模式由 flag 显式选择：带 --cpa-only 即 CPA-only，不带即 split 动态目录。
   const cpaOnly = options["cpa-only"] === true;
-  const websocket = options.websocket === true;
   const selector = stringOption(options, "select");
-  const reuseSelection = options.select === true || selector?.toLowerCase() === "pass";
   const modelMergeJson = stringOption(options, "model-merge-json");
   const paths = resolvePaths();
   if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
   const config = loadGatewayConfig(paths.gatewayConfig);
+  const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
   const previousCpaOnly = config.cpaOnly === true;
-  const previousWebsocket = config.websocket === true;
   const previousCatalogPath = config.catalogPath;
   if (modelMergeJson) config.model_merge_json = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
@@ -564,16 +700,10 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
-  applyRoutingMode(config, paths, cpaOnly, websocket);
-  if (reuseSelection && cpaOnly) {
-    throw new Error("--select without a value is only supported in split mode");
-  }
+  applyRoutingMode(config, paths, cpaOnly);
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  const configuredCatalog = readRootTomlString(source, "model_catalog_json");
+  const { patchedToml, previousCatalog } = applyModelCatalogToml(source, cpaOnly, paths);
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
-  if (configuredCatalog && ![paths.catalogFile, legacyCatalogFile].includes(configuredCatalog)) {
-    throw new Error(`Refusing to replace unmanaged model_catalog_json: ${configuredCatalog}`);
-  }
   const apiKey = readApiKey(isLoopbackUrl(config.cliproxyBaseUrl));
   const proxyCatalog = await fetchCliProxyCatalog(
     config.cliproxyBaseUrl,
@@ -582,17 +712,12 @@ async function models(options: CliOptions): Promise<void> {
   );
   const availableModels = proxyCatalog.models;
   console.log(`CLIProxy authentication verified; ${availableModels.length} models found.`);
-  const selectedModels = reuseSelection
-    ? availableModels.map((model) => model.slug).filter((model) => currentSelection.includes(model))
-    : await chooseModels({
-      availableModels,
-      currentSelection,
-      selector,
-      requireNonEmpty: cpaOnly,
-    });
-  if (reuseSelection && selectedModels.length === 0) {
-    throw new Error("No previous local model selection is available; pass --select SELECTOR");
-  }
+  const selectedModels = await chooseModels({
+    availableModels,
+    currentSelection,
+    selector,
+    requireNonEmpty: cpaOnly,
+  });
 
   const selectedProxyModels = proxyCatalog.models.filter((model) => selectedModels.includes(model.slug));
   const result = await rebuildCatalog(
@@ -604,11 +729,8 @@ async function models(options: CliOptions): Promise<void> {
   config.selectedModels = selectedModels;
   writeGatewayConfig(paths.gatewayConfig, config);
 
-  const patchedToml = cpaOnly
-    ? patchRootToml(source, { model_catalog_json: paths.catalogFile })
-    : restoreRootTomlKeys(source, "", ["model_catalog_json"]);
   if (patchedToml !== source) atomicWrite(paths.configToml, patchedToml);
-  if (configuredCatalog === legacyCatalogFile) fs.rmSync(legacyCatalogFile, { force: true });
+  if (previousCatalog === legacyCatalogFile) fs.rmSync(legacyCatalogFile, { force: true });
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.version = 4;
@@ -616,14 +738,21 @@ async function models(options: CliOptions): Promise<void> {
     if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
     writeJson(paths.stateFile, state);
   }
+  recordConfigAudit("models --sync", config, auditBefore, patchedToml === source ? [] : [{
+    field: "model_catalog_json (config.toml)",
+    before: previousCatalog,
+    after: cpaOnly ? paths.catalogFile : null,
+  }]);
+  if (!cpaOnly) invalidateModelsCache(paths.modelsCacheFile);
+
   const routingChanged = previousCpaOnly !== cpaOnly
-    || previousWebsocket !== config.websocket
     || previousCatalogPath !== config.catalogPath;
   if (routingChanged && fs.existsSync(paths.launchAgent)) {
-    restartLaunchAgent(paths.launchAgent);
+    await restartGatewayOnce(paths, config);
     console.log("Gateway restarted to apply the routing mode.");
+  } else {
+    await retryPendingRestart(paths, config);
   }
-  if (!cpaOnly) invalidateModelsCache(paths.modelsCacheFile);
 
   if (cpaOnly) {
     console.log(`CPA-only catalog synced: ${result.proxyCount} selected models.`);
@@ -634,7 +763,7 @@ async function models(options: CliOptions): Promise<void> {
   if (!restartCodex) {
     if (cpaOnly) {
       console.log("CPA-only catalog configured; restart Codex to load it, or rerun with --restart-codex.");
-    } else if (configuredCatalog === legacyCatalogFile || configuredCatalog === paths.catalogFile) {
+    } else if (previousCatalog !== null) {
       console.log("Dynamic split routing configured; restart Codex to leave CPA-only mode, or rerun with --restart-codex.");
     } else {
       console.log("Dynamic catalog synced; Codex refreshes /models periodically, but the current model picker may require --restart-codex.");
@@ -642,15 +771,7 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
-  console.log("Stopping Codex app-server may interrupt active turns. This command does not start a replacement process.");
-  const stopResult = await stopCodexAppServers();
-  for (const result of stopResult.results) console.log(`Codex app-server PID ${result.pid}: ${result.status}`);
-  console.log("The Codex App may relaunch app-server; reopen the model picker or start a new session if the UI stays stale.");
-  if (stopResult.scan === "unknown") throw new Error(`Codex app-server state is unknown: ${stopResult.error}`);
-  if (stopResult.results.length === 0) console.log("No matching current-user Codex app-server process was found.");
-  if (stopResult.results.some(({ status }) => status !== "stopped")) {
-    throw new Error("One or more Codex app-server processes were not stopped");
-  }
+  await refreshCodexAppServer();
 }
 
 async function status(): Promise<void> {
@@ -687,7 +808,6 @@ async function status(): Promise<void> {
     cachedCatalogPath: config?.catalogPath ?? paths.catalogFile,
     cachedCatalogPresent: fs.existsSync(config?.catalogPath ?? paths.catalogFile),
     cpaOnly: config?.cpaOnly === true,
-    websocket: config?.websocket === true,
   }, null, 2));
 }
 
@@ -702,30 +822,65 @@ function serve(options: CliOptions): void {
   );
 }
 
-async function logToggle(enabled: boolean): Promise<void> {
-  requireMacOS();
+/** on/off 参数统一解析；大小写不敏感，缺值或非法值都在这里报错。 */
+function onOffValue(options: CliOptions, key: string): boolean | undefined {
+  const value = options[key];
+  if (value === undefined) return undefined;
+  if (value === true) throw new Error(`--${key} requires on or off`);
+  const normalized = String(value).toLowerCase();
+  if (normalized !== "on" && normalized !== "off") {
+    throw new Error(`--${key} expects on or off, got "${value}"`);
+  }
+  return normalized === "on";
+}
+
+/**
+ * config 命令：无参数只打印当前设置；传入任何配置项时都写盘并重启网关，
+ * 让运行中的进程重新加载完整配置，不对比目标值是否已匹配。
+ */
+async function configCommand(options: CliOptions): Promise<void> {
+  const logTarget = onOffValue(options, "log");
   const paths = resolvePaths();
   if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
   const config = loadGatewayConfig(paths.gatewayConfig);
-  config.requestLogging = enabled;
-  config.logDir ||= paths.logDir;
-  writeGatewayConfig(paths.gatewayConfig, config);
+  const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  // Update state.json if it exists
+  if (logTarget === undefined) {
+    console.log(JSON.stringify({
+      cpaOnly: config.cpaOnly === true,
+      requestLogging: config.requestLogging === true,
+      logDir: config.logDir || paths.logDir,
+      catalogPath: config.catalogPath,
+      selectedModels: Array.isArray(config.selectedModels) ? config.selectedModels.length : 0,
+    }, null, 2));
+    return;
+  }
+
+  requireMacOS();
+  config.requestLogging = logTarget;
+  if (logTarget) config.logDir ||= paths.logDir;
+  writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.config = config;
     writeJson(paths.stateFile, state);
   }
+  recordConfigAudit("config", config, auditBefore);
 
-  restartLaunchAgent(paths.launchAgent);
-  const state = loadJson<InstallState>(paths.stateFile);
-  await waitForHealth(`http://${state.config.host}:${state.config.port}/healthz`);
-  console.log(`Request logging ${enabled ? "enabled" : "disabled"}. Gateway restarted.`);
-  if (enabled) console.log(`Request logs will be written to: ${config.logDir}`);
+  if (fs.existsSync(paths.launchAgent)) {
+    await restartGatewayOnce(paths, config);
+    console.log("Gateway restarted to apply the new configuration.");
+  } else {
+    console.log("Gateway LaunchAgent is not installed; configuration saved without restart.");
+  }
+  console.log(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
+  if (logTarget) console.log(`Request logs will be written to: ${config.logDir}`);
 }
 
-async function controlGateway(action: "start" | "stop" | "restart"): Promise<void> {
+async function controlGateway(
+  action: "start" | "stop" | "restart",
+  restartCodex = false,
+): Promise<void> {
   requireMacOS();
   const paths = resolvePaths();
   if (!fs.existsSync(paths.stateFile)) throw new Error("Gateway is not installed");
@@ -749,34 +904,45 @@ async function controlGateway(action: "start" | "stop" | "restart"): Promise<voi
     state.gatewayBaseUrl = gatewayBaseUrl;
     state.config = config;
     writeJson(paths.stateFile, state);
-    restartLaunchAgent(paths.launchAgent);
+    await restartGatewayOnce(paths, config);
   }
 
-  await waitForHealth(`http://${config.host}:${config.port}/healthz`);
+  if (action === "start") await waitForHealth(`http://${config.host}:${config.port}/healthz`);
   console.log(`Gateway ${action === "start" ? "started" : "restarted"}.`);
-}
-
-async function logCommand(positional: string[]): Promise<void> {
-  const sub = positional[1];
-  if (sub === "on") return logToggle(true);
-  if (sub === "off") return logToggle(false);
-  throw new Error('Usage: codex-cliproxy log on|off');
+  if (restartCodex) await refreshCodexAppServer();
 }
 
 export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.gatewayConfig): void {
   if (!fs.existsSync(configFile)) return;
 
   const current = loadGatewayConfig(configFile);
+  const before: Record<string, unknown> = structuredClone(current as unknown as Record<string, unknown>);
+  const explicitChanges: ConfigChange[] = [];
+  let dirty = false;
+  // websocket 开关已移除：CPA WebSocket 由上游按请求判断，老配置里的残留键一并清理。
+  if ("websocket" in current) {
+    explicitChanges.push({
+      field: "websocket (removed)",
+      before: (current as unknown as Record<string, unknown>).websocket ?? null,
+      after: null,
+    });
+    delete (current as unknown as Record<string, unknown>).websocket;
+    dirty = true;
+  }
   const legacyCatalogPath = current.catalogPath === path.join(paths.codexHome, "cliproxy-catalog.json");
-  if (legacyCatalogPath) current.catalogPath = paths.catalogFile;
+  if (legacyCatalogPath) {
+    current.catalogPath = paths.catalogFile;
+    dirty = true;
+  }
   if (current.configVersion === GATEWAY_CONFIG_VERSION) {
-    if (legacyCatalogPath) {
+    if (dirty) {
       writeGatewayConfig(configFile, current);
       if (configFile === paths.gatewayConfig && fs.existsSync(paths.stateFile)) {
         const state = loadJson<InstallState>(paths.stateFile);
         state.config = current;
         writeJson(paths.stateFile, state);
       }
+      recordConfigAudit("config sync", current, before, explicitChanges);
     }
     warnGatewayConfig(configFile, current);
     return;
@@ -787,6 +953,13 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
     current as unknown as Record<string, unknown>,
   );
   merged.config.configVersion = GATEWAY_CONFIG_VERSION;
+  if (before.configVersion !== merged.config.configVersion) {
+    explicitChanges.push({
+      field: "configVersion",
+      before: before.configVersion ?? null,
+      after: merged.config.configVersion,
+    });
+  }
   writeGatewayConfig(configFile, merged.config);
 
   if (configFile === paths.gatewayConfig && fs.existsSync(paths.stateFile)) {
@@ -795,6 +968,7 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
     state.config = merged.config;
     writeJson(paths.stateFile, state);
   }
+  recordConfigAudit("config sync", merged.config as unknown as GatewayConfig, before, explicitChanges);
   const additions = merged.added.filter((key) => key !== "configVersion");
   console.log(`Config synced to ${GATEWAY_CONFIG_VERSION}.${additions.length > 0
     ? ` Added: ${additions.join(", ")}.`
@@ -809,6 +983,16 @@ function syncGatewayConfig(command: string, options: CliOptions): void {
   );
 }
 
+/** 各命令接受的选项；白名单外的 --key 一律报错，避免拼写错误被静默忽略后部分生效。 */
+const COMMAND_OPTIONS: Record<string, string[]> = {
+  install: ["cliproxy-url", "port", "prefix", "official-url", "key-env", "select", "model-merge-json", "restart-codex"],
+  uninstall: ["restart-codex"],
+  restart: ["restart-codex"],
+  serve: ["config"],
+  models: ["sync", "cpa-only", "select", "restart-codex", "model-merge-json"],
+  config: ["log"],
+};
+
 export async function runCli(args: string[]): Promise<void> {
   const { positional, options } = parseArgs(args);
   const command = positional[0];
@@ -816,7 +1000,13 @@ export async function runCli(args: string[]): Promise<void> {
     usage();
     return;
   }
-  if (positional.length > 1 && command !== "log") throw new Error(`Unexpected argument: ${positional[1]}`);
+  if (positional.length > 1) throw new Error(`Unexpected argument: ${positional[1]}`);
+  const allowedOptions = COMMAND_OPTIONS[command] ?? [];
+  for (const key of Object.keys(options)) {
+    if (!allowedOptions.includes(key)) {
+      throw new Error(`Unknown option --${key} for command "${command}"`);
+    }
+  }
   if (command === "models" && options["restart-codex"] === true && options.sync !== true) {
     throw new Error("--restart-codex requires models --sync");
   }
@@ -826,17 +1016,10 @@ export async function runCli(args: string[]): Promise<void> {
   if (options["cpa-only"] === true && (command !== "models" || options.sync !== true)) {
     throw new Error("--cpa-only requires models --sync");
   }
-  if (options.websocket === true && (command !== "models" || options.sync !== true)) {
-    throw new Error("--websocket requires models --sync");
+  if (options.log !== undefined && command !== "config") {
+    throw new Error("--log is only supported by the config command");
   }
-  if (command !== "models"
-    && (options.select === true || stringOption(options, "select")?.toLowerCase() === "pass")) {
-    throw new Error("--select pass requires models --sync");
-  }
-  if (command === "log" && !["on", "off"].includes(positional[1] || "")) {
-    throw new Error('Usage: codex-cliproxy log on|off');
-  }
-  if (["start", "stop", "restart", "serve", "models", "log", "status"].includes(command)) {
+  if (["start", "stop", "restart", "serve", "models", "config", "status"].includes(command)) {
     syncGatewayConfig(command, options);
   }
 
@@ -845,12 +1028,12 @@ export async function runCli(args: string[]): Promise<void> {
       await install(options);
       break;
     case "uninstall":
-      uninstall();
+      await uninstall(options);
       break;
     case "start":
     case "stop":
     case "restart":
-      await controlGateway(command);
+      await controlGateway(command, command === "restart" && options["restart-codex"] === true);
       break;
     case "serve":
       serve(options);
@@ -858,8 +1041,8 @@ export async function runCli(args: string[]): Promise<void> {
     case "models":
       await models(options);
       break;
-    case "log":
-      await logCommand(positional);
+    case "config":
+      await configCommand(options);
       break;
     case "status":
       await status();

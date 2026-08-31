@@ -168,6 +168,7 @@ function applyModelOverrides(source: ModelEntry, rules: ModelOverrideRule[]): Mo
   for (const rule of rules) {
     if (rule.prefix ? slug.startsWith(rule.pattern) : slug === rule.pattern) {
       model = { ...model, ...rule.fields };
+      break;
     }
   }
   return model;

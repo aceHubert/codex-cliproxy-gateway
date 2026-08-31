@@ -163,7 +163,6 @@ test("gateway JSON Schema warns without rejecting obsolete config", () => {
     catalogPath: "/tmp/catalog.json",
     logDir: "",
     selectedModels: ["one", "one"],
-    websocket: "yes",
     cpaOnly: "yes",
     removed_option: true,
   });
@@ -173,7 +172,6 @@ test("gateway JSON Schema warns without rejecting obsolete config", () => {
     "$.officialBaseUrl should be a valid URI",
     "$.selectedModels should not contain duplicates",
     "$.logDir should not be empty",
-    "$.websocket should be boolean",
     "$.cpaOnly should be boolean",
   ]);
 });
@@ -192,6 +190,7 @@ test("command preflight syncs package version and only adds config", () => {
     cliproxyBaseUrl: "https://proxy.example/v1",
     catalogPath: "/user/catalog.json",
     removed_option: "keep",
+    websocket: true,
   }));
   try {
     syncGatewayConfigFile(paths);
@@ -203,8 +202,19 @@ test("command preflight syncs package version and only adds config", () => {
     assert.equal(config.catalogPath, "/user/catalog.json");
     assert.equal(config.requestLogging, false);
     assert.equal(config.logDir, paths.logDir);
-    assert.equal(config.websocket, false);
+    // 遗留的 websocket 开关被清除，不再作为默认值写回。
+    assert.equal(config.websocket, undefined);
     assert.equal(config.removed_option, "keep");
+
+    // preflight 写盘也要留审计：记录版本迁移、补齐字段与 websocket 清理。
+    const auditDir = paths.logDir;
+    const auditFiles = fs.readdirSync(auditDir).filter((name) => name.startsWith("cliproxy-config-"));
+    assert.equal(auditFiles.length, 1);
+    const auditText = fs.readFileSync(path.join(auditDir, auditFiles[0]), "utf8");
+    assert.match(auditText, /config changed by `config sync`/);
+    assert.match(auditText, /configVersion: "0\.1\.0" -> /);
+    assert.match(auditText, /websocket \(removed\): true -> null/);
+    assert.match(auditText, /requestLogging: null -> false/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -221,11 +231,9 @@ test("routing mode reset makes reinstall use dynamic split configuration", () =>
     cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: paths.catalogFile,
     cpaOnly: true,
-    websocket: true,
   };
   applyRoutingMode(config, paths, false);
   assert.equal(config.cpaOnly, false);
-  assert.equal(config.websocket, false);
   assert.equal(config.catalogPath, paths.catalogFile);
 });
 
@@ -289,18 +297,18 @@ test("catalog prefixes CLIProxy models and preserves their metadata", () => {
   assert.equal(merged.models[1].supports_reasoning_summaries, true);
 });
 
-test("catalog applies ordered case-insensitive overrides before prefixing", () => {
+test("catalog applies the first matching case-insensitive override before prefixing", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-model-overrides-test-"));
   const configFile = path.join(tempDir, "models.json");
   fs.writeFileSync(configFile, JSON.stringify({
     openai: [
+      { name: "gpt-5.6-sol", context_window: 373000 },
       {
         name: "GPT-5.6-*",
         context_window: 372000,
         max_context_window: 372000,
         effective_context_window_percent: 95,
       },
-      { name: "gpt-5.6-sol", context_window: 373000 },
     ],
     "Z.AI": [{ name: "glm-5.2", context_window: 1_000_000, max_context_window: 1_000_000 }],
   }));
@@ -316,7 +324,7 @@ test("catalog applies ordered case-insensitive overrides before prefixing", () =
   try {
     const merged = mergeCatalog(native, proxy, "cliproxy/", loadModelOverrides(configFile));
     assert.equal(merged.models[0].context_window, 373000);
-    assert.equal(merged.models[0].max_context_window, 372000);
+    assert.equal(merged.models[0].max_context_window, undefined);
     assert.equal(merged.models[1].context_window, 372000);
     assert.equal(merged.models[2].slug, "cliproxy/GPT-5.6-TERRA");
     assert.equal(merged.models[2].effective_context_window_percent, 95);
@@ -536,7 +544,6 @@ test("non-boolean cpaOnly never enables CPA routing", async () => {
       cliproxyBaseUrl: "https://proxy.example/v1",
       catalogPath: "/tmp/missing-catalog.json",
       cpaOnly: "false" as unknown as boolean,
-      websocket: true,
     }, "");
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
@@ -917,7 +924,8 @@ test("routing hint decides the upstream and lets official traffic skip body deco
     catalogPath: "/tmp/missing-catalog.json",
   };
   try {
-    const handler = createGatewayHandler(config, "proxy-key");
+    const cpaThreads = new Set<string>();
+    const handler = createGatewayHandler(config, "proxy-key", "invalid", cpaThreads);
 
     // hint 指向 cliproxy：即便 payload 无前缀也要走 CLIProxy，并把 model 改写成去前缀的名字。
     let sent: RequestInit | undefined;
@@ -928,11 +936,61 @@ test("routing hint decides the upstream and lets official traffic skip body deco
     }) as unknown as typeof fetch;
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6" },
+      headers: {
+        "content-type": "application/json",
+        "thread-id": "thread-cpa",
+        "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6;tier=ultrafast",
+      },
       body: JSON.stringify({ model: "claude-opus-4-6", input: "hi" }),
     }));
     assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
+    assert.equal(
+      new Headers(sent?.headers).get("x-codex-routing-hint"),
+      "model=claude-opus-4-6;tier=ultrafast",
+    );
     assert.equal(JSON.parse(String(sent?.body)).model, "claude-opus-4-6");
+
+    // 同一 thread 首次出现 cliproxy/ 后，无前缀 Luna 标题请求也固定走 CPA。
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "thread-id": "thread-cpa",
+        "x-codex-routing-hint": "model=gpt-5.6-luna",
+      },
+      body: JSON.stringify({ model: "gpt-5.6-luna", input: "generate title" }),
+    }));
+    assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
+    assert.equal(new Headers(sent?.headers).get("authorization"), "Bearer proxy-key");
+    assert.equal(JSON.parse(String(sent?.body)).model, "gpt-5.6-luna");
+
+    // 子智能体使用独立 thread/WS，但父 thread 已固定 CPA 时必须继承同一上游。
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "thread-id": "thread-guardian",
+        "x-codex-parent-thread-id": "thread-cpa",
+        "x-codex-routing-hint": "model=codex-auto-review",
+      },
+      body: JSON.stringify({ model: "codex-auto-review", input: "review" }),
+    }));
+    assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
+    assert.equal(cpaThreads.has("thread-guardian"), true);
+
+    // 另一个没有 cliproxy 信号的 thread 仍走官方，不能被同 session 的 CPA thread 污染。
+    await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer official-oauth",
+        "content-type": "application/json",
+        "thread-id": "thread-official",
+        "x-codex-routing-hint": "model=gpt-5.6-luna",
+      },
+      body: JSON.stringify({ model: "gpt-5.6-luna", input: "generate title" }),
+    }));
+    assert.equal(captured.at(-1), "https://official.example/v1/responses");
+    assert.equal(new Headers(sent?.headers).get("authorization"), "Bearer official-oauth");
 
     // hint 指向官方：body 是无法解压的垃圾字节，仍应原样透传而不是 400。
     const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
@@ -988,32 +1046,29 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6",
   };
 
-  // split 模式默认关闭 CPA WebSocket；显式开启后按剥前缀模型门控。
-  assert.equal(responsesWebSocketTarget(
-    new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
-    config,
-    "proxy-key",
-  ), null, "cliproxy WebSocket must stay off by default");
-
-  // 非 gpt-/codex-* 模型同样放行，由 CPA 按请求退回 HTTP/SSE 上游。
+  // split 模式同样直接桥接 CPA WebSocket：没有网关侧开关，由上游按请求决定传输。
   const splitNonGpt = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
-    { ...config, websocket: true },
+    config,
     "proxy-key",
   );
   assert.ok(splitNonGpt);
   assert.equal(splitNonGpt.url, "wss://cliproxy.example/v1/responses");
 
-  // split + websocket：兼容 CPA 模型放行，认证域与 CPA-only 相同。
+  // split 模式 CPA 模型放行，认证域与 CPA-only 相同。
   const splitCpa = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
-      headers: { ...probeHeaders, "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna" },
+      headers: {
+        ...probeHeaders,
+        "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna;tier=ultrafast",
+      },
     }),
-    { ...config, websocket: true },
+    config,
     "proxy-key",
   );
   assert.ok(splitCpa);
   assert.equal(splitCpa.url, "wss://cliproxy.example/v1/responses");
+  assert.equal(splitCpa.headers["x-codex-routing-hint"], "model=gpt-5.6-luna;tier=ultrafast");
   assert.equal(splitCpa.headers.authorization, "Bearer proxy-key");
   assert.equal(splitCpa.headers["chatgpt-account-id"], undefined);
   assert.equal(splitCpa.headers["x-api-key"], undefined);
@@ -1022,18 +1077,65 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=cliproxy/codex-auto-review" },
     }),
-    { ...config, websocket: true },
+    config,
     "proxy-key",
   ));
 
-  // CPA-only + websocket：符合 CPA 侧约定的模型交给 CLIProxy，剥官方 OAuth 与其他 API key。
+  const cpaThreads = new Set<string>();
+  const stickyHeaders = { ...probeHeaders, "thread-id": "thread-cpa" };
+  assert.ok(responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...stickyHeaders, "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6" },
+    }),
+    config,
+    "proxy-key",
+    cpaThreads,
+  ));
+  const stickyTitle = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...stickyHeaders, "x-codex-routing-hint": "model=gpt-5.6-luna" },
+    }),
+    config,
+    "proxy-key",
+    cpaThreads,
+  );
+  assert.equal(stickyTitle?.url, "wss://cliproxy.example/v1/responses");
+  assert.equal(stickyTitle?.headers.authorization, "Bearer proxy-key");
+  const stickyGuardian = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: {
+        ...probeHeaders,
+        "thread-id": "thread-guardian",
+        "x-codex-parent-thread-id": "thread-cpa",
+        "x-codex-routing-hint": "model=codex-auto-review",
+      },
+    }),
+    config,
+    "proxy-key",
+    cpaThreads,
+  );
+  assert.equal(stickyGuardian?.url, "wss://cliproxy.example/v1/responses");
+  assert.equal(stickyGuardian?.headers.authorization, "Bearer proxy-key");
+  assert.equal(cpaThreads.has("thread-guardian"), true);
+  const isolatedOfficial = responsesWebSocketTarget(
+    new Request("http://127.0.0.1:8320/v1/responses", {
+      headers: { ...probeHeaders, "thread-id": "thread-official", "x-codex-routing-hint": "model=gpt-5.6-luna" },
+    }),
+    config,
+    "proxy-key",
+    cpaThreads,
+  );
+  assert.equal(isolatedOfficial?.url, "wss://chatgpt.com/backend-api/codex/responses");
+  assert.equal(isolatedOfficial?.headers.authorization, "Bearer original-oauth");
+
+  // CPA-only：符合 CPA 侧约定的模型交给 CLIProxy，剥官方 OAuth 与其他 API key。
   const cpaAllowedHeaders = {
     ...probeHeaders,
     "x-codex-routing-hint": "model=gpt-5.6-luna",
   };
   const cliproxy = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", { headers: cpaAllowedHeaders }),
-    { ...config, cpaOnly: true, websocket: true },
+    { ...config, cpaOnly: true },
     "proxy-key",
   );
   assert.ok(cliproxy);
@@ -1049,7 +1151,7 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=free/glm-5.3-flash" },
     }),
-    { ...config, cpaOnly: true, websocket: true },
+    { ...config, cpaOnly: true },
     "proxy-key",
   );
   assert.ok(cpaNonGpt);
@@ -1058,14 +1160,9 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=codex-auto-review" },
     }),
-    { ...config, cpaOnly: true, websocket: true },
+    { ...config, cpaOnly: true },
     "proxy-key",
   ));
-  assert.equal(responsesWebSocketTarget(
-    new Request("http://127.0.0.1:8320/v1/responses", { headers: cpaAllowedHeaders }),
-    { ...config, cpaOnly: true, websocket: false },
-    "proxy-key",
-  ), null);
 
   // 官方 hint：OAuth 原样透传。
   const official = responsesWebSocketTarget(new Request("http://127.0.0.1:8320/v1/responses", {
@@ -1084,20 +1181,15 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
   );
   assert.equal(fallback?.url, "wss://chatgpt.com/backend-api/codex/responses");
 
-  // 官方模型不受 websocket 开关控制，始终放行。
+  // 官方路由不受任何网关侧开关影响，始终放行。
   assert.ok(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "x-codex-routing-hint": "model=gpt-5.6-luna" },
     }),
-    { ...config, websocket: false },
-  ), "official WebSocket must stay on regardless of the switch");
+    config,
+  ), "official WebSocket must stay on regardless of any switch");
 
-  // cliproxy 关闭、realtime 保留路径、非 upgrade 请求：一律不转发，维持 426 行为。
-  assert.equal(responsesWebSocketTarget(
-    new Request("http://127.0.0.1:8320/v1/responses", { headers: probeHeaders }),
-    { ...config, websocket: false },
-    "proxy-key",
-  ), null);
+  // realtime 保留路径、非 upgrade 请求：一律不转发，维持 426 行为。
   assert.equal(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/live/rtc_x", { headers: probeHeaders }),
     config,
@@ -1127,7 +1219,6 @@ test("CPA-only mode forwards HTTP and WebSocket models without prefix routing", 
       cliproxyBaseUrl: "https://cliproxy.example/v1",
       catalogPath: "/tmp/missing-catalog.json",
       cpaOnly: true,
-      websocket: true,
     };
     const handler = createGatewayHandler(config, "proxy-key");
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {

@@ -1,8 +1,41 @@
 .DS_Store
 dist/
 node_modules/
-jshander/
 *.tgz
 *.zip
 __pycache__/
 *.pyc
+
+
+jshander/
+
+# local env files
+.env.local
+.env.*.local
+
+# VSCode
+.vscode/mcp.json
+
+# Claude
+.claude/**/*.local.*
+.mcp.json
+
+# Codex
+.codex/**/*.local.*
+.codex/config.toml
+
+# Cursor
+.cursor/mcp.json
+
+# Gemini
+.gemini/settings.json
+
+# opencode
+opencode.json
+.opencode/
+
+# Antigravity
+.antigravitycli/
+
+# zcode
+.zcode/
