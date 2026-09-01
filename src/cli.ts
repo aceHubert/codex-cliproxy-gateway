@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import bytes from "bytes";
 import {
   GATEWAY_CONFIG_SCHEMA_URL,
   GATEWAY_CONFIG_VERSION,
@@ -27,8 +28,8 @@ import {
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
-import { logConfigChange } from "./request-log.ts";
-import type { ConfigChange, RequestLogSink } from "./request-log.ts";
+import { capGatewayLog, logConfigChange } from "./request-log.ts";
+import type { ConfigChange } from "./request-log.ts";
 import { stopCodexAppServers } from "./app-server.ts";
 import {
   installLaunchAgent,
@@ -54,6 +55,7 @@ const DEFAULTS = {
   cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
   requestLogging: false,
   maxRequestLogs: 0,
+  maxGatewayLogBytes: 0,
   cpaOnly: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
@@ -91,7 +93,7 @@ Usage:
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--cpa-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--log on|off]
+  codex-cliproxy config [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy status
 
 Install options:
@@ -116,7 +118,16 @@ Models:
 
 Config:
   config                print the current gateway settings
-  config --log on|off   toggle request logging; restarts the gateway automatically
+  config --log on|off   toggle request logging
+  config --max-request-logs N
+                        max log files kept per route group; 0 (default) means unlimited
+  config --max-log-size SIZE
+                        size cap for gateway.log and gateway.error.log (e.g. 512KB,
+                        10MB, or 1M); overflow copies to <name>-<timestamp>.log (5
+                        newest backups kept per file) and truncates the live file in
+                        place; also bounds the config audit trail kept in gateway.log;
+                        0 (default) means unlimited
+  options may be combined; every change restarts the gateway automatically
 
 Routing:
   cliproxy/*  -> CLIProxyAPI; prefix stripped and auth replaced
@@ -337,6 +348,7 @@ const AUDITED_FIELDS = [
   "requestLogging",
   "logDir",
   "maxRequestLogs",
+  "maxGatewayLogBytes",
   "port",
   "prefix",
   "officialBaseUrl",
@@ -356,14 +368,6 @@ function diffConfig(
       : [{ field, before: before[field] ?? null, after: after[field] ?? null }]);
 }
 
-/** 与网关 resolveLogSink 同一套目录与保留策略，但不依赖 requestLogging 开关。 */
-function configAuditSink(config: GatewayConfig): RequestLogSink {
-  return {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
-    maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
-  };
-}
-
 /** 审计落盘前脱敏：URL 的 query 可能携带 token，只保留 origin 与路径。diff 仍按原始值比较。 */
 function sanitizeAuditValue(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -376,10 +380,12 @@ function sanitizeAuditValue(value: unknown): unknown {
   }
 }
 
+/** 审计写入网关进程日志 gateway.log，单文件追加，不依赖 requestLogging 与 maxRequestLogs。 */
 function recordConfigAudit(
   command: string,
   config: GatewayConfig,
   before: Record<string, unknown>,
+  paths: ResolvedPaths,
   extraChanges: ConfigChange[] = [],
 ): void {
   const changes = [...diffConfig(before, config as unknown as Record<string, unknown>), ...extraChanges]
@@ -388,7 +394,7 @@ function recordConfigAudit(
       before: sanitizeAuditValue(change.before),
       after: sanitizeAuditValue(change.after),
     }));
-  logConfigChange(configAuditSink(config), { command, changes });
+  logConfigChange(paths.stdoutLog, { command, changes }, config.maxGatewayLogBytes ?? 0);
 }
 
 /**
@@ -610,7 +616,7 @@ async function install(options: CliOptions): Promise<void> {
 
     await waitForHealth(`http://${config.host}:${config.port}/healthz`);
     invalidateModelsCache(paths.modelsCacheFile);
-    recordConfigAudit("install", config, currentGatewayConfig);
+    recordConfigAudit("install", config, currentGatewayConfig, paths);
 
   } catch (error) {
     const diagnostics = launchInstalled ? gatewayStartupDiagnostics(paths) : "";
@@ -738,7 +744,7 @@ async function models(options: CliOptions): Promise<void> {
     if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
     writeJson(paths.stateFile, state);
   }
-  recordConfigAudit("models --sync", config, auditBefore, patchedToml === source ? [] : [{
+  recordConfigAudit("models --sync", config, auditBefore, paths, patchedToml === source ? [] : [{
     field: "model_catalog_json (config.toml)",
     before: previousCatalog,
     after: cpaOnly ? paths.catalogFile : null,
@@ -816,10 +822,18 @@ function serve(options: CliOptions): void {
   const paths = resolvePaths();
   const configPath = stringOption(options, "config") || paths.gatewayConfig;
   if (!fs.existsSync(configPath)) throw new Error(`Gateway config not found: ${configPath}`);
+  const config = loadGatewayConfig(configPath);
   startGateway(
-    loadGatewayConfig(configPath),
+    config,
     loadRealtimeProviderMode(paths.configToml),
   );
+  // 启动横幅与运行时错误分别由 launchd 追加进 gateway.log / gateway.error.log，各自在
+  // 启动时检查一次大小，超限备份并原地清空（copy-truncate，进程持有的 fd 不受影响）；
+  // 仅管理默认配置对应的生产日志，--config 的临时实例输出在终端，不碰生产文件。
+  if (configPath === paths.gatewayConfig) {
+    capGatewayLog(paths.stdoutLog, config.maxGatewayLogBytes ?? 0);
+    capGatewayLog(paths.stderrLog, config.maxGatewayLogBytes ?? 0);
+  }
 }
 
 /** on/off 参数统一解析；大小写不敏感，缺值或非法值都在这里报错。 */
@@ -834,22 +848,51 @@ function onOffValue(options: CliOptions, key: string): boolean | undefined {
   return normalized === "on";
 }
 
+/** --max-request-logs 解析：每个日志分组保留的最大文件数，0 表示不限制。 */
+export function parseMaxRequestLogs(value: string): number {
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`--max-request-logs expects a non-negative integer, got "${value}"`);
+  }
+  return Number(value);
+}
+
+/** --max-log-size 解析：网关日志大小上限，bytes 包负责 512KB/10MB 到字节的换算，0 表示不限制。 */
+export function parseMaxLogSize(value: string): number {
+  // bytes.parse 不认无 B 后缀的单位，且会把 "1M"/"1MiB" 静默解析成 1 字节而非报错；
+  // 先归一化（去空格、补 b 后缀），再用严格语法把关，超出语法的输入直接拒绝。
+  // 语法与 bytes README 对齐：b/kb/mb/gb/tb/pb，1024 进制，大小写不敏感。
+  const normalized = value.trim()
+    .replace(/^([+-]?\d+(?:\.\d+)?)\s*/, "$1")
+    .replace(/([kmgtp])$/i, "$1b");
+  const parsed = /^[+-]?\d+(?:\.\d+)?(?:b|kb|mb|gb|tb|pb)?$/i.test(normalized)
+    ? bytes.parse(normalized)
+    : null;
+  if (parsed === null || !Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new Error(`--max-log-size expects a non-negative byte size such as 512KB, 10MB, or 1M, got "${value}"`);
+  }
+  return parsed;
+}
+
 /**
  * config 命令：无参数只打印当前设置；传入任何配置项时都写盘并重启网关，
  * 让运行中的进程重新加载完整配置，不对比目标值是否已匹配。
  */
 async function configCommand(options: CliOptions): Promise<void> {
   const logTarget = onOffValue(options, "log");
+  const maxLogsOption = stringOption(options, "max-request-logs");
+  const maxLogSizeOption = stringOption(options, "max-log-size");
   const paths = resolvePaths();
   if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (logTarget === undefined) {
+  if (logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     console.log(JSON.stringify({
       cpaOnly: config.cpaOnly === true,
       requestLogging: config.requestLogging === true,
       logDir: config.logDir || paths.logDir,
+      maxRequestLogs: config.maxRequestLogs ?? 0,
+      maxGatewayLogBytes: config.maxGatewayLogBytes ?? 0,
       catalogPath: config.catalogPath,
       selectedModels: Array.isArray(config.selectedModels) ? config.selectedModels.length : 0,
     }, null, 2));
@@ -857,15 +900,31 @@ async function configCommand(options: CliOptions): Promise<void> {
   }
 
   requireMacOS();
-  config.requestLogging = logTarget;
-  if (logTarget) config.logDir ||= paths.logDir;
+  const applied: string[] = [];
+  if (maxLogsOption !== undefined) {
+    config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
+    applied.push(`Max log files per group set to ${
+      config.maxRequestLogs === 0 ? "unlimited" : config.maxRequestLogs
+    }.`);
+  }
+  if (maxLogSizeOption !== undefined) {
+    config.maxGatewayLogBytes = parseMaxLogSize(maxLogSizeOption);
+    applied.push(`Gateway log size cap set to ${
+      config.maxGatewayLogBytes === 0 ? "unlimited" : bytes.format(config.maxGatewayLogBytes)
+    }.`);
+  }
+  if (logTarget !== undefined) {
+    config.requestLogging = logTarget;
+    if (logTarget) config.logDir ||= paths.logDir;
+    applied.push(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
+  }
   writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.config = config;
     writeJson(paths.stateFile, state);
   }
-  recordConfigAudit("config", config, auditBefore);
+  recordConfigAudit("config", config, auditBefore, paths);
 
   if (fs.existsSync(paths.launchAgent)) {
     await restartGatewayOnce(paths, config);
@@ -873,7 +932,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   } else {
     console.log("Gateway LaunchAgent is not installed; configuration saved without restart.");
   }
-  console.log(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
+  for (const line of applied) console.log(line);
   if (logTarget) console.log(`Request logs will be written to: ${config.logDir}`);
 }
 
@@ -942,7 +1001,7 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
         state.config = current;
         writeJson(paths.stateFile, state);
       }
-      recordConfigAudit("config sync", current, before, explicitChanges);
+      recordConfigAudit("config sync", current, before, paths, explicitChanges);
     }
     warnGatewayConfig(configFile, current);
     return;
@@ -968,7 +1027,7 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
     state.config = merged.config;
     writeJson(paths.stateFile, state);
   }
-  recordConfigAudit("config sync", merged.config as unknown as GatewayConfig, before, explicitChanges);
+  recordConfigAudit("config sync", merged.config as unknown as GatewayConfig, before, paths, explicitChanges);
   const additions = merged.added.filter((key) => key !== "configVersion");
   console.log(`Config synced to ${GATEWAY_CONFIG_VERSION}.${additions.length > 0
     ? ` Added: ${additions.join(", ")}.`
@@ -990,7 +1049,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["log"],
+  config: ["log", "max-request-logs", "max-log-size"],
 };
 
 export async function runCli(args: string[]): Promise<void> {

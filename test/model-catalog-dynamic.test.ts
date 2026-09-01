@@ -238,11 +238,7 @@ test("models --sync --cpa-only switches mode and plain sync restores dynamic spl
     return Response.json({ models: [{ slug: "proxy-model", context_window: 100000 }] });
   }) as unknown as typeof fetch;
 
-  const auditEntries = (): string => fs.readdirSync(paths.logDir)
-    .filter((name) => name.startsWith("cliproxy-config-"))
-    .sort()
-    .map((name) => fs.readFileSync(path.join(paths.logDir, name), "utf8"))
-    .join("\n");
+  const auditEntries = (): string => fs.readFileSync(paths.stdoutLog, "utf8");
 
   try {
     // --cpa-only 切换模式并同步：cpaOnly、目录与 config.toml 三处一致，websocket 键不存在。

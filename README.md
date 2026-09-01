@@ -117,6 +117,8 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo/re
 codex-cliproxy config
 codex-cliproxy config --log on
 codex-cliproxy config --log off
+codex-cliproxy config --max-request-logs 20
+codex-cliproxy config --max-log-size 10MB
 codex-cliproxy status
 codex-cliproxy start
 codex-cliproxy stop
@@ -145,11 +147,11 @@ app-server must immediately reload the restored values.
 
 `models --sync --cpa-only` switches routing to a static CPA-only catalog with original model IDs; plain `models --sync` switches back to split. Both rewrite the managed `model_catalog_json` key in Codex `config.toml` accordingly. The gateway restarts automatically only when the routing mode actually changes; synchronizing models again in the same mode does not restart it. In split mode, the first explicit `cliproxy/` request pins that `thread-id` to CPA, so later unprefixed HTTP/SSE fallback and WebSocket reconnects for that thread stay on CPA. A subagent uses its own WebSocket and inherits CPA when its `x-codex-parent-thread-id` is already pinned at route-decision time. A guardian prewarm that races ahead of its parent's first pin can currently attempt the official route; this known race is recorded in `docs/exec-plans/tech-debt-tracker.md`. Current Codex Desktop versions create `thread_title` as an independent, parentless Luna root thread, so title generation remains independently routable to official. Unrelated threads in the same session also remain independently routable to official. If an official prewarm connection receives the first explicit `cliproxy/*` frame, the gateway closes it with `1012` and the pinned reconnect goes to CPA. Realtime `/live` and `/realtime` keep their existing dedicated handling. `/v1/models` adds `cliproxy/` only in its response and merges the CPA rows with the official catalog. If the CPA catalog is missing, invalid, or still contains legacy prefixed IDs, `/v1/models` returns the official catalog alone until the next sync. This fallback changes only the visible directory; CPA-only inference remains routed to CPA.
 
-`config` prints the current gateway settings and does not change the routing mode. Every `config --log on|off` invocation writes the requested setting and restarts the installed gateway so the process reloads the complete configuration; only the parameterless query avoids a restart. Real field changes (including `models --sync` mode and selection updates, and the `config.toml` `model_catalog_json` handover) are appended to `logs/cliproxy-config-*.log` under the gateway log directory, with URL query strings redacted. If a CLI configuration write is saved but its gateway restart fails, run `codex-cliproxy restart` before continuing.
+`config` prints the current gateway settings and does not change the routing mode. Every `config` invocation with any of `--log on|off`, `--max-request-logs`, or `--max-log-size` writes the requested settings and restarts the installed gateway so the process reloads the complete configuration; only the parameterless query avoids a restart. Real field changes (including `models --sync` mode and selection updates, and the `config.toml` `model_catalog_json` handover) are appended to `gateway.log`, with URL query strings redacted. If a CLI configuration write is saved but its gateway restart fails, run `codex-cliproxy restart` before continuing.
 
 ### Restart requirements
 
-- **Gateway restarts automatically:** switching between split and CPA-only with `models --sync [--cpa-only]`, and every `config --log on|off` invocation. A same-mode model sync or parameterless `config` query does not restart it.
+- **Gateway restarts automatically:** switching between split and CPA-only with `models --sync [--cpa-only]`, and every `config` option write (`--log`, `--max-request-logs`, `--max-log-size`). A same-mode model sync or parameterless `config` query does not restart it.
 - **Commands that write `config.toml`:** `install`, `uninstall`, `restart`, and `models --sync` accept `--restart-codex`. The option stops the current Codex app-server after the file update, may interrupt active turns, and does not start a replacement process itself.
 - **Codex must reload after a mode switch:** add `--restart-codex` to the sync command for immediate application, or restart Codex before using the new catalog.
 - **CPA-only catalog selection changes:** the static catalog is read by Codex app-server at startup, so use `--restart-codex` or restart Codex to make the new selection visible immediately.
@@ -160,8 +162,12 @@ app-server must immediately reload the restored values.
 Request logs are disabled after installation. Use `codex-cliproxy config --log on` to
 write them to timestamped files under `logs/`; each request starts with a separator such as
 `--2026-08-13T12:34:56.789Z--`. Use `codex-cliproxy config --log off` to disable them
-again. `gateway.log` remains the process log; every gateway start is prefixed
-with the same timestamp separator for easier scanning. `gateway.error.log`
+again. Request-log retention is count-based and separate from any size cap: `codex-cliproxy
+config --max-request-logs N` keeps only the newest N files per route group (`0`, the
+default, keeps everything), grouped by the first two path segments (for example
+`cliproxy-v1-responses-*`), and it never applies to `gateway.log`, whose growth is bounded
+by `--max-log-size`. `gateway.log` remains the process log and also collects the config audit trail; every gateway start is prefixed
+with the same timestamp separator for easier scanning. Use `codex-cliproxy config --max-log-size SIZE` (`SIZE` follows the [bytes](https://github.com/visionmedia/bytes.js) format, for example `512KB`, `10MB`, or `1M`; `0`, the default, disables the cap) to bound their growth: when a write would exceed the cap, the current content is copied to `<name>-<timestamp>.log` (the 5 newest backups are kept per file, oldest first) and the live file is truncated in place — launchd opens the process log descriptors only once at spawn, so keeping the inode stable is what lets the running gateway keep appending. The cap covers both `gateway.log` and `gateway.error.log`; the latter is checked once per gateway start. Capping also bounds the config audit trail kept in `gateway.log` (current file plus 5 backups); keep it at `0` if complete audit traceability matters more than disk usage. `gateway.error.log`
 uses the same separator and removes blank lines from application errors.
 
 Model metadata overrides are applied to case-insensitive upstream model IDs

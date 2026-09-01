@@ -70,7 +70,12 @@
       "minLength": 1
     },
     "maxRequestLogs": {
-      "description": "每个按路径分组的日志各自保留的最大文件数；0 表示不限制。",
+      "description": "每个按路径分组的请求日志各自保留的最大文件数；0 表示不限制。",
+      "type": "integer",
+      "minimum": 0
+    },
+    "maxGatewayLogBytes": {
+      "description": "网关进程日志 gateway.log 与 gateway.error.log 的最大字节数；超限时当前内容复制为时间戳备份（每个文件保留最新 5 个）并原地清空活跃文件，进程持有的句柄继续有效；设置上限同时约束 gateway.log 中配置审计的可追溯深度；0 表示不限制。",
       "type": "integer",
       "minimum": 0
     },

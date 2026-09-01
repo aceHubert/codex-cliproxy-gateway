@@ -14,8 +14,9 @@ import {
   mergeMissingConfig,
 } from "../src/config.ts";
 import { patchRootToml, restoreRootTomlKeys } from "../src/toml.ts";
-import { httpLogFile, websocketLogFile } from "../src/request-log.ts";
+import { capGatewayLog, httpLogFile, websocketLogFile } from "../src/request-log.ts";
 import { resolvePaths } from "../src/paths.ts";
+import type { GatewayConfig } from "../src/types.ts";
 import {
   fetchCliProxyCatalog,
   loadModelOverrides,
@@ -26,7 +27,10 @@ import {
 import {
   applyRoutingMode,
   formatErrorLog,
+  parseMaxLogSize,
+  parseMaxRequestLogs,
   removeManagedRuntimeFiles,
+  runCli,
   syncGatewayConfigFile,
 } from "../src/cli.ts";
 import {
@@ -207,10 +211,8 @@ test("command preflight syncs package version and only adds config", () => {
     assert.equal(config.removed_option, "keep");
 
     // preflight 写盘也要留审计：记录版本迁移、补齐字段与 websocket 清理。
-    const auditDir = paths.logDir;
-    const auditFiles = fs.readdirSync(auditDir).filter((name) => name.startsWith("cliproxy-config-"));
-    assert.equal(auditFiles.length, 1);
-    const auditText = fs.readFileSync(path.join(auditDir, auditFiles[0]), "utf8");
+    const auditText = fs.readFileSync(paths.stdoutLog, "utf8");
+    assert.equal(auditText.split("=== config changed by").length - 1, 1);
     assert.match(auditText, /config changed by `config sync`/);
     assert.match(auditText, /configVersion: "0\.1\.0" -> /);
     assert.match(auditText, /websocket \(removed\): true -> null/);
@@ -878,6 +880,323 @@ test("maxRequestLogs keeps only the newest files per group", async () => {
   } finally {
     globalThis.fetch = originalFetch;
     fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("request logs are unaffected by the gateway log size cap", async () => {
+  const originalFetch = globalThis.fetch;
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-reqcap-"));
+  globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
+  try {
+    // --max-log-size 只约束 gateway.log；请求日志完整写入，不因极小的上限被截断或滚动。
+    const config: GatewayConfig = logTestConfig(logDir);
+    config.maxGatewayLogBytes = 1;
+    const handler = createGatewayHandler(config, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "hi" }),
+    }));
+    assert.equal(response.status, 200);
+    const text = fs.readdirSync(logDir)
+      .filter((name) => name.startsWith("cliproxy-"))
+      .map((name) => fs.readFileSync(path.join(logDir, name), "utf8"))
+      .join("");
+    assert.match(text, /=== POST \/v1\/responses ===/);
+    assert.match(text, /--- response body ---/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("--max-request-logs rejects negative, fractional, and non-numeric input", () => {  assert.equal(parseMaxRequestLogs("0"), 0);
+  assert.equal(parseMaxRequestLogs("42"), 42);
+  assert.throws(() => parseMaxRequestLogs("-1"), /--max-request-logs/);
+  assert.throws(() => parseMaxRequestLogs("1.5"), /--max-request-logs/);
+  assert.throws(() => parseMaxRequestLogs("all"), /--max-request-logs/);
+  assert.throws(() => parseMaxRequestLogs("99999999999999999999"), /--max-request-logs/);
+});
+
+test("--max-log-size parses byte sizes and rejects negative, invalid, and overflowing input", () => {
+  assert.equal(parseMaxLogSize("0"), 0);
+  assert.equal(parseMaxLogSize("8B"), 8);
+  assert.equal(parseMaxLogSize("512KB"), 524288);
+  assert.equal(parseMaxLogSize("10MB"), 10485760);
+  assert.equal(parseMaxLogSize("1M"), 1048576);
+  assert.equal(parseMaxLogSize("2k"), 2048);
+  assert.equal(parseMaxLogSize("1 MB"), 1048576);
+  assert.equal(parseMaxLogSize("1 G"), 1073741824);
+  assert.throws(() => parseMaxLogSize("-1MB"), /--max-log-size/);
+  assert.throws(() => parseMaxLogSize("wat"), /--max-log-size/);
+  assert.throws(() => parseMaxLogSize("99999999999999999999GB"), /--max-log-size/);
+  // bytes 包会把 "1MiB" 静默解析成 1 字节，必须显式拒绝而非错误设限。
+  assert.throws(() => parseMaxLogSize("1MiB"), /--max-log-size/);
+  assert.throws(() => parseMaxLogSize("1mbb"), /--max-log-size/);
+});
+
+test("capGatewayLog copies oversized content into timestamped backups and truncates in place", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-rotate-"));
+  const keepDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-rotate-keep-"));
+  try {
+    const logFile = path.join(dir, "gateway.log");
+    const oversized = `${"old gateway output ".repeat(80)}\n`;
+    fs.writeFileSync(logFile, oversized);
+
+    capGatewayLog(logFile, 1024);
+
+    // 原内容完整进入毫秒时间戳备份；原文件保持存在、被原地清空，进程持有的 fd 不受影响。
+    const backups = fs.readdirSync(dir).filter((name) => /^gateway-\d{17}\.log$/.test(name));
+    assert.equal(backups.length, 1);
+    assert.equal(fs.readFileSync(path.join(dir, backups[0]), "utf8"), oversized);
+    assert.equal(fs.statSync(logFile).size, 0);
+
+    // 未超限（含即将写入的预留字节）时不滚动。
+    fs.writeFileSync(logFile, "fresh\n");
+    capGatewayLog(logFile, 1024, 10);
+    assert.equal(fs.readFileSync(logFile, "utf8"), "fresh\n");
+
+    // 备份只保留最新的 5 个，最旧先删。
+    const keepLog = path.join(keepDir, "gateway.log");
+    fs.writeFileSync(keepLog, "x");
+    for (let index = 0; index < 7; index += 1) {
+      fs.writeFileSync(
+        path.join(keepDir, `gateway-${"20200101000000" + String(index).padStart(3, "0")}.log`),
+        `b${index}`,
+      );
+    }
+    capGatewayLog(keepLog, 4, 10);
+    const remaining = fs.readdirSync(keepDir)
+      .filter((name) => /^gateway-\d{17}\.log$/.test(name))
+      .sort();
+    assert.equal(remaining.length, 5);
+    assert.equal(remaining[0], "gateway-20200101000000003.log");
+    assert.equal(fs.statSync(keepLog).size, 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(keepDir, { recursive: true, force: true });
+  }
+});
+
+test("capGatewayLog prunes gateway.error.log backups by the derived file name", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-rotate-err-"));
+  try {
+    const errorLog = path.join(dir, "gateway.error.log");
+    const oversized = `${"unhandledRejection stack\n".repeat(80)}\n`;
+    fs.writeFileSync(errorLog, oversized);
+    for (let index = 0; index < 7; index += 1) {
+      fs.writeFileSync(
+        path.join(dir, `gateway.error-${"20200101000000" + String(index).padStart(3, "0")}.log`),
+        `b${index}`,
+      );
+    }
+
+    capGatewayLog(errorLog, 1024);
+
+    // 裁剪必须按 gateway.error- 前缀匹配：写死 gateway- 会让这批备份一个不删。
+    const remaining = fs.readdirSync(dir)
+      .filter((name) => /^gateway\.error-\d{17}\.log$/.test(name))
+      .sort();
+    assert.equal(remaining.length, 5);
+    assert.equal(remaining[0], "gateway.error-20200101000000003.log");
+    assert.equal(fs.statSync(errorLog).size, 0);
+    assert.equal(fs.readFileSync(path.join(dir, remaining[4]), "utf8"), oversized);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("consecutive capGatewayLog rotations do not overwrite each other's backups", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-rotate-ms-"));
+  try {
+    const logFile = path.join(dir, "gateway.log");
+    fs.writeFileSync(logFile, "first\n");
+    capGatewayLog(logFile, 2);
+    fs.writeFileSync(logFile, "second\n");
+    // 连续两次滚动即使落在同一秒，毫秒时间戳也保证备份名不同、内容不丢。
+    await new Promise((resolve) => setTimeout(resolve, 3));
+    capGatewayLog(logFile, 2);
+
+    const backups = fs.readdirSync(dir).filter((name) => /^gateway-\d{17}\.log$/.test(name)).sort();
+    assert.equal(backups.length, 2);
+    const contents = backups.map((name) => fs.readFileSync(path.join(dir, name), "utf8")).sort();
+    assert.deepEqual(contents, ["first\n", "second\n"]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("capGatewayLog truncates in place so open fds keep writing the live log", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-cap-fd-"));
+  try {
+    // 模拟 launchd 持有的进程日志 fd（O_APPEND）：滚动必须保持活跃文件的 inode 不变，
+    // 否则该 fd 的后续写入会全部落进备份文件。rename 方案在这条用例下必然失败。
+    const logFile = path.join(dir, "gateway.error.log");
+    fs.writeFileSync(logFile, `${"ERR-1 ".repeat(400)}\n`);
+    const fd = fs.openSync(logFile, "a");
+    try {
+      fs.writeSync(fd, "fd-holds\n");
+      capGatewayLog(logFile, 1024);
+      fs.writeSync(fd, "after-rotate\n");
+
+      const active = fs.readFileSync(logFile, "utf8");
+      assert.match(active, /after-rotate/);
+      assert.equal(active.includes("ERR-1"), false);
+      const backups = fs.readdirSync(dir)
+        .filter((name) => /^gateway\.error-\d{17}\.log$/.test(name));
+      assert.equal(backups.length, 1);
+      const backupText = fs.readFileSync(path.join(dir, backups[0]), "utf8");
+      assert.match(backupText, /ERR-1/);
+      assert.match(backupText, /fd-holds/);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("config --max-request-logs persists, audits, and validates input", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-config-log-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    requestLogging: true,
+    logDir: paths.logDir,
+    maxRequestLogs: 3,
+  }));
+  const auditEntries = (): string => fs.readFileSync(paths.stdoutLog, "utf8");
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    await runCli(["config", "--max-request-logs", "20"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).maxRequestLogs, 20);
+    assert.match(auditEntries(), /maxRequestLogs: 3 -> 20/);
+
+    await runCli(["config"]);
+    assert.match(printed.join("\n"), /"maxRequestLogs": 20/);
+
+    await assert.rejects(runCli(["config", "--max-request-logs", "-1"]), /--max-request-logs/);
+    // 解析失败发生在写盘之前，配置不被破坏。
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).maxRequestLogs, 20);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config --max-log-size persists, audits, and caps the gateway log", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-config-logsize-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    requestLogging: false,
+    logDir: paths.logDir,
+  }));
+  // 预置超过 1KB 的旧日志：审计写入前先滚动备份，旧内容完整进入 gateway-<时间戳>.log，
+  // 新审计条目写进新建的 gateway.log。
+  fs.writeFileSync(paths.stdoutLog, `--2020-01-01 00:00:00.000--\n${"old gateway output ".repeat(80)}\n`);
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    await runCli(["config", "--max-log-size", "1KB"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).maxGatewayLogBytes, 1024);
+    const text = fs.readFileSync(paths.stdoutLog, "utf8");
+    assert.match(text, /maxGatewayLogBytes: null -> 1024/);
+    assert.equal(text.startsWith("--"), true);
+    assert.equal(text.includes("old gateway output"), false);
+    assert.ok(Buffer.byteLength(text) <= 1024);
+    const backups = fs.readdirSync(paths.runtimeHome)
+      .filter((name) => /^gateway-\d{17}\.log$/.test(name));
+    assert.equal(backups.length, 1);
+    assert.match(
+      fs.readFileSync(path.join(paths.runtimeHome, backups[0]), "utf8"),
+      /old gateway output/,
+    );
+    assert.match(printed.join("\n"), /Gateway log size cap set to 1KB\./);
+
+    await runCli(["config"]);
+    assert.match(printed.join("\n"), /"maxGatewayLogBytes": 1024/);
+
+    await assert.rejects(runCli(["config", "--max-log-size", "-1MB"]), /--max-log-size/);
+    // 解析失败发生在写盘之前，配置不被破坏。
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).maxGatewayLogBytes, 1024);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config audit appends to the gateway log without standalone log files", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-audit-keep-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.mkdirSync(paths.logDir, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    requestLogging: false,
+    logDir: paths.logDir,
+    maxRequestLogs: 2,
+  }));
+
+  const originalLog = console.log;
+  console.log = (line?: unknown) => {};
+  try {
+    await runCli(["config", "--log", "on"]);
+
+    // 审计条目进 gateway.log 单文件，不依赖 requestLogging，也不受 maxRequestLogs 影响。
+    assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /requestLogging: false -> true/);
+    const stray = fs.readdirSync(paths.logDir).filter((name) => name.startsWith("cliproxy-config-"));
+    assert.deepEqual(stray, []);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
