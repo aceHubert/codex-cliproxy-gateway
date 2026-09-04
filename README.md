@@ -266,17 +266,31 @@ Installation points both `experimental_realtime_ws_base_url` and `experimental_r
 ## Publishing
 
 TypeScript sources are bundled into the single published executable
-`dist/index.js`. The npm package does not include `src` or tests.
+`dist/index.js`. The npm package does not include `src` or tests. Commits must
+follow Conventional Commits; yorkie runs commitlint from the `commit-msg` hook.
+Run `bun run commit` to create a commit with the Chinese Commitizen prompts.
 
-Review the package name and repository metadata, then:
+`lerna-changelog` builds each release entry from merged GitHub pull requests.
+Apply one of its configured labels before merging: `feat`, `bug`, or `breaking`.
+The release tools and yorkie hook require Node.js 22.13 or newer. Export a
+GitHub token before versioning:
 
 ```bash
-npm run check
-npm pack --dry-run
-npm publish --access public
+export GITHUB_AUTH="..."
+bun run release:version
+bun run release
 ```
 
-The package has no runtime dependencies.
+`release:version` runs the checks, selects the next version from Conventional
+Commits, prepends the PR-based changelog, creates the release commit and tag,
+and pushes them. `release` publishes that tag to npm; rerun it if publishing
+fails after the tag was created. The package has no additional runtime
+dependencies from the release tooling.
+
+Pushes to `main` run the same version-and-publish flow through GitHub Actions.
+Configure npm Trusted Publishing for the GitHub repository, the `deploy.yml`
+workflow, and its `production` environment. Separate checks enforce
+Conventional Commit PR titles and commit messages before merge.
 
 ## Model catalog refresh
 

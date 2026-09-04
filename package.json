@@ -7,6 +7,7 @@
     "codex-cliproxy": "./dist/index.js"
   },
   "files": [
+    "CHANGELOG.md",
     "dist/index.js",
     "models.json",
     "schemas/gateway-config.schema.json",
@@ -16,10 +17,17 @@
   "scripts": {
     "dev": "bun src/index.ts",
     "build": "bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
+    "changelog": "bun scripts/changelog.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun test && bun run build",
-    "prepack": "bun run check"
+    "commit": "git-cz",
+    "commitlint": "commitlint --edit",
+    "prepack": "bun run check",
+    "preversion": "bun run check",
+    "version": "bun run changelog",
+    "release:version": "lerna version",
+    "release": "lerna publish from-git"
   },
   "keywords": [
     "codex",
@@ -34,9 +42,16 @@
     "bytes": "^3.1.2"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.2.2",
+    "@commitlint/config-conventional": "^21.2.2",
     "@types/bun": "^1.3.5",
     "@types/bytes": "^3.1.6",
-    "typescript": "^5.9.3"
+    "commitizen": "^4.3.2",
+    "cz-conventional-changelog-zh": "^0.0.2",
+    "lerna": "^10.0.1",
+    "lerna-changelog": "^2.2.0",
+    "typescript": "^5.9.3",
+    "yorkie": "^2.0.0"
   },
   "engines": {
     "bun": ">=1.2.0"
@@ -45,6 +60,20 @@
     "darwin"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aceHubert/codex-cliproxy-gateway.git"
+  },
+  "homepage": "https://github.com/aceHubert/codex-cliproxy-gateway#readme",
+  "config": {
+    "commitizen": {
+      "path": "./node_modules/cz-conventional-changelog-zh"
+    }
+  },
+  "gitHooks": {
+    "commit-msg": "commitlint --env GIT_PARAMS"
+  },
+  "trustedDependencies": ["yorkie"],
   "publishConfig": {
     "access": "public"
   }
