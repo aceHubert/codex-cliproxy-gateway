@@ -123,7 +123,10 @@ test("config.toml-mutating commands accept restart-codex", {
 
   try {
     fs.writeFileSync(paths.stateFile, "{}");
-    await assert.rejects(runCli(["install", "--restart-codex"]), /Already installed/);
+    await assert.rejects(
+      runCli(["install", "--cpa-only", "--restart-codex"]),
+      /Already installed/,
+    );
 
     fs.rmSync(paths.stateFile);
     await assert.rejects(runCli(["uninstall", "--restart-codex"]), /No managed installation found/);
@@ -146,8 +149,11 @@ test("误改的 codex-restart 参数不再作为别名接受", async () => {
   }
 });
 
-test("cpa-only switch requires models --sync", async () => {
-  await assert.rejects(runCli(["models", "--cpa-only"]), /--cpa-only requires models --sync/);
+test("models cpa-only switch requires sync", async () => {
+  await assert.rejects(
+    runCli(["models", "--cpa-only"]),
+    /--cpa-only is only supported by install or models --sync/,
+  );
 });
 
 test("unknown options are rejected instead of silently ignored", async () => {

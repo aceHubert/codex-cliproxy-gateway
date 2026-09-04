@@ -55,6 +55,12 @@ CLIPROXY_API_KEY='your-key' codex-cliproxy install \
   --cliproxy-url https://cliproxy.example/v1
 ```
 
+To use only CLIProxy models from the first installation:
+
+```bash
+codex-cliproxy install --cpa-only --select all
+```
+
 To load model metadata overrides from the latest GitHub release:
 
 ```bash
@@ -70,10 +76,10 @@ The installer:
 1. Validates the key against `GET /v1/models`.
 2. Displays the CLIProxy model list and asks which models should appear in Codex.
 3. Stores the key in macOS Keychain.
-4. Builds a local overlay containing only the selected CLIProxy models. Native rows come from Codex's authenticated `/models` refresh.
-5. Prefixes selected model IDs with `cliproxy/` while preserving their original display names; the gateway strips the ID prefix before forwarding.
+4. Builds a local catalog containing only the selected CLIProxy models.
+5. In the default split mode, native rows come from Codex's authenticated `/models` refresh and selected IDs use the `cliproxy/` prefix. With `--cpa-only`, the static catalog keeps original model IDs.
 6. Backs up `~/.codex/config.toml` as `~/.codex/config.toml.bak-cliproxy-gateway-YYYYMMDDHHmmss`.
-7. Sets root-level `openai_base_url` and removes `model_catalog_json` so Codex refreshes through the gateway.
+7. Sets root-level `openai_base_url`; split mode removes `model_catalog_json`, while `--cpa-only` points it to the generated static catalog.
 8. Installs a `launchd` service bound to `127.0.0.1`.
 9. Leaves `~/.codex/auth.json` untouched.
 

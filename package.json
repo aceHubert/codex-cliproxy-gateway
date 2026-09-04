@@ -1,6 +1,6 @@
 {
   "name": "codex-cliproxy-gateway",
-  "version": "0.2.2",
+  "version": "0.2.4",
   "description": "A Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
   "type": "module",
   "bin": {

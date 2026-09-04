@@ -87,7 +87,7 @@ function usage() {
   console.log(`codex-cliproxy - Bun gateway for Codex Desktop and CLI
 
 Usage:
-  codex-cliproxy install [options] [--restart-codex]
+  codex-cliproxy install [options] [--cpa-only] [--restart-codex]
   codex-cliproxy uninstall [--restart-codex]
   codex-cliproxy start|stop
   codex-cliproxy restart [--restart-codex]
@@ -103,6 +103,7 @@ Install options:
   --official-url URL   default: existing openai_base_url or official Codex
   --key-env NAME       read the API key from this environment variable
   --select SELECTOR     model numbers/ranges, exact IDs, all, or none
+  --cpa-only            use only CLIProxy models with their original IDs
   --model-merge-json URL  GitHub repository or HTTP(S) models.json URL
   --restart-codex       stop Codex app-server after config.toml is updated
 
@@ -520,6 +521,7 @@ async function rebuildCatalog(
 async function install(options: CliOptions): Promise<void> {
   requireMacOS();
   requireBun();
+  const cpaOnly = options["cpa-only"] === true;
   const paths = resolvePaths();
   if (fs.existsSync(paths.stateFile)) throw new Error("Already installed; run uninstall first");
 
@@ -529,6 +531,7 @@ async function install(options: CliOptions): Promise<void> {
     throw new Error("Invalid port");
   }
   const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
+  const { patchedToml: modelCatalogToml } = applyModelCatalogToml(currentToml, cpaOnly, paths);
   const existingBaseUrl = readRootTomlString(currentToml, "openai_base_url");
   const modelMergeJson = stringOption(options, "model-merge-json");
   const previousGatewayConfig = fs.existsSync(paths.gatewayConfig)
@@ -553,7 +556,7 @@ async function install(options: CliOptions): Promise<void> {
     (existingBaseUrl || DEFAULTS.officialBaseUrl).replace(/\/+$/, ""),
   );
   config.configVersion = GATEWAY_CONFIG_VERSION;
-  applyRoutingMode(config, paths, false);
+  applyRoutingMode(config, paths, cpaOnly);
   const apiKey = getInstallApiKey(config.cliproxyBaseUrl, stringOption(options, "key-env"));
 
   const proxyCatalog = await fetchCliProxyCatalog(
@@ -567,7 +570,7 @@ async function install(options: CliOptions): Promise<void> {
     availableModels,
     currentSelection: Array.isArray(config.selectedModels) ? config.selectedModels : undefined,
     selector: stringOption(options, "select"),
-    requireNonEmpty: true,
+    requireNonEmpty: cpaOnly,
   });
   config.selectedModels = selectedModels;
   console.log(`Selected ${selectedModels.length} CLIProxy models.`);
@@ -584,13 +587,14 @@ async function install(options: CliOptions): Promise<void> {
       proxyCatalog.models.filter((model) => selectedModels.includes(model.slug)),
       Boolean(modelMergeJson),
     );
-    console.log(`Dynamic CLIProxy overlay synced: ${catalogResult.proxyCount} models.`);
+    console.log(cpaOnly
+      ? `CPA-only catalog synced: ${catalogResult.proxyCount} models.`
+      : `Dynamic CLIProxy overlay synced: ${catalogResult.proxyCount} models.`);
 
     writeGatewayConfig(paths.gatewayConfig, config);
 
-    const originalToml = currentToml;
     const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
-    const patchedToml = managedCodexToml(originalToml, gatewayBaseUrl);
+    const patchedToml = managedCodexServiceToml(modelCatalogToml, gatewayBaseUrl);
     atomicWrite(paths.configToml, patchedToml);
 
     writeJson(paths.stateFile, {
@@ -615,7 +619,7 @@ async function install(options: CliOptions): Promise<void> {
     launchInstalled = true;
 
     await waitForHealth(`http://${config.host}:${config.port}/healthz`);
-    invalidateModelsCache(paths.modelsCacheFile);
+    if (!cpaOnly) invalidateModelsCache(paths.modelsCacheFile);
     recordConfigAudit("install", config, currentGatewayConfig, paths);
 
   } catch (error) {
@@ -632,6 +636,7 @@ async function install(options: CliOptions): Promise<void> {
   console.log(`Installed. Gateway: http://${config.host}:${config.port}${config.mountPath}`);
   console.log("Codex ChatGPT OAuth was not modified.");
   if (options["restart-codex"] === true) await refreshCodexAppServer();
+  else if (cpaOnly) console.log("CPA-only catalog configured; fully quit and reopen Codex Desktop, or reinstall with --restart-codex.");
   else console.log("Fully quit and reopen Codex Desktop, or reinstall with --restart-codex.");
 }
 
@@ -1044,7 +1049,7 @@ function syncGatewayConfig(command: string, options: CliOptions): void {
 
 /** 各命令接受的选项；白名单外的 --key 一律报错，避免拼写错误被静默忽略后部分生效。 */
 const COMMAND_OPTIONS: Record<string, string[]> = {
-  install: ["cliproxy-url", "port", "prefix", "official-url", "key-env", "select", "model-merge-json", "restart-codex"],
+  install: ["cliproxy-url", "port", "prefix", "official-url", "key-env", "select", "cpa-only", "model-merge-json", "restart-codex"],
   uninstall: ["restart-codex"],
   restart: ["restart-codex"],
   serve: ["config"],
@@ -1072,8 +1077,10 @@ export async function runCli(args: string[]): Promise<void> {
   if (command === "models" && stringOption(options, "model-merge-json") && options.sync !== true) {
     throw new Error("--model-merge-json requires models --sync");
   }
-  if (options["cpa-only"] === true && (command !== "models" || options.sync !== true)) {
-    throw new Error("--cpa-only requires models --sync");
+  if (options["cpa-only"] === true
+    && command !== "install"
+    && (command !== "models" || options.sync !== true)) {
+    throw new Error("--cpa-only is only supported by install or models --sync");
   }
   if (options.log !== undefined && command !== "config") {
     throw new Error("--log is only supported by the config command");
