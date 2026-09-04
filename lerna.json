@@ -1,0 +1,33 @@
+{
+  "$schema": "node_modules/lerna/schemas/lerna-schema.json",
+  "version": "0.2.4",
+  "npmClient": "bun",
+  "packages": ["."],
+  "command": {
+    "version": {
+      "allowBranch": "main",
+      "changelog": false,
+      "conventionalCommits": true,
+      "ignoreChanges": [
+        ".github/**",
+        ".gitignore",
+        "**/*.md",
+        "commitlint.config.cjs",
+        "docs/**",
+        "lerna.json",
+        "scripts/**",
+        "test/**"
+      ],
+      "message": "chore(release): publish %s"
+    }
+  },
+  "changelog": {
+    "repo": "aceHubert/codex-cliproxy-gateway",
+    "labels": {
+      "feat": ":rocket: New Feature",
+      "bug": ":bug: Bug Fix",
+      "breaking": ":boom: Breaking Change"
+    },
+    "cacheDir": ".changelog"
+  }
+}
