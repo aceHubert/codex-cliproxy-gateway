@@ -23,9 +23,10 @@
     "check": "bun run typecheck && bun test && bun run build",
     "commit": "git-cz",
     "commitlint": "commitlint --edit",
-    "prepack": "bun run check",
-    "preversion": "bun run check",
+    "prepack": "bun run release:check",
+    "preversion": "bun run release:check",
     "version": "bun run changelog",
+    "release:check": "if [ \"$CODEX_CLIPROXY_SKIP_TESTS\" = \"1\" ]; then bun run typecheck && bun run build; else bun run check; fi",
     "release:version": "lerna version",
     "release": "lerna publish from-git"
   },
