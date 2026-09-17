@@ -115,14 +115,14 @@ test("ZCode 目录重建时过期 Codex 目录缓存，复用缓存时保持原�
   });
 });
 
-test("Z.ai 与 Bigmodel 复用同一裸 ID 缓存，套餐只取大小写无关交集", { timeout: 60_000 }, () => {
+test("两种渠道复用同一裸 ID 缓存，统一 zcode/ 前缀且套餐只取大小写无关交集", { timeout: 60_000 }, () => {
   fixture((file) => {
     const cached = loadZcodeCatalogCache(file);
     const before = fs.readFileSync(file, "utf8");
     const zai = createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase(), "test-unsupported-id"]), cached);
     const bigmodel = createZcodeCatalog(snapshot("bigmodel", [IDS[1].toUpperCase()]), cached);
-    assert.deepEqual(zai.models.map((entry) => entry.slug), [`z.ai/${IDS[0]}`]);
-    assert.deepEqual(bigmodel.models.map((entry) => entry.slug), [`bigmodel/${IDS[1]}`]);
+    assert.deepEqual(zai.models.map((entry) => entry.slug), [`zcode/${IDS[0]}`]);
+    assert.deepEqual(bigmodel.models.map((entry) => entry.slug), [`zcode/${IDS[1]}`]);
     assert.equal(zai.models[0].context_window, cached.models[0].context_window);
     assert.equal(bigmodel.models[0].context_window, cached.models[1].context_window);
     assert.deepEqual(cached.models.map((entry) => entry.slug), IDS);
@@ -137,37 +137,41 @@ test("ZCode 套餐筛选使用 slug 不使用 entry.name 或显示别名", { tim
     const cached = loadZcodeCatalogCache(file);
     const renamed = { models: cached.models.map((entry) => ({ ...entry, name: "test-display-alias", display_name: "另一个显示名" })) };
     assert.equal(createZcodeCatalog(snapshot("zai", ["test-display-alias"]), renamed).models.length, 0);
-    assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase()]), renamed).models[0].slug, `z.ai/${IDS[0]}`);
+    assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase()]), renamed).models[0].slug, `zcode/${IDS[0]}`);
   });
 });
 
-test("ZCode 上游模型保留配置原始拼写，拒绝错渠道和套餐外模型", { timeout: 60_000 }, () => {
+test("ZCode 上游模型保留配置原始拼写，旧厂商前缀与套餐外模型均拒绝", { timeout: 60_000 }, () => {
   const original = IDS[0].toUpperCase();
   const selected = snapshot("zai", [original, "test-unsupported-id"]);
-  assert.equal(zcodeUpstreamModel(`z.ai/${IDS[0]}`, selected), original);
-  assert.equal(zcodeUpstreamModel(`Z.AI/${original}`, selected), original);
+  assert.equal(zcodeUpstreamModel(`zcode/${IDS[0]}`, selected), original);
+  assert.equal(zcodeUpstreamModel(`ZCODE/${original}`, selected), original);
+  assert.equal(zcodeUpstreamModel(`z.ai/${IDS[0]}`, selected), undefined);
   assert.equal(zcodeUpstreamModel(`bigmodel/${IDS[0]}`, selected), undefined);
-  assert.equal(zcodeUpstreamModel(`z.ai/${IDS[1]}`, selected), undefined);
-  assert.equal(zcodeUpstreamModel("z.ai/test-unsupported-id", selected), undefined);
-  assert.equal(zcodeUpstreamModel(`cliproxy/z.ai/${IDS[0]}`, selected), undefined);
+  assert.equal(zcodeUpstreamModel("zcode/test-unsupported-id", selected), undefined);
+  assert.equal(zcodeUpstreamModel(`zcode/${IDS[1]}`, selected), undefined);
+  assert.equal(zcodeUpstreamModel(`cliproxy/zcode/${IDS[0]}`, selected), undefined);
   assert.equal(zcodeUpstreamModel(IDS[0], selected), undefined);
-  assert.equal(zcodeUpstreamModel(`bigmodel/${IDS[0]}`, snapshot("bigmodel", [original])), original);
+  // 渠道由套餐快照决定，统一前缀下两种渠道都能解析同一模型。
+  assert.equal(zcodeUpstreamModel(`zcode/${IDS[0]}`, snapshot("bigmodel", [original])), original);
 });
 
-test("ZCode 合并保留顶层专用命名空间，移除冲突且不影响 cliproxy/z.ai", { timeout: 60_000 }, () => {
+test("ZCode 合并只保留 zcode/ 顶层命名空间，上游厂商条目与 cliproxy/z.ai 原样保留", { timeout: 60_000 }, () => {
   const official = { slug: "gpt-test", priority: 10 };
   const proxy = { slug: `cliproxy/z.ai/${IDS[0]}`, priority: 20 };
-  const base = { models: [official, proxy, { slug: `z.ai/${IDS[0]}` }, { slug: `BIGMODEL/${IDS[1]}` }] };
-  const added = { models: [{ slug: `z.ai/${IDS[0]}`, description: "当前套餐" }] };
+  const vendor = { slug: `z.ai/${IDS[0]}`, priority: 30 };
+  const base = { models: [official, proxy, vendor, { slug: `zcode/${IDS[1]}` }] };
+  const added = { models: [{ slug: `zcode/${IDS[0]}`, description: "当前套餐" }] };
   const merged = mergeZcodeCatalog(base, added);
-  assert.deepEqual(merged.models.map((entry) => entry.slug), [official.slug, proxy.slug, added.models[0].slug]);
+  assert.deepEqual(merged.models.map((entry) => entry.slug), [official.slug, proxy.slug, vendor.slug, added.models[0].slug]);
   assert.equal(merged.models[0], official);
   assert.equal(merged.models[1], proxy);
-  assert.equal(merged.models[2].description, "当前套餐");
-  assert.ok(merged.models[2].priority! > proxy.priority);
+  assert.equal(merged.models[2], vendor);
+  assert.equal(merged.models[3].description, "当前套餐");
+  assert.ok(merged.models[3].priority! > vendor.priority);
   assert.equal(base.models.length, 4);
   assert.equal(added.models[0].description, "当前套餐");
-  assert.deepEqual(mergeZcodeCatalog(base, { models: [] }).models, [official, proxy]);
+  assert.deepEqual(mergeZcodeCatalog(base, { models: [] }).models, [official, proxy, vendor]);
 });
 
 test("ZCode 磁盘共享缓存和对外目录均不携带配置凭证", { timeout: 60_000 }, () => {

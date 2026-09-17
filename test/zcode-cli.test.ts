@@ -141,7 +141,7 @@ test("config --zcode 拒绝会让新进程无法启动的组合，保留原配�
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   // 保留前缀与启用 ZCode 的组合会被新进程的 validateZcodeConfig 拒绝启动：
   // CLI 必须在写盘与重启之前挡下，否则网关直接不可用。
-  const config = { ...installedConfig(paths), prefix: "z.ai/" };
+  const config = { ...installedConfig(paths), prefix: "zcode/" };
   fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(config)}\n`);
   fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, config })}\n`);
   try {

@@ -2,8 +2,8 @@ import os from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
 import { createZcodeConfigCache, ZcodeConfigError } from "./config.ts";
-import type { ZcodeConfigCache } from "./config.ts";
-import { createZcodeCatalog, loadZcodeCatalogCache, zcodeModelFamily, zcodeUpstreamModel } from "./catalog.ts";
+import type { ZcodeConfigCache, ZcodeFamily } from "./config.ts";
+import { createZcodeCatalog, isZcodeModel, loadZcodeCatalogCache, zcodeUpstreamModel } from "./catalog.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
 import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
 import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
@@ -46,8 +46,8 @@ export function validateZcodeConfig(config: GatewayConfig): void {
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 ZCode 时网关只能监听环回地址");
   }
-  if (["z.ai/", "bigmodel/"].some((reserved) => config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved)))) {
-    throw new Error("启用 ZCode 时 z.ai/ 和 bigmodel/ 前缀保留给 ZCode，请调整第三方 prefix");
+  if (config.prefix && ("zcode/".startsWith(config.prefix) || config.prefix.startsWith("zcode/"))) {
+    throw new Error("启用 ZCode 时 zcode/ 前缀保留给 ZCode，请调整第三方 prefix");
   }
 }
 
@@ -103,7 +103,9 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       const requestTime = localTime();
       const incoming = new URL(request.url);
       const group = logGroupFromPath(incoming.pathname);
-      const family = zcodeModelFamily(input.model);
+      const zcode = isZcodeModel(input.model);
+      // 渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权与日志分流；模型 ID 不携带渠道。
+      let family: ZcodeFamily | undefined;
       let key = "";
       let upstreamUrl: string | undefined;
       let upstreamRequestHeaders: Headers | undefined;
@@ -136,7 +138,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         return value;
       };
       const log = (status: number, body: string, headers = new Headers(), logicalError?: string) => {
-        if (logged || !family) return;
+        if (logged || !zcode || !family) return;
         logged = true;
         const durationMs = Date.now() - start;
         const at = incoming.pathname + incoming.search;
@@ -180,9 +182,10 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         abort.signal.throwIfAborted();
         const snapshot = await cache.get();
         key = snapshot.apiKey;
+        family = snapshot.family;
         abort.signal.throwIfAborted();
         const model = typeof input.model === "string" ? zcodeUpstreamModel(input.model, snapshot) : undefined;
-        if (!family || family !== snapshot.family || !model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前选择的渠道或厂商目录"); }
+        if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
         const translated = translateZcodeRequest(input, model);
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
         const routedUrl = endpointRouting

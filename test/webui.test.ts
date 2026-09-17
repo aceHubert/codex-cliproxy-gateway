@@ -868,7 +868,7 @@ test("ensureUiToken reuses an existing token and generates a fresh one when miss
 });
 
 test("POST /ui/api/config rejects combinations the restarted gateway would refuse to boot", async () => {
-  const { handler, paths, home } = await makeFixture({ config: { prefix: "z.ai/" } });
+  const { handler, paths, home } = await makeFixture({ config: { prefix: "zcode/" } });
   try {
     const before = fs.readFileSync(paths.gatewayConfig, "utf8");
     const response = await handler(authedRequest("/ui/api/config", { json: { zcode: true } }));

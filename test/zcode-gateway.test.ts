@@ -96,7 +96,7 @@ for (const family of ["zai", "bigmodel"] as const) {
           calls.push({ url, init, body });
           return upstream("成功", body.tools?.[0]?.name);
         } });
-        const model = `${family === "zai" ? "z.ai" : "bigmodel"}/glm-5.3`;
+        const model = "zcode/glm-5.3";
         for (const stream of [false, true]) {
           const response = await handler(request(model, { stream, tools: [{ type: "function", name: "read.file", parameters: { type: "object", properties: { path: { type: "string" } } } }] }, "/v1/responses", { "thread-id": "sticky-thread" }));
           assert.equal(response.status, 200);
@@ -141,7 +141,7 @@ test("端点重映射命中时上游请求改发 ultra 地址，配置拉取走�
       return upstream();
     } });
     for (const stream of [false, true]) {
-      const response = await handler(request("z.ai/glm-5.3", { stream }));
+      const response = await handler(request("zcode/glm-5.3", { stream }));
       assert.equal(response.status, 200);
       assert.equal((await decoded(response)).status, "completed");
     }
@@ -196,7 +196,7 @@ test("upstream-only 下 ZCode 的环回监听与保留前缀约束不再生效",
   await fixture(async ({ config, create }) => {
     config.upstreamOnly = true;
     config.host = "0.0.0.0";
-    config.prefix = "z.ai/";
+    config.prefix = "zcode/";
     assert.doesNotThrow(() => create());
   });
 });
@@ -207,7 +207,7 @@ test("ZCode 两种 Anthropic 基址均只追加一个 v1", async () => {
       const selected = { ...snapshot(), baseURL: `https://api.z.ai/api/anthropic${suffix}` };
       let target = "";
       const handler = create({ current: async () => selected, fetch: async (url) => { target = url; return upstream(); } });
-      assert.equal((await handler(request("z.ai/glm-5.3"))).status, 200);
+      assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
       assert.equal(target, "https://api.z.ai/api/anthropic/v1/messages");
     }
   });
@@ -223,29 +223,29 @@ test("ZCode 目录按套餐与厂商交集忽略大小写，套餐变化立即�
       return upstream();
     } });
     const list = async () => (await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json).models as Json[];
-    assert.deepEqual((await list()).filter((item) => item.slug.startsWith("z.ai/")).map((item) => item.slug), ["z.ai/glm-5.3"]);
-    assert.equal((await handler(request("z.ai/glm-5.3-flash"))).status, 404);
-    assert.equal((await handler(request("z.ai/unknown-model"))).status, 404);
-    assert.equal((await handler(request("bigmodel/glm-5.3"))).status, 404);
+    assert.deepEqual((await list()).filter((item) => item.slug.startsWith("zcode/")).map((item) => item.slug), ["zcode/glm-5.3"]);
+    assert.equal((await handler(request("zcode/glm-5.3-flash"))).status, 404);
+    assert.equal((await handler(request("zcode/unknown-model"))).status, 404);
+    // 旧厂商前缀不再属于 ZCode 命名空间：请求不会进入 ZCode 适配器。
+    assert.notEqual((await handler(request("z.ai/glm-5.3"))).status, 200);
     assert.equal(calls, 0);
     selected = { ...selected, modelIds: ["gLm-5.3-FlAsH"] };
-    assert.deepEqual((await list()).filter((item) => item.slug.startsWith("z.ai/")).map((item) => item.slug), ["z.ai/glm-5.3-flash"]);
-    assert.equal((await handler(request("z.ai/glm-5.3"))).status, 404);
+    assert.deepEqual((await list()).filter((item) => item.slug.startsWith("zcode/")).map((item) => item.slug), ["zcode/glm-5.3-flash"]);
+    assert.equal((await handler(request("zcode/glm-5.3"))).status, 404);
     assert.equal(calls, 0);
-    assert.equal((await handler(request("z.ai/glm-5.3-flash"))).status, 200);
+    assert.equal((await handler(request("zcode/glm-5.3-flash"))).status, 200);
     assert.equal(calls, 1);
   });
 });
 
-test("ZCode 基础模型列表标记两个渠道各自 owned_by", async () => {
+test("ZCode 基础模型列表统一 zcode/ 前缀并标记 owned_by zcode", async () => {
   await fixture(async ({ create }) => {
     for (const family of ["zai", "bigmodel"] as const) {
       const handler = create({ current: async () => snapshot(family) });
       const list = await (await handler(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-      const owner = family === "zai" ? "z.ai" : "bigmodel";
-      const models = list.data.filter((item: Json) => item.id.startsWith(`${owner}/`));
+      const models = list.data.filter((item: Json) => item.id.startsWith("zcode/"));
       assert.equal(models.length, 2);
-      assert.ok(models.every((item: Json) => item.owned_by === owner));
+      assert.ok(models.every((item: Json) => item.owned_by === "zcode"));
     }
   });
 });
@@ -257,13 +257,13 @@ test("ZCode 关闭或配置失效时不注入模型，失效请求不触发上�
     config.zcode = false;
     const disabled = create({ current: async () => { reads++; return snapshot(); } });
     const disabledModels = await (await disabled(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-    assert.ok(disabledModels.data.every((item: Json) => !item.id.startsWith("z.ai/")));
+    assert.ok(disabledModels.data.every((item: Json) => !item.id.startsWith("zcode/")));
     assert.equal(reads, 0);
     config.zcode = true;
     const invalid = create({ current: async () => { throw new ZcodeConfigError("测试配置无效"); }, fetch: async () => { calls++; return upstream(); } });
     const models = await (await invalid(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
-    assert.ok(models.data.every((item: Json) => !item.id.startsWith("z.ai/")));
-    assert.equal((await invalid(request("z.ai/glm-5.3"))).status, 503);
+    assert.ok(models.data.every((item: Json) => !item.id.startsWith("zcode/")));
+    assert.equal((await invalid(request("zcode/glm-5.3"))).status, 503);
     assert.equal(calls, 0);
   });
 });
@@ -279,13 +279,13 @@ test("ZCode 目录不污染官方 last-good 缓存且官方失败仍叠加当前
       const handler = create({ current: async () => selected });
       const list = async () => await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json;
       const first = await list();
-      assert.ok(first.models.some((item: Json) => item.slug === "z.ai/glm-5.3"));
+      assert.ok(first.models.some((item: Json) => item.slug === "zcode/glm-5.3"));
       assert.deepEqual(JSON.parse(fs.readFileSync(cacheFile, "utf8")).models.map((item: Json) => item.slug), ["gpt-native"]);
       failed = true;
       selected = { ...selected, modelIds: ["glm-5.3-flash"] };
       const second = await list();
       assert.ok(second.models.some((item: Json) => item.slug === "gpt-native"));
-      assert.ok(!second.models.some((item: Json) => item.slug === "z.ai/glm-5.3"));
+      assert.ok(!second.models.some((item: Json) => item.slug === "zcode/glm-5.3"));
       assert.deepEqual(JSON.parse(fs.readFileSync(cacheFile, "utf8")).models.map((item: Json) => item.slug), ["gpt-native"]);
     });
   } finally { globalThis.fetch = originalFetch; }
@@ -295,10 +295,10 @@ test("ZCode 拒绝 WebSocket 并移除旧 zai 路径，均不访问上游", asyn
   await fixture(async ({ create }) => {
     let calls = 0;
     const handler = create({ fetch: async () => { calls++; return upstream(); } });
-    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", { headers: { upgrade: "websocket", "x-codex-model": "z.ai/glm-5.3" } }));
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", { headers: { upgrade: "websocket", "x-codex-model": "zcode/glm-5.3" } }));
     assert.equal(response.status, 426);
     for (const pathname of ["/zai", "/zai/v1/messages", "/zai/v1/messages/count_tokens"]) {
-      assert.equal((await handler(request("z.ai/glm-5.3", {}, pathname))).status, 404);
+      assert.equal((await handler(request("zcode/glm-5.3", {}, pathname))).status, 404);
     }
     assert.equal(calls, 0);
   });
@@ -309,7 +309,7 @@ test("ZCode HTTP 错误脱敏且两渠道日志独立并隐藏所有凭据", asy
     config.requestLogging = true;
     for (const family of ["zai", "bigmodel"] as const) {
       const handler = create({ current: async () => snapshot(family), fetch: async () => Response.json({ error: { message: `denied ${FAKE_KEY}` } }, { status: 429 }) });
-      const response = await handler(request(`${family === "zai" ? "z.ai" : "bigmodel"}/glm-5.3`));
+      const response = await handler(request("zcode/glm-5.3"));
       assert.equal(response.status, 429);
       assert.ok(!(await response.text()).includes(FAKE_KEY));
     }
@@ -327,16 +327,16 @@ test("ZCode v1 与 trigger 压缩通过 Anthropic adapter 并生成可回放摘�
     const calls: Json[] = [];
     const handler = create({ fetch: async (url, init) => { assert.match(url, /\/anthropic\/v1\/messages$/); calls.push(JSON.parse(String(init.body))); return upstream("压缩后的摘要"); } });
     const input = [{ type: "message", role: "user", content: [{ type: "input_text", text: "保留的问题" }] }];
-    const v1 = await handler(request("z.ai/glm-5.3", { input }, "/v1/responses/compact"));
+    const v1 = await handler(request("zcode/glm-5.3", { input }, "/v1/responses/compact"));
     assert.equal(v1.status, 200);
     const v1Result = await v1.json() as Json;
     assert.equal(v1Result.output[0].content[0].text, "保留的问题");
     assert.match(JSON.stringify(v1Result.output), /压缩后的摘要/);
-    const v2 = await handler(request("z.ai/glm-5.3", { input: [...input, { type: "compaction_trigger" }], stream: true }));
+    const v2 = await handler(request("zcode/glm-5.3", { input: [...input, { type: "compaction_trigger" }], stream: true }));
     const v2Result = await decoded(v2);
     assert.equal(v2Result.output[0].type, "compaction");
     assert.equal(Buffer.from(v2Result.output[0].encrypted_content.slice(5), "base64").toString("utf8"), "压缩后的摘要");
-    const replay = await handler(request("z.ai/glm-5.3", { input: v2Result.output }));
+    const replay = await handler(request("zcode/glm-5.3", { input: v2Result.output }));
     assert.equal(replay.status, 200);
     assert.match(JSON.stringify(calls.at(-1)!.messages), /压缩后的摘要/);
     assert.ok(calls.every((body) => body.stream === true && body.model === "GLM-5.3"));
@@ -352,10 +352,10 @@ test("ZCode 消费端取消和 handler.close 均终止上游并只释放一次�
       signals.push(init.signal!);
       return new Response(new ReadableStream<Uint8Array>({ pull() {}, cancel() { canceled++; } }, { highWaterMark: 0 }), { headers: { "content-type": "text/event-stream" } });
     } });
-    const first = await handler(request("z.ai/glm-5.3", { stream: true }));
+    const first = await handler(request("zcode/glm-5.3", { stream: true }));
     await first.body!.cancel();
     assert.equal(signals[0]!.aborted, true);
-    const second = await handler(request("z.ai/glm-5.3", { stream: true }));
+    const second = await handler(request("zcode/glm-5.3", { stream: true }));
     const reader = second.body!.getReader();
     await reader.read();
     await reader.read();
@@ -377,9 +377,9 @@ test("ZCode 下一次请求使用更新后的当前 provider 密钥", async () =
       keys.push(new Headers(init.headers).get("x-api-key"));
       return upstream();
     } });
-    assert.equal((await handler(request("z.ai/glm-5.3"))).status, 200);
+    assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
     selected = { ...selected, providerID: "replacement", apiKey: "fake-rotated-key" };
-    assert.equal((await handler(request("z.ai/glm-5.3"))).status, 200);
+    assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
     assert.deepEqual(keys, [FAKE_KEY, "fake-rotated-key"]);
   });
 });
@@ -393,7 +393,7 @@ test("ZCode 客户端 AbortSignal 可中断等待中的流读取", async () => {
       upstreamSignal = init.signal!;
       return new Response(new ReadableStream<Uint8Array>({ pull() {}, cancel() { canceled++; } }, { highWaterMark: 0 }));
     } });
-    const incoming = request("z.ai/glm-5.3", { stream: true });
+    const incoming = request("zcode/glm-5.3", { stream: true });
     const response = await handler(new Request(incoming, { signal: abort.signal }));
     const reader = response.body!.getReader();
     await reader.read();
@@ -429,8 +429,7 @@ test("ZCode 启动生成共享裸 ID 缓存，套餐或渠道变化不重写磁�
       const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
       assert.equal(response.status, 200);
       const data = await response.json() as Json;
-      const prefix = selected.family === "zai" ? "z.ai/" : "bigmodel/";
-      assert.equal(data.data.filter((item: Json) => item.id.startsWith(prefix)).length, 1);
+      assert.equal(data.data.filter((item: Json) => item.id.startsWith("zcode/")).length, 1);
       assert.equal(fs.readFileSync(cache, "utf8"), contents);
       assert.equal(fs.statSync(cache).mtimeMs, before);
     }
@@ -469,7 +468,7 @@ test("ZCode SSE 上游错误中的普通及含引号密钥在客户端和最终�
         ];
         return new Response(frames.map((frame) => `event: ${frame.type}\ndata: ${JSON.stringify(frame)}\n\n`).join(""), { headers: { "content-type": "text/event-stream" } });
       } });
-      const response = await handler(request("z.ai/glm-5.3", { stream: true }));
+      const response = await handler(request("zcode/glm-5.3", { stream: true }));
       assert.equal(response.status, 200);
       const text = await response.text();
       assertSecretAbsent(text, apiKey);
@@ -504,10 +503,10 @@ test("ZCode 历史 function 与 custom 调用在压缩移除 tools 后仍可生�
       { type: "function", name: "read.file", parameters: { type: "object", properties: { path: { type: "string" } } } },
       { type: "custom", name: "apply_patch" },
     ];
-    const v1 = await handler(request("z.ai/glm-5.3", { input: history, tools }, "/v1/responses/compact"));
+    const v1 = await handler(request("zcode/glm-5.3", { input: history, tools }, "/v1/responses/compact"));
     assert.equal(v1.status, 200);
     assert.match(JSON.stringify(await v1.json()), /工具历史压缩摘要/);
-    const v2 = await handler(request("z.ai/glm-5.3", { input: [...history, { type: "compaction_trigger" }], tools, stream: true }));
+    const v2 = await handler(request("zcode/glm-5.3", { input: [...history, { type: "compaction_trigger" }], tools, stream: true }));
     assert.equal(v2.status, 200);
     const result = await decoded(v2);
     assert.equal(result.output[0].type, "compaction");
@@ -518,7 +517,7 @@ test("ZCode 历史 function 与 custom 调用在压缩移除 tools 后仍可生�
       assert.match(JSON.stringify(body.messages), /旧文件内容/);
       assert.match(JSON.stringify(body.messages), /补丁已应用/);
     }
-    const normal = await handler(request("z.ai/glm-5.3", { stream: true }));
+    const normal = await handler(request("zcode/glm-5.3", { stream: true }));
     await decoded(normal);
     const logs = fs.readdirSync(config.logDir!).map((name) => fs.readFileSync(path.join(config.logDir!, name), "utf8")).join("\n");
     assert.match(logs, /response\.completed/);
@@ -532,7 +531,7 @@ test("ZCode WebSocket 降级仅作用于明确模型的 Responses，不影响 Re
     // 先按 upstream-only 校验无提示请求仍然直通第三方上游。
     config.upstreamOnly = true;
     for (const route of ["/v1/live/rtc_fixture", "/v1/realtime?model=gpt-live"]) {
-      for (const hint of [undefined, "model=z.ai/glm-5.3"]) {
+      for (const hint of [undefined, "model=zcode/glm-5.3"]) {
         const headers = new Headers({ upgrade: "websocket" });
         if (hint) headers.set("x-codex-routing-hint", hint);
         assert.equal(isZcodeResponsesWebSocket(new Request(`http://localhost${route}`, { headers }), config), false);
@@ -544,7 +543,7 @@ test("ZCode WebSocket 降级仅作用于明确模型的 Responses，不影响 Re
     config.upstreamOnly = false;
     assert.equal(responsesWebSocketTarget(bare, config, "test-key")?.routeKind, "official");
     const known = new Request("http://localhost/v1/responses", {
-      headers: { upgrade: "websocket", "x-codex-routing-hint": "model=z.ai/glm-5.3" },
+      headers: { upgrade: "websocket", "x-codex-routing-hint": "model=zcode/glm-5.3" },
     });
     assert.equal(isZcodeResponsesWebSocket(known, config), true);
     assert.equal(responsesWebSocketTarget(known, config, "test-key"), null);
@@ -556,7 +555,7 @@ test("ZCode 请求日志沿用缺省日志目录", async () => {
     config.requestLogging = true;
     delete config.logDir;
     const handler = create();
-    await (await handler(request("z.ai/glm-5.3"))).text();
+    await (await handler(request("zcode/glm-5.3"))).text();
     const files = fs.readdirSync(path.join(directory, "logs"));
     assert.ok(files.some((name) => /^zai-v1-responses-http-\d{14}\.log$/.test(name)));
   });
@@ -577,7 +576,7 @@ for (const family of ["zai", "bigmodel"] as const) {
           calls.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
           return upstream();
         } });
-        const clientModel = `${family === "zai" ? "z.ai" : "bigmodel"}/glm-5.3`;
+        const clientModel = "zcode/glm-5.3";
         const forged = {
           "thread-id": "codex-thread-fixed", "x-codex-parent-thread-id": "codex-parent-fixed",
           "x-session-id": "caller-session", "x-zcode-trace-id": "caller-trace",
@@ -661,7 +660,7 @@ test("analyze_image 执行失败的降级旁白先脱敏再发给客户端", asy
       if (call <= 4) return new Response(failureBody, { status: 401 });
       return upstream("改用文字回答");
     } });
-    const response = await handler(request("z.ai/glm-5.3", {
+    const response = await handler(request("zcode/glm-5.3", {
       input: [{ type: "message", role: "user", content: [
         { type: "input_text", text: "看图片" },
         { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
@@ -687,7 +686,7 @@ test("analyze_image 降级旁白对跨截断边界的 key 同样脱敏", async (
       if (call <= 4) return new Response(failureBody, { status: 401 });
       return upstream("改用文字回答");
     } });
-    const response = await handler(request("z.ai/glm-5.3", {
+    const response = await handler(request("zcode/glm-5.3", {
       input: [{ type: "message", role: "user", content: [
         { type: "input_text", text: "看图片" },
         { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },
@@ -717,7 +716,7 @@ test("analyze_image 降级旁白遮蔽 JSON 转义形式的 key", async () => {
         return upstream("改用文字回答");
       },
     });
-    const response = await handler(request("z.ai/glm-5.3", {
+    const response = await handler(request("zcode/glm-5.3", {
       input: [{ type: "message", role: "user", content: [
         { type: "input_text", text: "看图片" },
         { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" },

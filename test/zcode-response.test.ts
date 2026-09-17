@@ -4,7 +4,7 @@ import { createZcodeResponse } from "../src/zcode/response.ts";
 import { decodeZcodeThinking, type ZcodeToolMap } from "../src/zcode/wire.ts";
 
 type Json = Record<string, any>;
-const model = "z.ai/glm-5.3";
+const model = "zcode/glm-5.3";
 const tools: ZcodeToolMap = new Map([
   ["fn_encoded", { name: "original.function", custom: false }],
   ["custom_encoded", { name: "apply_patch", custom: true }],

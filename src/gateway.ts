@@ -4,7 +4,7 @@ import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } fro
 import { readApiKey } from "./keychain.ts";
 import { createZcodeAdapter, validateZcodeConfig, zcodeEnabled, zcodeError } from "./zcode/index.ts";
 import type { ZcodeDependencies, GatewayHandler } from "./zcode/index.ts";
-import { mergeZcodeCatalog, zcodeModelFamily } from "./zcode/catalog.ts";
+import { isZcodeModel, mergeZcodeCatalog } from "./zcode/catalog.ts";
 import {
   dialUpstreamWebSocket,
   forwardedHeaders,
@@ -438,7 +438,7 @@ export function isZcodeResponsesWebSocket(request: Request, config: GatewayConfi
   return zcodeEnabled(config)
     && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
     && request.headers.get("upgrade")?.toLowerCase() === "websocket"
-    && zcodeModelFamily(modelFromRoutingHint(request)) !== undefined;
+    && isZcodeModel(modelFromRoutingHint(request));
 }
 
 /**
@@ -555,8 +555,7 @@ function modelCatalogResponse(
     data: catalog.models.map((model) => ({
       id: model.slug,
       object: "model",
-      owned_by: zcodeEnabled && zcodeModelFamily(model.slug)
-        ? zcodeModelFamily(model.slug) === "zai" ? "z.ai" : "bigmodel"
+      owned_by: zcodeEnabled && isZcodeModel(model.slug) ? "zcode"
         : owner === "mixed"
         ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
         : owner,
@@ -746,11 +745,11 @@ export function createGatewayHandler(
       let json: Record<string, unknown> | undefined;
       try { json = decodeJsonBody(bytes, request.headers); }
       catch (error) {
-        if (zcodeModelFamily(hintedModel)) return zcodeError(400, error instanceof Error ? error.message : "无效请求正文");
+        if (isZcodeModel(hintedModel)) return zcodeError(400, error instanceof Error ? error.message : "无效请求正文");
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
-      if (zcodeModelFamily(model)) {
+      if (isZcodeModel(model)) {
         zcodeRequests.add(request);
         if (!json) return zcodeError(400, "ZCode Responses 请求必须是 JSON 对象");
         json = { ...json, model };

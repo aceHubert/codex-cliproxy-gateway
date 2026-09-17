@@ -400,14 +400,15 @@ Coding Plan 与 Start Plan 按实际 provider ID 区分；两者的选择值都�
 
 可用模型取当前 `provider.models` **字典键**与 `vendor_models.json` 中 `z.ai`
 预设的交集，忽略大小写。显示名或模型属性中的 `name` 不作为模型 ID。
-对外 ID 使用厂商规范名称，例如 `z.ai/glm-5.3`、`bigmodel/glm-5.3-flash`；
-发送上游时保留 config 字典键中的原始拼写。套餐未支持或厂商目录未收录的型号返回 404。
-`cliproxy/z.ai/*` 继续使用原来的 CLIProxy 路由。
+对外 ID 统一使用 `zcode/` 前缀，例如 `zcode/glm-5.3`、`zcode/glm-5.3-flash`；
+渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权、上游地址与日志分流，
+切换渠道不改变模型 ID。发送上游时保留 config 字典键中的原始拼写。
+套餐未支持或厂商目录未收录的型号返回 404；`zcode/` 顶层命名空间保留给 ZCode，
+第三方 `prefix` 不得占用，上游目录里的裸 `z.ai/*`、`bigmodel/*` 条目按上游原样提供。
 
 `upstream-only` 只使用第三方上游，因此该模式下 ZCode 入口整体按禁用处理：`zcode`
 开关仍可写入并保留审计，但不建凭证缓存、不生成 `zcode-catalog.json`、不拦截
-`/v1/responses`，也不再把环回监听地址与 `z.ai/`、`bigmodel/` 保留前缀的约束施加给纯转发配置。
-第三方上游目录里的裸 `z.ai/*`、`bigmodel/*` 条目按上游原样提供，不再被 ZCode 目录替换或剥离。
+`/v1/responses`，也不再把环回监听地址与 `zcode/` 保留前缀的约束施加给纯转发配置。
 `config` 查询报告生效值，开关与生效值不一致时另外给出 `zcodeConfigured`。
 
 ### 模型 API 的请求头与正文

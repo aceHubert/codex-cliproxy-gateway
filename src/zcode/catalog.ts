@@ -5,22 +5,21 @@ import bundledOverrides from "../../models.json";
 import { compileModelOverrides, invalidateModelsCache, mergeCatalog, synthesizeModelEntry, normalizeCatalog } from "../catalog.ts";
 import { atomicWrite } from "../toml.ts";
 import type { ModelCatalog } from "../types.ts";
-import type { ZcodeFamily, ZcodeProviderSnapshot } from "./config.ts";
+import type { ZcodeProviderSnapshot } from "./config.ts";
 
 const MODEL_IDS = vendorModels["z.ai"].map((model) => model.name);
+/** 对外统一命名空间：两种渠道共用 zcode/ 前缀，切换渠道不改变模型 ID。 */
+const ZCODE_PREFIX = "zcode/";
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-export function zcodeModelFamily(model: unknown): ZcodeFamily | undefined {
-  if (typeof model !== "string") return;
-  const lower = model.toLowerCase();
-  if (lower.startsWith("z.ai/")) return "zai";
-  if (lower.startsWith("bigmodel/")) return "bigmodel";
+export function isZcodeModel(model: unknown): boolean {
+  return typeof model === "string" && model.toLowerCase().startsWith(ZCODE_PREFIX);
 }
 
 /** 目录使用厂商规范名称，上游使用当前套餐配置中的原始模型拼写。 */
 export function zcodeUpstreamModel(model: string, snapshot: ZcodeProviderSnapshot): string | undefined {
-  if (zcodeModelFamily(model) !== snapshot.family) return;
-  const id = model.slice(model.indexOf("/") + 1).toLowerCase();
+  if (!isZcodeModel(model)) return;
+  const id = model.slice(ZCODE_PREFIX.length).toLowerCase();
   if (!MODEL_IDS.some((candidate) => candidate.toLowerCase() === id)) return;
   return snapshot.modelIds.find((candidate) => candidate.toLowerCase() === id);
 }
@@ -64,18 +63,18 @@ export function loadZcodeCatalogCache(file: string, overrideFile?: string, codex
   return catalog;
 }
 
-/** /models 只按当前套餐的支持集合筛选并加前缀，不重新合成厂商元数据。 */
+/** /models 只按当前套餐的支持集合筛选并加统一前缀，不重新合成厂商元数据。 */
 export function createZcodeCatalog(snapshot: ZcodeProviderSnapshot, cached: ModelCatalog): ModelCatalog {
   const supported = new Set(snapshot.modelIds.map((model) => model.toLowerCase()));
   return { models: cached.models.filter((entry) => supported.has(entry.slug.toLowerCase())).map((entry) => ({
     ...entry,
-    slug: `${snapshot.family === "zai" ? "z.ai" : "bigmodel"}/${entry.slug}`,
+    slug: `${ZCODE_PREFIX}${entry.slug}`,
   })) };
 }
 
-/** 启用 ZCode 时保留其顶层命名空间，防止失效模型意外落到其他账户。 */
+/** 启用 ZCode 时保留 zcode/ 顶层命名空间，防止上游同名条目与 ZCode 目录冲突。 */
 export function mergeZcodeCatalog(base: ModelCatalog, zcode: ModelCatalog): ModelCatalog {
-  const models = base.models.filter((model) => !zcodeModelFamily(model.slug));
+  const models = base.models.filter((model) => !isZcodeModel(model.slug));
   const priority = Math.max(0, ...models.map((model) => Number(model.priority) || 0)) + 100;
   return { models: [...models, ...zcode.models.map((model, index) => ({ ...model, priority: priority + index }))] };
 }
