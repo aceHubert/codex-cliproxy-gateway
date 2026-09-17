@@ -1,14 +1,14 @@
 {
   "name": "codex-cliproxy-gateway",
   "version": "0.3.0",
-  "description": "A Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
+  "description": "A cross-platform Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
   "type": "module",
   "bin": {
     "codex-cliproxy": "./dist/index.js"
   },
   "files": [
     "CHANGELOG.md",
-    "dist/index.js",
+    "dist",
     "models.json",
     "schemas/gateway-config.schema.json",
     "README.md",
@@ -16,7 +16,9 @@
   ],
   "scripts": {
     "dev": "bun src/index.ts",
-    "build": "bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
+    "dev:ui": "CODEX_CLIPROXY_UI_DEV=1 bun run dev web && vite --config vite.config.ts",
+    "build:ui": "bun scripts/build-ui.ts",
+    "build": "bun run build:ui && bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
     "changelog": "bun scripts/changelog.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
@@ -40,26 +42,33 @@
     "gemini"
   ],
   "dependencies": {
-    "bytes": "^3.1.2"
+    "bytes": "^3.1.2",
+    "llm-bridge": "2.0.1"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.56.0",
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
+    "@google/generative-ai": "0.24.1",
     "@types/bun": "^1.3.5",
     "@types/bytes": "^3.1.6",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
     "commitizen": "^4.3.2",
     "cz-conventional-changelog-zh": "^0.0.2",
     "lerna": "^10.0.1",
     "lerna-changelog": "^2.2.0",
+    "openai": "5.8.2",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
     "typescript": "^5.9.3",
+    "vite": "^8.3.0",
+    "vite-plugin-singlefile": "^2.3.3",
     "yorkie": "^2.0.0"
   },
   "engines": {
     "bun": ">=1.2.0"
   },
-  "os": [
-    "darwin"
-  ],
   "license": "MIT",
   "repository": {
     "type": "git",

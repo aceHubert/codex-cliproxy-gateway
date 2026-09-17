@@ -14,6 +14,7 @@ interface JsonSchema {
   pattern?: string;
   format?: "uri";
   uniqueItems?: boolean;
+  enum?: (string | number)[];
 }
 
 const CONFIG_SCHEMA = JSON.parse(fs.readFileSync(
@@ -31,6 +32,46 @@ export const GATEWAY_CONFIG_VERSION = String(PACKAGE_JSON.version ?? "unknown");
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface LegacyFieldMigration {
+  /** 旧字段名（config.json 历史键）。 */
+  old: string;
+  /** 新字段名。 */
+  next: string;
+  /** 旧值类型判定：不合法（如被手改成其他类型）时不迁移，交由 schema 软告警。 */
+  valid: (value: unknown) => boolean;
+  /** 结构迁移时提取新字段值；普通更名直接保留原值。 */
+  convert?: (value: unknown) => unknown;
+}
+
+/**
+ * 配置兼容迁移表：历史字段更名只需在此登记一条，读取归一化（loadGatewayConfig）
+ * 与命令前置的文件级迁移（syncGatewayConfigFile 删除旧键 + 审计）都会自动生效。
+ */
+export const LEGACY_FIELD_MIGRATIONS: readonly LegacyFieldMigration[] = [
+  { old: "cliproxyBaseUrl", next: "upstreamBaseUrl", valid: (value) => typeof value === "string" },
+  { old: "cpaOnly", next: "upstreamOnly", valid: (value) => typeof value === "boolean" },
+  { old: "upstream_type", next: "upstreamType", valid: (value) => typeof value === "string" },
+  {
+    old: "zai",
+    next: "zcode",
+    valid: (value) => isJsonObject(value) && typeof value.enabled === "boolean",
+    convert: (value) => (value as JsonObject).enabled,
+  },
+];
+
+/**
+ * 读取配置时把旧字段值补齐为新键（就地修改，保留旧键供文件级迁移判断）；
+ * 迁移只发生在新键缺失且旧值类型合法时，绝不覆盖用户已写的新值。
+ */
+export function migrateLegacyConfig(config: JsonObject): JsonObject {
+  for (const { old, next, valid, convert } of LEGACY_FIELD_MIGRATIONS) {
+    if (config[next] === undefined && valid(config[old])) {
+      config[next] = convert ? convert(config[old]) : config[old];
+    }
+  }
+  return config;
 }
 
 export function mergeMissingConfig(
@@ -64,6 +105,10 @@ function matchesType(value: unknown, type: NonNullable<JsonSchema["type"]>): boo
 function validate(value: unknown, schema: JsonSchema, location: string, warnings: string[]): void {
   if (schema.type && !matchesType(value, schema.type)) {
     warnings.push(`${location} should be ${schema.type}`);
+    return;
+  }
+  if (schema.enum && !schema.enum.includes(value as string | number)) {
+    warnings.push(`${location} should be one of ${schema.enum.join(", ")}`);
     return;
   }
   if (isJsonObject(value)) {

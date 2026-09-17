@@ -9,6 +9,52 @@
   ],
   "deepseek": [
     {
+      "name": "deepseek-v4.1-flash",
+      "description": "DeepSeek-V4.1-Flash with native multimodal visual understanding and improved text and agent capabilities.",
+      "default_reasoning_level": "max",
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    },
+    {
+      "name": "deepseek-flash",
+      "description": "DeepSeek-V4.1-Flash with native multimodal visual understanding and improved text and agent capabilities.",
+      "default_reasoning_level": "max",
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    },
+    {
       "name": "deepseek-v4-*",
       "description": "DeepSeek harnesses the power of the latest LLM technology to provide a superior user experience.",
       "default_reasoning_level": "max",
@@ -54,14 +100,12 @@
       "max_context_window": 1048576,
       "effective_context_window_percent": 95,
       "supports_parallel_tool_calls": true,
-      "experimental_supported_tools": [],
-      "input_modalities": ["text"]
+      "experimental_supported_tools": []
     },
     {
-      "name": "glm-5-turbo",
-      "description": "Agent-optimized model",
+      "name": "glm-5.3-flash",
+      "description": "Z.ai's first native multimodal model in the GLM-5 series",
       "default_reasoning_level": "max",
-      "supported_reasoning_levels": [],
       "shell_type": "shell_command",
       "visibility": "list",
       "supported_in_api": true,
@@ -75,12 +119,11 @@
         "mode": "bytes",
         "limit": 10000
       },
-      "context_window": 204800,
-      "max_context_window": 204800,
+      "context_window": 1048576,
+      "max_context_window": 1048576,
       "effective_context_window_percent": 95,
       "supports_parallel_tool_calls": true,
-      "experimental_supported_tools": [],
-      "input_modalities": ["text"]
+      "experimental_supported_tools": []
     }
   ]
 }

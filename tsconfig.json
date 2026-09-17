@@ -1,13 +1,15 @@
 {
   "compilerOptions": {
     "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
     "lib": ["ES2024", "DOM"],
     "module": "Preserve",
     "moduleResolution": "Bundler",
     "noEmit": true,
     "strict": true,
     "target": "ES2024",
+    "jsx": "react-jsx",
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
 }
