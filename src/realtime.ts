@@ -1,5 +1,6 @@
 import fs from "node:fs";
-import { httpLogFile, logGroupFromPath, logRealtimeEvent } from "./request-log.ts";
+import { logRequestSummary } from "./process-log.ts";
+import { httpLogFile, localTime, logGroupFromPath, logRealtimeEvent } from "./request-log.ts";
 import type { LogFileRef, RequestLogSink } from "./request-log.ts";
 import type { GatewayConfig } from "./types.ts";
 
@@ -48,6 +49,8 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   log?: RequestLogSink;
   /** 日志目标：整条 WebSocket 会话写同一个文件，建连时确定。 */
   logFile?: LogFileRef;
+  /** 释放上面那个文件的"正在写入"登记；连接关闭时必须调用。 */
+  releaseLog?: () => void;
   /**
    * Responses WebSocket 的连接级路由。Codex 会复用同一条连接跨 turn 发不同模型
    * （实测存活 88 秒），而上游只在握手时选定一次，因此必须逐帧校验。
@@ -58,6 +61,17 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   prefix?: string;
   /** official 连接首次收到明确的 cliproxy/* 帧时，固定该 thread 的后续路由。 */
   pinCpaThread?: () => void;
+  /**
+   * cliproxy Responses 连接逐 turn 记录 turn_id：图片请求（x-codex-image-turn-id）
+   * 不带 thread-id，只能凭触发 turn 的 turn_id 继承会话路由。
+   */
+  noteTurnId?: (turnId: string) => void;
+  /** 客户端请求路径（pathname+search）；WS 成功桥接不走 HTTP 日志包装层，进程日志摘要用它。 */
+  clientUrl?: string;
+  /** 拨号开始时刻；会话关闭时用它计算总时长。 */
+  startedAt?: number;
+  /** 握手请求时间（localTime 格式），进程日志摘要条目的时间戳。 */
+  requestTime?: string;
 }
 
 /**
@@ -87,6 +101,42 @@ export function checkFrameRouting(
 }
 
 export type RealtimeProviderMode = "builtin" | "configured" | "invalid";
+
+/**
+ * 从 response.create 帧提取 turn_id。Codex Desktop 把元数据冗余放在多处
+ * （client_metadata、x-codex-turn-metadata、internal_chat_message_metadata_passthrough），
+ * 逐层探测；帧不是对象、字段缺失一律返回 undefined，不影响透传。
+ */
+export function turnIdFromResponseCreate(frame: string): string | undefined {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(frame);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(payload)) return undefined;
+  // x-codex-turn-metadata 的值是双重编码的 JSON 字符串，先解一层再取字段。
+  const candidates = [payload.client_metadata, payload["x-codex-turn-metadata"]];
+  for (const candidate of candidates) {
+    const record = typeof candidate === "string" ? parseJsonRecord(candidate) : isRecord(candidate) ? candidate : undefined;
+    if (!record) continue;
+    const turnId = record.turn_id;
+    if (typeof turnId === "string") {
+      const trimmed = turnId.trim();
+      if (trimmed && trimmed.length <= 128) return trimmed;
+    }
+  }
+  return undefined;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return isRecord(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -264,6 +314,8 @@ export async function proxyRealtimeCall(
   config: GatewayConfig,
   providerMode: RealtimeProviderMode = "invalid",
   sink?: RequestLogSink,
+  /** 把实际拨号的上游回传给调用方，供进程日志的请求摘要使用。 */
+  onUpstream?: (url: string) => void,
 ): Promise<Response> {
   const accessError = realtimeAccessError(request, providerMode);
   if (accessError) return accessError;
@@ -295,6 +347,7 @@ export async function proxyRealtimeCall(
 
   // 上游可能是 ChatGPT backend 也可能是 OpenAI API，wrapper 只看得到本地路径，这里补记实际去向。
   const target = realtimeCallUrl(request, config, baseUrl);
+  onUpstream?.(target.href);
   const callFile = httpLogFile(logGroupFromPath(new URL(request.url).pathname));
   const startedAt = Date.now();
   try {
@@ -523,6 +576,11 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
       }
       frame = routed;
     }
+    // cliproxy Responses 连接：逐 turn 记录 turn_id，供图片请求（x-codex-image-turn-id）继承路由。
+    if (ws.data.noteTurnId && typeof frame === "string") {
+      const turnId = turnIdFromResponseCreate(frame);
+      if (turnId) ws.data.noteTurnId(turnId);
+    }
     logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
       event: "ws-send",
       url: ws.data.url,
@@ -552,11 +610,26 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
       url: ws.data.url,
       detail: { code, reason, pendingFrames: ws.data.queue.length },
     });
+    // WS 成功桥接在 startGateway fetch 层返回，绕过 HTTP 日志包装层：若不在此补摘要，
+    // Codex 主流量（Responses-over-WebSocket）不会出现在 gateway.log，进程日志看起来像停写。
+    // 101 即协议升级状态，与 HTTP 请求摘要同格式、同一 maxGatewayLogBytes 约束。
+    if (ws.data.clientUrl) {
+      logRequestSummary(ws.data.log?.processLog, {
+        requestTime: ws.data.requestTime ?? localTime(),
+        method: "GET",
+        url: ws.data.clientUrl,
+        status: 101,
+        durationMs: ws.data.startedAt === undefined ? undefined : Date.now() - ws.data.startedAt,
+        upstreamUrl: ws.data.url,
+      });
+    }
     const upstream = ws.data.upstream;
     if (upstream && (upstream.readyState === WebSocket.CONNECTING || upstream.readyState === WebSocket.OPEN)) {
       upstream.close(closeCode(code, 1000), reason);
     }
     ws.data.queue = [];
     ws.data.queuedBytes = 0;
+    // 会话结束，文件重新参与按时间的保留计数。
+    ws.data.releaseLog?.();
   },
 };

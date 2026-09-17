@@ -1,0 +1,304 @@
+{
+  "z.ai": [
+    {
+      "name": "glm-5.3",
+      "display_name": "GLM-5.3",
+      "description": "Z.ai's latest flagship model",
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum available reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_search_tool": true,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    },
+    {
+      "name": "glm-5.3-flash",
+      "display_name": "GLM-5.3 Flash",
+      "description": "Z.ai's first native multimodal model in the GLM-5 series",
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Greater reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum available reasoning depth for complex problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_search_tool": true,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    },
+    {
+      "name": "glm-5-turbo",
+      "display_name": "GLM-5 Turbo",
+      "description": "Agent-optimized model",
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_search_tool": true,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 204800,
+      "max_context_window": 204800,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text"]
+    }
+  ],
+  "moonshotai": [
+    {
+      "name": "k3",
+      "display_name": "Kimi K3",
+      "description": "Kimi K3, 1M context",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "Light reasoning" },
+        { "effort": "high", "description": "Enhanced reasoning" },
+        { "effort": "max", "description": "Deep reasoning" }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_search_tool": true,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    },
+    {
+      "name": "k3-256k",
+      "display_name": "Kimi K3 256K",
+      "description": "Kimi K3 256K context",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        { "effort": "low", "description": "Light reasoning" },
+        { "effort": "high", "description": "Enhanced reasoning" },
+        { "effort": "max", "description": "Deep reasoning" }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_search_tool": true,
+      "supports_reasoning_summaries": true,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "apply_patch_tool_type": "freeform",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "context_window": 262144,
+      "max_context_window": 262144,
+      "effective_context_window_percent": 95,
+      "supports_parallel_tool_calls": true,
+      "experimental_supported_tools": [],
+      "input_modalities": ["text", "image"]
+    }
+  ],
+  "deepseek": [
+    {
+      "name": "deepseek-v4.1-flash",
+      "display_name": "DeepSeek-V4.1-Flash",
+      "description": "DeepSeek-V4.1-Flash with native multimodal visual understanding and improved text and agent capabilities.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_reasoning_summaries": true,
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "prefer_websockets": false,
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "multi_agent_version": "v2",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "input_modalities": ["text", "image"],
+      "experimental_supported_tools": []
+    },
+    {
+      "name": "deepseek-flash",
+      "display_name": "DeepSeek-V4.1-Flash",
+      "description": "DeepSeek-V4.1-Flash with native multimodal visual understanding and improved text and agent capabilities.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_reasoning_summaries": true,
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "prefer_websockets": false,
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "multi_agent_version": "v2",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "input_modalities": ["text", "image"],
+      "experimental_supported_tools": []
+    },
+    {
+      "name": "deepseek-v4-pro",
+      "display_name": "DeepSeek-V4-Pro",
+      "description": "Most capable frontier agentic coding model.",
+      "default_reasoning_level": "high",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast responses with lighter reasoning"
+        },
+        {
+          "effort": "high",
+          "description": "Extra high reasoning depth for complex problems"
+        },
+        {
+          "effort": "max",
+          "description": "Maximum reasoning depth for the hardest problems"
+        }
+      ],
+      "shell_type": "shell_command",
+      "apply_patch_tool_type": "freeform",
+      "web_search_tool_type": "text",
+      "visibility": "list",
+      "supported_in_api": true,
+      "base_instructions": "",
+      "supports_reasoning_summaries": true,
+      "reasoning_summary_format": "experimental",
+      "default_reasoning_summary": "none",
+      "support_verbosity": true,
+      "default_verbosity": "low",
+      "prefer_websockets": false,
+      "supports_parallel_tool_calls": true,
+      "supports_search_tool": true,
+      "multi_agent_version": "v2",
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "effective_context_window_percent": 95,
+      "input_modalities": ["text"],
+      "experimental_supported_tools": []
+    }
+  ]
+}

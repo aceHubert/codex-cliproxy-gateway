@@ -9,7 +9,7 @@
     "mountPath",
     "prefix",
     "officialBaseUrl",
-    "cliproxyBaseUrl",
+    "upstreamBaseUrl",
     "catalogPath",
     "configVersion"
   ],
@@ -42,9 +42,26 @@
       "type": "string",
       "format": "uri"
     },
-    "cliproxyBaseUrl": {
+    "upstreamBaseUrl": {
+      "description": "第三方上游 URL（CLIProxyAPI 或 OpenAI 兼容的 new-api）。",
       "type": "string",
       "format": "uri"
+    },
+    "cliproxyBaseUrl": {
+      "description": "已过时，由 upstreamBaseUrl 取代；命令前置同步会自动把旧值迁移为 upstreamBaseUrl 并移除该键。",
+      "type": "string",
+      "format": "uri",
+      "deprecated": true
+    },
+    "upstreamType": {
+      "description": "第三方上游类型：cliproxy 直接消费其 Codex 目录；newapi 从 OpenAI /models 列表本地合成目录。缺省视为 cliproxy。",
+      "type": "string",
+      "enum": ["cliproxy", "newapi"]
+    },
+    "upstream_type": {
+      "description": "已过时，由 upstreamType 取代；命令前置同步会自动迁移并移除该键。",
+      "type": "string",
+      "deprecated": true
     },
     "catalogPath": {
       "type": "string",
@@ -70,7 +87,7 @@
       "minLength": 1
     },
     "maxRequestLogs": {
-      "description": "每个按路径分组的请求日志各自保留的最大文件数；0 表示不限制。",
+      "description": "整个请求日志目录按修改时间保留的最新文件数，不按路由分组；正在写入的日志（如未结束的 WebSocket 会话文件）不参与裁剪；0 表示不限制。",
       "type": "integer",
       "minimum": 0
     },
@@ -79,9 +96,19 @@
       "type": "integer",
       "minimum": 0
     },
-    "cpaOnly": {
-      "description": "是否只使用 CLIProxy 并纯转发模型名，不添加 cliproxy/ 前缀。",
+    "upstreamOnly": {
+      "description": "是否只使用第三方上游并纯转发模型名，不添加 cliproxy/ 前缀。",
       "type": "boolean"
+    },
+    "zcode": {
+      "description": "是否启用 ZCode Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "type": "boolean",
+      "default": false
+    },
+    "cpaOnly": {
+      "description": "已过时，由 upstreamOnly 取代；命令前置同步会自动迁移并移除该键。",
+      "type": "boolean",
+      "deprecated": true
     }
   },
   "additionalProperties": true

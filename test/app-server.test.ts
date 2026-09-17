@@ -123,10 +123,17 @@ test("config.toml-mutating commands accept restart-codex", {
 
   try {
     fs.writeFileSync(paths.stateFile, "{}");
-    await assert.rejects(
-      runCli(["install", "--cpa-only", "--restart-codex"]),
-      /Already installed/,
-    );
+    const originalLog = console.log;
+    const printed: string[] = [];
+    console.log = (line?: unknown) => { printed.push(String(line)); };
+    try {
+      await runCli(["install", "--upstream-only", "--restart-codex"]);
+    } finally {
+      console.log = originalLog;
+    }
+    // 已存在安装时不再直接报错：非 TTY 下提示用 --yes 原地更新并中止，state 保持不动。
+    assert.match(printed.join("\n"), /(rerun with --yes|Install aborted)/);
+    assert.equal(fs.existsSync(paths.stateFile), true);
 
     fs.rmSync(paths.stateFile);
     await assert.rejects(runCli(["uninstall", "--restart-codex"]), /No managed installation found/);
@@ -151,8 +158,8 @@ test("误改的 codex-restart 参数不再作为别名接受", async () => {
 
 test("models cpa-only switch requires sync", async () => {
   await assert.rejects(
-    runCli(["models", "--cpa-only"]),
-    /--cpa-only is only supported by install or models --sync/,
+    runCli(["models", "--upstream-only"]),
+    /--upstream-only.*only supported by install or models --sync/,
   );
 });
 
@@ -160,7 +167,7 @@ test("unknown options are rejected instead of silently ignored", async () => {
   await assert.rejects(runCli(["models", "--log", "on"]), /Unknown option --log for command "models"/);
   await assert.rejects(runCli(["models", "--sync", "--websocket", "on"]), /Unknown option --websocket for command "models"/);
   await assert.rejects(runCli(["config", "--logg", "on"]), /Unknown option --logg for command "config"/);
-  await assert.rejects(runCli(["config", "--cpa-only"]), /Unknown option --cpa-only for command "config"/);
+  await assert.rejects(runCli(["config", "--upstream-only"]), /Unknown option --upstream-only for command "config"/);
   // 隔离 HOME 确认 config 命令止步于未安装错误，而非参数报错。
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-command-"));
   const previousHome = process.env.HOME;
@@ -197,12 +204,12 @@ test("config writes every requested update while a query stays read-only", {
     mountPath: "/v1",
     prefix: "cliproxy/",
     officialBaseUrl: "https://official.example/codex",
-    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: paths.catalogFile,
     selectedModels: [],
     requestLogging: true,
     maxRequestLogs: 0,
-    cpaOnly: false,
+    upstreamOnly: false,
     logDir: paths.logDir,
   }));
 

@@ -14,6 +14,7 @@ import {
   realtimeAccessError,
   realtimeWebSocketHandler,
   realtimeWebSocketTarget,
+  turnIdFromResponseCreate,
 } from "../src/realtime.ts";
 import { readRootTomlString, restoreRootTomlKeys } from "../src/toml.ts";
 import type { GatewayConfig } from "../src/types.ts";
@@ -25,7 +26,7 @@ function config(officialBaseUrl: string): GatewayConfig {
     mountPath: "/v1",
     prefix: "cliproxy/",
     officialBaseUrl,
-    cliproxyBaseUrl: "http://127.0.0.1:8317/v1",
+    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: "/tmp/missing-catalog.json",
   };
 }
@@ -108,11 +109,12 @@ test("launchd preserves custom CODEX_HOME for the provider snapshot", () => {
     cliPath: "/opt/codex-cliproxy",
     configPath: "/tmp/gateway.json",
     codexHome: "/tmp/codex<&>",
-    stdoutLog: "/tmp/out.log",
-    stderrLog: "/tmp/err.log",
+    logPath: "/tmp/gateway.log",
   });
   assert.match(plist, /<key>CODEX_HOME<\/key>/);
   assert.match(plist, /<string>\/tmp\/codex&lt;&amp;&gt;<\/string>/);
+  // stdout 与 stderr 合并到同一个进程日志：不再有独立的 gateway.error.log。
+  assert.equal(plist.match(/<key>Standard(?:Out|Error)Path<\/key>\n  <string>\/tmp\/gateway\.log<\/string>/g)?.length, 2);
 });
 
 test("ChatGPT call-create converts multipart to backend JSON and preserves protocol headers", async () => {
@@ -469,8 +471,83 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
   assert.equal(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-sol"}', "cliproxy", ""),
     '{"type":"response.create","model":"gpt-5.6-sol"}',
-    "CPA-only sockets forward every model without route switching",
+    "upstream-only sockets forward every model without route switching",
   );
+});
+
+test("turn id extraction reads every metadata location Codex Desktop writes", () => {
+  // Codex Desktop 把 turn_id 冗余在 client_metadata 与内嵌 x-codex-turn-metadata 字符串两处。
+  const frame = JSON.stringify({
+    type: "response.create",
+    model: "cliproxy/gpt-5.6-luna",
+    client_metadata: { turn_id: "turn-from-client-metadata", thread_id: "thread-1" },
+  });
+  assert.equal(turnIdFromResponseCreate(frame), "turn-from-client-metadata");
+
+  const embedded = JSON.stringify({
+    type: "response.create",
+    model: "gpt-5.6-luna",
+    "x-codex-turn-metadata": JSON.stringify({
+      session_id: "thread-1",
+      turn_id: "turn-from-embedded-metadata",
+    }),
+  });
+  assert.equal(turnIdFromResponseCreate(embedded), "turn-from-embedded-metadata");
+});
+
+test("turn id extraction tolerates frames without usable metadata", () => {
+  assert.equal(turnIdFromResponseCreate('{"type":"response.cancel"}'), undefined);
+  assert.equal(turnIdFromResponseCreate("not json"), undefined);
+  assert.equal(turnIdFromResponseCreate('{"type":"response.create","client_metadata":{}}'), undefined);
+  assert.equal(
+    turnIdFromResponseCreate('{"type":"response.create","client_metadata":{"turn_id":""}}'),
+    undefined,
+  );
+  assert.equal(
+    turnIdFromResponseCreate('{"type":"response.create","client_metadata":{"turn_id":42}}'),
+    undefined,
+  );
+});
+
+test("bridged cliproxy sockets record turn ids for image request routing", () => {
+  const noted: string[] = [];
+  const sent: string[] = [];
+  const upstream = {
+    readyState: WebSocket.OPEN,
+    send(frame: string) { sent.push(frame); },
+    close() {},
+  } as unknown as WebSocket;
+  const socket = {
+    data: {
+      url: "wss://cliproxy.example/v1/responses",
+      headers: {},
+      upstream,
+      queue: [],
+      queuedBytes: 0,
+      routeKind: "cliproxy" as const,
+      prefix: "cliproxy/",
+      noteTurnId: (turnId: string) => noted.push(turnId),
+    },
+  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  realtimeWebSocketHandler.message?.(socket, JSON.stringify({
+    type: "response.create",
+    model: "cliproxy/gpt-5.6-luna",
+    client_metadata: { turn_id: "turn-image" },
+  }));
+  assert.deepEqual(noted, ["turn-image"]);
+  // turn 帧照常剥前缀转发，钩子不改变帧内容。
+  assert.equal(JSON.parse(sent[0]).model, "gpt-5.6-luna");
+
+  realtimeWebSocketHandler.message?.(socket, JSON.stringify({
+    type: "response.create",
+    model: "gpt-5.6-luna",
+    client_metadata: { turn_id: "turn-official-thread" },
+  }));
+  // 已建立 CPA 路由的连接上，无前缀帧也属于该 thread，turn 一并记录。
+  assert.deepEqual(noted, ["turn-image", "turn-official-thread"]);
+
+  realtimeWebSocketHandler.message?.(socket, JSON.stringify({ type: "response.cancel" }));
+  assert.equal(noted.length, 2, "control frames carry no turn id");
 });
 
 test("WebSocket bridge records lifecycle events into the live route log", () => {
@@ -506,6 +583,30 @@ test("WebSocket bridge records lifecycle events into the live route log", () => 
   } finally {
     fs.rmSync(logDir, { recursive: true, force: true });
   }
+});
+
+test("closing a WebSocket session releases its log file for retention", () => {
+  // 会话期间该文件被登记为"正在写入"，连接关闭必须释放，否则它会永远躲过 maxRequestLogs。
+  let released = 0;
+  const upstream = {
+    readyState: WebSocket.OPEN,
+    send() {},
+    close() {},
+  } as unknown as WebSocket;
+  const socket = {
+    data: {
+      url: "wss://api.openai.com/v1/live/rtc_test",
+      headers: {},
+      upstream,
+      queue: [],
+      queuedBytes: 0,
+      releaseLog: () => { released += 1; },
+    },
+  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+
+  realtimeWebSocketHandler.close?.(socket, 1000, "done");
+
+  assert.equal(released, 1);
 });
 
 test("route mismatch closes downstream 1012 without sending the frame upstream", () => {
@@ -787,6 +888,65 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
   }
 });
 
+test("responses WebSocket close writes a 101 request summary to gateway.log", async () => {
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-summary-"));
+  const processLog = path.join(logDir, "gateway.log");
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(_request, server) {
+      if (server.upgrade(_request)) return;
+      return new Response("upgrade failed", { status: 400 });
+    },
+    websocket: {
+      message(ws, message) { ws.send(message); },
+    },
+  });
+  const gateway = startGateway(
+    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    "builtin",
+    undefined,
+    undefined,
+    { file: processLog, maxBytes: 0 },
+  );
+  const url = new URL("/v1/responses", gateway.url);
+  url.protocol = "ws:";
+  const ClientWebSocket = WebSocket as unknown as new (
+    url: string | URL,
+    options: Bun.WebSocketOptions,
+  ) => WebSocket;
+  const client = new ClientWebSocket(url, {
+    headers: {
+      authorization: "Bearer official-oauth",
+      "openai-beta": "responses_websockets=2026-02-06",
+      "x-codex-routing-hint": "model=gpt-5.6-luna",
+    },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("responses WS summary handshake timed out")), 3_000);
+      client.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("responses WS summary handshake failed"));
+      };
+      client.onopen = () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      };
+    });
+    client.close(1000, "done");
+    // close 摘要写在 handler 里，等一个 tick 让 close 事件落地。
+    await Bun.sleep(50);
+    const digest = fs.readFileSync(processLog, "utf8");
+    assert.match(digest, /GET \/v1\/responses -> 101 \(\d+ms\) upstream:/);
+  } finally {
+    client.close();
+    gateway.stop(true);
+    upstream.stop(true);
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
 /** 用原始 TCP 发 WebSocket 升级请求，读回首行响应头——fetch 会剥离 upgrade 头，只能走裸socket。 */
 function rawUpgradeRequest(url: URL, extraHeaders: Record<string, string>): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -906,6 +1066,7 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
 
 test("realtime sideband dial failure surfaces as 502 instead of a silent 101", async () => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sideband-fail-"));
+  const processLog = path.join(logDir, "gateway.log");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -916,6 +1077,9 @@ test("realtime sideband dial failure surfaces as 502 instead of a silent 101", a
   const gateway = startGateway(
     { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
     "builtin",
+    undefined,
+    undefined,
+    { file: processLog, maxBytes: 0 },
   );
   try {
     const head = await rawUpgradeRequest(new URL("/v1/live", gateway.url), {
@@ -923,10 +1087,9 @@ test("realtime sideband dial failure surfaces as 502 instead of a silent 101", a
     });
     assert.match(head, /^HTTP\/1\.1 502/);
     assert.match(head, /x-codex-cliproxy-gateway: realtime-upstream-unavailable/);
-    // 真实故障必须进错误摘要（原先的表现是 101 后静默断开）。
-    const errorFiles = fs.readdirSync(logDir).filter((name) => name.startsWith("cliproxy-error-"));
-    assert.ok(errorFiles.length > 0, "expected an error digest entry for the sideband dial failure");
-    const digest = errorFiles.map((name) => fs.readFileSync(path.join(logDir, name), "utf8")).join("");
+    // 真实故障必须进错误摘要（原先的表现是 101 后静默断开）：摘要在进程日志里，不再另开文件。
+    assert.deepEqual(fs.readdirSync(logDir).filter((name) => name.startsWith("cliproxy-error-")), []);
+    const digest = fs.readFileSync(processLog, "utf8");
     assert.match(digest, /-> 502 !!!/);
     assert.match(digest, /Realtime upstream WebSocket failed/);
   } finally {
