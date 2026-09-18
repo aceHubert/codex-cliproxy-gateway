@@ -442,3 +442,122 @@ test("ZCode models 使用字典键稳定去重排序，变化仅发布路由快�
     } finally { cache.close(); }
   });
 });
+
+/** ZCode 3.12.3 起切换套餐只写 providerFamilyConnectionSelections[family].kind。 */
+function connectionSettings(kind: string | null, family: "zai" | "bigmodel" = "zai", extra: Record<string, unknown> = {}) {
+  const setting: Record<string, unknown> = { providerFamilyDomain: family, ...extra };
+  if (kind !== null) setting.providerFamilyConnectionSelections = { [family]: { kind } };
+  return setting;
+}
+function planConfig(family: "zai" | "bigmodel" = "zai") {
+  const url = family === "bigmodel" ? URL_B : URL_A;
+  const startKey = jwt(Math.floor(Date.now() / 1000) + 3600);
+  return { provider: {
+    [`builtin:${family}-coding-plan`]: { options: { apiKey: "test-coding-key", baseURL: url }, models: { "glm-5": {} } },
+    [`builtin:${family}-start-plan`]: { options: { apiKey: startKey, baseURL: url }, models: { "glm-5": {} } },
+  } };
+}
+
+test("ZCode 3.12.3 connectionSelections 把已知 kind 归一化为 legacy providerID", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), connectionSettings("team-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      for (const kind of ["individual-coding-plan", "team-coding-plan"] as const) {
+        json(path.join(home, "setting.json"), connectionSettings(kind));
+        mock.change(home, "setting.json");
+        await eventually(async () => {
+          const snapshot = await cache.get();
+          assert.equal(snapshot.family, "zai");
+          assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
+          assert.equal(snapshot.apiKey, "test-coding-key");
+        });
+      }
+      json(path.join(home, "setting.json"), connectionSettings("start-plan"));
+      mock.change(home, "setting.json");
+      await eventually(async () => {
+        const snapshot = await cache.get();
+        assert.equal(snapshot.providerID, "builtin:zai-start-plan");
+        assert.ok(snapshot.expiresAt !== undefined);
+      });
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 全新安装只有 connectionSelections 时可选通并命中 config 镜像", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // 无任何 legacy 选择字段：只有 3.12.3 全新安装机器才会出现这个组合。
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan", "bigmodel"));
+    json(path.join(home, "config.json"), planConfig("bigmodel"));
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.family, "bigmodel");
+      assert.equal(snapshot.providerID, "builtin:bigmodel-coding-plan");
+      assert.equal(snapshot.apiKey, "test-coding-key");
+      assert.equal(snapshot.baseURL, URL_B);
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode connectionSelections 条目缺失或形状非法时回退 legacy 解析", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const id = "custom:account:provider";
+    const legacy = { providerFamilyDomain: "zai", modelProviderFamilySelectedKeys: { zai: `apikey:${id}` } };
+    const cases = [
+      // 迁移惰性持久化：升级后未重启、api-key 模式被迁移跳过、team 连接未解析，
+      // 三个窗口下磁盘只有 legacy 选择。
+      legacy,
+      { ...legacy, providerFamilyConnectionSelections: "garbage" },
+      { ...legacy, providerFamilyConnectionSelections: { zai: "garbage" } },
+      { ...legacy, providerFamilyConnectionSelections: { zai: { kind: 123 } } },
+      { ...legacy, providerFamilyConnectionSelections: { zai: { kind: "" } } },
+      { ...legacy, providerFamilyConnectionSelections: {} },
+      // 其他 family 的选择不干预当前渠道。
+      { ...legacy, providerFamilyConnectionSelections: { bigmodel: { kind: "individual-coding-plan" } } },
+    ];
+    for (const [index, broken] of cases.entries()) {
+      json(path.join(home, "setting.json"), broken);
+      json(path.join(home, "config.json"), { provider: { [id]: { options: { apiKey: `test-legacy-key-${index}`, baseURL: URL_A }, models: { "glm-5": {} } } } });
+      const cache = createZcodeConfigCache(home, { watch: mock.watch });
+      try {
+        const snapshot = await cache.get();
+        assert.equal(snapshot.providerID, id);
+        assert.equal(snapshot.apiKey, `test-legacy-key-${index}`);
+      } finally { cache.close(); }
+      fs.unlinkSync(path.join(home, "setting.json"));
+    }
+  });
+});
+
+test("ZCode connectionSelections 未知 kind 报错且不回退冻结的 legacy 选择", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // legacy 选择仍存在（升级安装），但条目里已是未知 kind 时必须报错而不是静默跟随旧渠道。
+    json(path.join(home, "setting.json"), { providerFamilyDomain: "zai",
+      modelProviderFamilySelectedKeys: { zai: "plan:builtin:zai-coding-plan" },
+      providerFamilyConnectionSelections: { zai: { kind: "future-plan" } } });
+    json(path.join(home, "config.json"), planConfig());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      await assert.rejects(cache.get(), (error: unknown) => {
+        assert.ok(error instanceof ZcodeConfigError);
+        assert.ok(error.message.includes("future-plan"));
+        return true;
+      });
+      json(path.join(home, "setting.json"), connectionSettings("another-unknown-kind"));
+      mock.change(home, "setting.json");
+      await eventually(async () => {
+        await assert.rejects(cache.get(), (error: unknown) => {
+          assert.ok(error instanceof ZcodeConfigError);
+          assert.ok(error.message.includes("another-unknown-kind"));
+          return true;
+        });
+      });
+    } finally { cache.close(); }
+  });
+});

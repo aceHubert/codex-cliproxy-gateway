@@ -67,10 +67,31 @@ type Selection = Pick<ZcodeProviderSnapshot, "family" | "providerID">;
 function isPlan(selection: Selection): boolean {
   return ["coding", "start"].some((plan) => selection.providerID === `builtin:${selection.family}-${plan}-plan`);
 }
+/**
+ * ZCode 3.12.3 起切换套餐只写 `providerFamilyConnectionSelections[family].kind`，
+ * legacy `modelProviderFamilySelectedKeys` 已冻结。在入口把已知 kind 归一化为与 legacy
+ * 解析同构的 providerID，下游镜像查找、套餐判定与协议转换零改动。
+ * 条目缺失或形状非法时返回 undefined，由 legacy 路径接管：3.12.3 的迁移是惰性持久化，
+ * 未重启 / api-key 模式被跳过 / team 连接未解析三个窗口下磁盘长期只有 legacy。
+ */
+function connectionSelectionKind(setting: Record<string, unknown>, family: ZcodeFamily): string | undefined {
+  const selections = setting.providerFamilyConnectionSelections;
+  if (!record(selections)) return undefined;
+  const entry = selections[family];
+  if (!record(entry) || typeof entry.kind !== "string" || !entry.kind) return undefined;
+  return entry.kind;
+}
 function readSelection(home: string): Selection {
   const setting = readPreferred(home, "setting.json");
   const family = setting.providerFamilyDomain;
   if (family !== "zai" && family !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
+  const kind = connectionSelectionKind(setting, family);
+  if (kind) {
+    if (kind === "individual-coding-plan" || kind === "team-coding-plan") return { family, providerID: `builtin:${family}-coding-plan` };
+    if (kind === "start-plan") return { family, providerID: `builtin:${family}-start-plan` };
+    // 条目存在且 kind 已解析，说明用户做了真实的新选择；回退会静默跟随冻结的旧渠道。
+    invalid(`ZCode 当前渠道的选择类型 "${kind}" 暂不被网关支持，请在 ZCode 中切换到 Coding Plan 或 Start Plan`);
+  }
   const selected = record(setting.modelProviderFamilySelectedKeys) ? setting.modelProviderFamilySelectedKeys[family] : undefined;
   if (typeof selected !== "string" || selected.indexOf(":") < 1) invalid("ZCode 当前渠道缺少有效 provider 选择");
   const providerID = selected.slice(selected.indexOf(":") + 1);
