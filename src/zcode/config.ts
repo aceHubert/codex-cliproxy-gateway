@@ -1,7 +1,22 @@
 import fs from "node:fs";
 import path from "node:path";
+import { readZcodeIndividualApiKey } from "./individual-credentials.ts";
+import {
+  readZcodeTeamCredentialInputs,
+  resolveZcodeTeamApiKey,
+} from "./team-credentials.ts";
 
 export type ZcodeFamily = "zai" | "bigmodel";
+export interface ZcodeSelection {
+  family: ZcodeFamily;
+  providerID: string;
+  kind: "individual-coding-plan" | "team-coding-plan" | "start-plan" | "api-key";
+  team?: {
+    productId: string;
+    organizationId: string;
+    projectId: string;
+  };
+}
 export interface ZcodeProviderSnapshot {
   family: ZcodeFamily;
   providerID: string;
@@ -19,6 +34,8 @@ export interface ZcodeCacheDependencies {
   watch?: typeof fs.watch;
   stat?: typeof fs.statSync;
   now?: () => number;
+  fetch?: typeof fetch;
+  env?: NodeJS.ProcessEnv;
   /** 只统计实际业务 Key 的构建，不接收或暴露密钥。 */
   onCredentialBuild?: () => void;
   /** 用于验证差分检查只在需要时读取 provider 配置。 */
@@ -63,9 +80,8 @@ function baseURL(value: unknown): string {
   }
   return url.href.replace(/\/+$/, "");
 }
-type Selection = Pick<ZcodeProviderSnapshot, "family" | "providerID">;
-function isPlan(selection: Selection): boolean {
-  return ["coding", "start"].some((plan) => selection.providerID === `builtin:${selection.family}-${plan}-plan`);
+function isPlan(selection: ZcodeSelection): boolean {
+  return selection.kind !== "api-key";
 }
 /**
  * ZCode 3.12.3 起切换套餐只写 `providerFamilyConnectionSelections[family].kind`，
@@ -74,21 +90,43 @@ function isPlan(selection: Selection): boolean {
  * 条目缺失或形状非法时返回 undefined，由 legacy 路径接管：3.12.3 的迁移是惰性持久化，
  * 未重启 / api-key 模式被跳过 / team 连接未解析三个窗口下磁盘长期只有 legacy。
  */
-function connectionSelectionKind(setting: Record<string, unknown>, family: ZcodeFamily): string | undefined {
+function connectionSelection(setting: Record<string, unknown>, family: ZcodeFamily): Record<string, unknown> | undefined {
   const selections = setting.providerFamilyConnectionSelections;
   if (!record(selections)) return undefined;
   const entry = selections[family];
   if (!record(entry) || typeof entry.kind !== "string" || !entry.kind) return undefined;
-  return entry.kind;
+  return entry;
 }
-function readSelection(home: string): Selection {
+function teamContext(entry: Record<string, unknown>): ZcodeSelection["team"] {
+  const values = [entry.productId, entry.organizationId, entry.projectId].map((value) => {
+    if (typeof value !== "string") return "";
+    return value.trim();
+  });
+  if (!values.every((value) => value && !/[\x00-\x1f\x7f]/.test(value))) {
+    invalid("团队套餐缺少有效的 productId、organizationId 或 projectId");
+  }
+  return { productId: values[0]!, organizationId: values[1]!, projectId: values[2]! };
+}
+function legacyKind(family: ZcodeFamily, providerID: string): ZcodeSelection["kind"] {
+  if (providerID === `builtin:${family}-coding-plan`) return "individual-coding-plan";
+  if (providerID === `builtin:${family}-start-plan`) return "start-plan";
+  return "api-key";
+}
+function selectionIdentity(selection: ZcodeSelection): string {
+  return JSON.stringify([selection.family, selection.kind, selection.providerID, selection.team ?? null]);
+}
+function readSelection(home: string): ZcodeSelection {
   const setting = readPreferred(home, "setting.json");
   const family = setting.providerFamilyDomain;
   if (family !== "zai" && family !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
-  const kind = connectionSelectionKind(setting, family);
-  if (kind) {
-    if (kind === "individual-coding-plan" || kind === "team-coding-plan") return { family, providerID: `builtin:${family}-coding-plan` };
-    if (kind === "start-plan") return { family, providerID: `builtin:${family}-start-plan` };
+  const entry = connectionSelection(setting, family);
+  if (entry) {
+    const kind = entry.kind;
+    if (kind === "individual-coding-plan") return { family, kind, providerID: `builtin:${family}-coding-plan` };
+    if (kind === "team-coding-plan") {
+      return { family, kind, providerID: `builtin:${family}-coding-plan`, team: teamContext(entry) };
+    }
+    if (kind === "start-plan") return { family, kind, providerID: `builtin:${family}-start-plan` };
     // 条目存在且 kind 已解析，说明用户做了真实的新选择；回退会静默跟随冻结的旧渠道。
     invalid(`ZCode 当前渠道的选择类型 "${kind}" 暂不被网关支持，请在 ZCode 中切换到 Coding Plan 或 Start Plan`);
   }
@@ -96,7 +134,7 @@ function readSelection(home: string): Selection {
   if (typeof selected !== "string" || selected.indexOf(":") < 1) invalid("ZCode 当前渠道缺少有效 provider 选择");
   const providerID = selected.slice(selected.indexOf(":") + 1);
   if (!providerID) invalid("ZCode 当前 provider ID 为空");
-  return { family, providerID };
+  return { family, kind: legacyKind(family, providerID), providerID };
 }
 /** models 的字典键才是上游 ID；显示名和其他元数据不参与路由投影。 */
 function modelIds(value: unknown): readonly string[] {
@@ -115,12 +153,16 @@ function modelIds(value: unknown): readonly string[] {
     return true;
   }));
 }
-function readRoute(home: string, { family, providerID }: Selection): Omit<ZcodeProviderSnapshot, "expiresAt"> {
+function readRoute(home: string, selection: ZcodeSelection): Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string } {
+  const { family, providerID } = selection;
   const config = readPreferred(home, "config.json");
   const provider = record(config.provider) && Object.hasOwn(config.provider, providerID) ? config.provider[providerID] : undefined;
   if (!record(provider) || !record(provider.options)) invalid("找不到 ZCode 当前 provider 的 options");
   if (provider.enabled === false || (typeof provider.systemDisabledReason === "string" && provider.systemDisabledReason.length > 0)) {
     invalid("ZCode 当前 provider 已停用");
+  }
+  if (selection.kind === "team-coding-plan") {
+    return { family, providerID, baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
   }
   const apiKey = provider.options.apiKey;
   if (typeof apiKey !== "string" || !apiKey || /[^\x21-\x7e]/.test(apiKey)) invalid("当前 provider 缺少有效 options.apiKey");
@@ -162,10 +204,15 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let failure: ZcodeConfigError | undefined;
   let closed = false;
   const dirtyFiles = new Set<string>(["setting.json", "config.json", "credentials.json"]);
-  let selection: Selection | undefined;
-  let route: Omit<ZcodeProviderSnapshot, "expiresAt"> | undefined;
+  let selection: ZcodeSelection | undefined;
+  let route: (Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string }) | undefined;
   let routeFailure: ZcodeConfigError | undefined;
   let oauthProjection: string | undefined;
+  let teamCredential: { identity: string; fingerprint: string; apiKey: string } | undefined;
+  let teamCredentialFingerprint: string;
+  let teamForceRefresh = false;
+  let credentialGeneration = 0;
+  let resolving: { generation: number; promise: Promise<void> } | undefined;
   let firstEventAt: number | undefined;
   let debounce: ReturnType<typeof setTimeout> | undefined;
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -182,6 +229,11 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     oauthProjection = undefined;
     snapshot = undefined;
     credential = undefined;
+    teamCredential = undefined;
+    teamCredentialFingerprint = "";
+    teamForceRefresh = false;
+    credentialGeneration++;
+    resolving = undefined;
     expiryCheckedKey = undefined;
     failure = new ZcodeConfigError(message);
     clearTimeout(debounce);
@@ -192,6 +244,34 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   }
   function markDirty(file?: string): void {
     if (closed || (file === "credentials.json" && selection && !isPlan(selection))) return;
+    if (file === "credentials.json" && selection?.kind === "team-coding-plan") {
+      credentialGeneration++;
+      resolving = undefined;
+      teamCredential = undefined;
+      credential = undefined;
+      snapshot = undefined;
+      expiryCheckedKey = undefined;
+      clearTimeout(expiryTimer);
+    }
+    if (file === "setting.json" && selection) {
+      try {
+        const next = readSelection(home);
+        if (selectionIdentity(next) !== selectionIdentity(selection)) {
+          credentialGeneration++;
+          resolving = undefined;
+          teamCredential = undefined;
+          teamCredentialFingerprint = "";
+          teamForceRefresh = false;
+          credential = undefined;
+          snapshot = undefined;
+          expiryCheckedKey = undefined;
+          clearTimeout(expiryTimer);
+        }
+      } catch {
+        snapshot = undefined;
+        credential = undefined;
+      }
+    }
     if (file) dirtyFiles.add(file);
     else for (const name of ["setting.json", "config.json", "credentials.json"]) dirtyFiles.add(name);
     firstEventAt ??= now();
@@ -257,26 +337,63 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     try {
       let selectionChanged = false;
       if (!selection || changed.has("setting.json")) {
-        let next: Selection;
+        let next: ZcodeSelection;
         try { next = readSelection(home); }
         catch (error) { selection = undefined; throw error; }
-        selectionChanged = !selection || next.family !== selection.family || next.providerID !== selection.providerID;
+        selectionChanged = !selection || selectionIdentity(next) !== selectionIdentity(selection);
+        if (selectionChanged) {
+          credentialGeneration++;
+          resolving = undefined;
+          teamCredential = undefined;
+          teamCredentialFingerprint = "";
+          teamForceRefresh = false;
+          credential = undefined;
+          snapshot = undefined;
+          expiryCheckedKey = undefined;
+          clearTimeout(expiryTimer);
+        }
         selection = next;
       }
       let oauthChanged = false;
+      let personalApiKey: string | undefined;
+      let teamInputs: Awaited<ReturnType<typeof readZcodeTeamCredentialInputs>> | undefined;
       if (isPlan(selection) && (selectionChanged || changed.has("credentials.json"))) {
-        if (selectionChanged) oauthProjection = "[null,null,null]";
+        if (selectionChanged) {
+          oauthProjection = selection.kind === "team-coding-plan" ? undefined : "[null,null,null]";
+          teamCredentialFingerprint = "";
+        }
         try {
           const credentials = readPreferred(home, "credentials.json");
-          // 只保存当前计划渠道的三个授权字段投影；全局 active_provider 不能改变模型选择。
-          const projection = JSON.stringify([
-            credentials[`oauth:${selection.family}:access_token`],
-            credentials[`oauth:${selection.family}:refresh_token`],
-            credentials.zcodejwttoken,
-          ]);
-          oauthChanged = projection !== oauthProjection;
-          oauthProjection = projection;
-        } catch { /* 缺失或损坏不撤销独立保存的业务 Key，也不回退到旧凭证文件。 */ }
+          if (selection.kind === "team-coding-plan") {
+            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
+            const nextFingerprint = teamInputs.fingerprint;
+            if (teamCredentialFingerprint !== nextFingerprint) {
+              teamCredentialFingerprint = nextFingerprint;
+              oauthChanged = true;
+            }
+          } else {
+            // 只保存当前计划渠道的授权字段与个人账号 Key 投影；全局 active_provider 不能改变模型选择。
+            const key = selection.kind === "individual-coding-plan"
+              ? readZcodeIndividualApiKey(credentials, selection.family, dependencies.env)
+              : "";
+            personalApiKey = key || undefined;
+            const projection = JSON.stringify([
+              credentials[`oauth:${selection.family === "zai" ? "zai" : "zhipu"}:access_token`],
+              credentials[`oauth:${selection.family === "zai" ? "zai" : "zhipu"}:refresh_token`],
+              credentials.zcodejwttoken,
+              key,
+            ]);
+            oauthChanged = projection !== oauthProjection;
+            oauthProjection = projection;
+          }
+        } catch (error) {
+          if (selection.kind === "team-coding-plan") {
+            snapshot = undefined;
+            credential = undefined;
+            throw error instanceof ZcodeConfigError ? error : new ZcodeConfigError("无法读取 ZCode 团队凭据");
+          }
+          /* 个人缺失或损坏时不撤销 config 镜像里的独立业务 Key。 */
+        }
       } else if (selectionChanged) oauthProjection = undefined;
       if (selectionChanged || changed.has("config.json") || oauthChanged || (!route && !routeFailure)) {
         dependencies.onConfigRead?.();
@@ -289,22 +406,94 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       if (routeFailure) throw routeFailure;
       if (!route) invalid("ZCode 当前路由不可用");
       const next = route;
+      if (selection.kind === "team-coding-plan") {
+        const identity = selectionIdentity(selection);
+        const fingerprint = teamCredentialFingerprint;
+        const expired = credential?.expiresAt !== undefined && credential.expiresAt <= now();
+        const mustResolve = teamForceRefresh || expired || !teamCredential
+          || teamCredential.identity !== identity || teamCredential.fingerprint !== fingerprint;
+        if (resolving) {
+          snapshot = undefined;
+          return;
+        }
+        if (!teamInputs || !fingerprint || mustResolve) {
+          if (!teamInputs || !fingerprint) {
+            const credentials = readPreferred(home, "credentials.json");
+            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
+            teamCredentialFingerprint = teamInputs.fingerprint;
+          }
+          const generation = ++credentialGeneration;
+          const targetInputs = teamInputs;
+          snapshot = undefined;
+          credential = undefined;
+          expiryCheckedKey = undefined;
+          teamForceRefresh = false;
+          clearTimeout(expiryTimer);
+          const promise = (async () => {
+            try {
+              const apiKey = await resolveZcodeTeamApiKey(selection, targetInputs, dependencies);
+              if (credentialGeneration !== generation || selection.kind !== "team-coding-plan") return;
+              dependencies.onCredentialBuild?.();
+              credential = { apiKey, expiresAt: expiresAt(apiKey) };
+              teamCredential = { identity, fingerprint: teamCredentialFingerprint!, apiKey };
+              if (credential.expiresAt !== undefined && credential.expiresAt <= now()) invalid("ZCode 当前业务 Key 已过期");
+              const currentRoute = route;
+              if (!currentRoute) invalid("ZCode 当前路由不可用");
+              snapshot = Object.freeze({ ...currentRoute, apiKey,
+                ...(credential.expiresAt === undefined ? {} : { expiresAt: credential.expiresAt }) });
+              failure = undefined;
+              armExpiry();
+            } catch {
+              if (credentialGeneration !== generation) return;
+              snapshot = undefined;
+              credential = undefined;
+              teamCredential = undefined;
+              failure = new ZcodeConfigError("无法读取 ZCode 团队项目凭据；请在 ZCode 中重新连接团队套餐");
+              clearTimeout(expiryTimer);
+            } finally {
+              if (credentialGeneration === generation) resolving = undefined;
+              finish();
+            }
+          })();
+          resolving = { generation, promise };
+          return;
+        }
+        const cachedTeamCredential = teamCredential;
+        if (!cachedTeamCredential) invalid("ZCode 团队项目凭据不可用");
+        const apiKey = cachedTeamCredential.apiKey;
+        const expires = expiresAt(apiKey);
+        credential = { apiKey, expiresAt: expires };
+        if (expires !== undefined && expires <= now()) {
+          expiryCheckedKey = apiKey;
+          invalid("ZCode 当前业务 Key 已过期");
+        }
+        snapshot = Object.freeze({ ...next, apiKey, ...(expires === undefined ? {} : { expiresAt: expires }) });
+        failure = undefined;
+        armExpiry();
+        return;
+      }
+      const routeApiKey = personalApiKey ?? next.apiKey;
+      if (!routeApiKey) invalid("当前 provider 缺少有效 options.apiKey");
       const hadFailure = failure !== undefined;
-      const keyChanged = !credential || credential.apiKey !== next.apiKey;
-      if (!credential || credential.apiKey !== next.apiKey) {
+      const keyChanged = !credential || credential.apiKey !== routeApiKey;
+      if (keyChanged) {
         dependencies.onCredentialBuild?.();
-        credential = { apiKey: next.apiKey, expiresAt: expiresAt(next.apiKey) };
+        credential = { apiKey: routeApiKey, expiresAt: expiresAt(routeApiKey) };
         expiryCheckedKey = undefined;
       }
-      if (credential.expiresAt !== undefined && credential.expiresAt <= now()) {
-        expiryCheckedKey = next.apiKey;
+      const currentCredential = credential;
+      if (!currentCredential) invalid("ZCode 当前业务 Key 不可用");
+      if (currentCredential.expiresAt !== undefined && currentCredential.expiresAt <= now()) {
+        expiryCheckedKey = routeApiKey;
         invalid("ZCode 当前业务 Key 已过期");
       }
       if (!snapshot || snapshot.family !== next.family || snapshot.providerID !== next.providerID
-        || snapshot.apiKey !== next.apiKey || snapshot.baseURL !== next.baseURL
+        || snapshot.apiKey !== routeApiKey || snapshot.baseURL !== next.baseURL
         || snapshot.modelIds.length !== next.modelIds.length
         || snapshot.modelIds.some((id, index) => id !== next.modelIds[index])) {
-        snapshot = Object.freeze({ ...next, ...(credential.expiresAt === undefined ? {} : { expiresAt: credential.expiresAt }) });
+        snapshot = Object.freeze({ family: next.family, providerID: next.providerID, apiKey: routeApiKey,
+          baseURL: next.baseURL, modelIds: next.modelIds,
+          ...(currentCredential.expiresAt === undefined ? {} : { expiresAt: currentCredential.expiresAt }) });
       }
       failure = undefined;
       if (keyChanged || hadFailure) armExpiry();
@@ -319,6 +508,10 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     if (expiryCheckedKey !== snapshot.apiKey) {
       expiryCheckedKey = snapshot.apiKey;
       dirtyFiles.add("config.json");
+      if (selection?.kind === "team-coding-plan") {
+        dirtyFiles.add("credentials.json");
+        teamForceRefresh = true;
+      }
       check();
     }
   }
@@ -334,6 +527,8 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         }
         await waiting.promise;
       }
+      if (failure) throw failure;
+      if (resolving) await resolving.promise;
       if (failure) throw failure;
       if (!snapshot) throw new ZcodeConfigError("ZCode 配置缓存不可用");
       return snapshot;

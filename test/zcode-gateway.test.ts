@@ -384,6 +384,51 @@ test("ZCode 下一次请求使用更新后的当前 provider 密钥", async () =
   });
 });
 
+test("ZCode 团队项目切换只把当前项目凭据发给模型 API", async () => {
+  await fixture(async ({ create }) => {
+    let selected = { ...snapshot(), providerID: "builtin:zai-coding-plan", apiKey: "fake-personal-key" };
+    const calls: { url: string; headers: Headers; body: Json }[] = [];
+    const handler = create({ current: async () => selected, fetch: async (url, init) => {
+      calls.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
+      return upstream();
+    } });
+    for (const apiKey of ["fake-personal-key", "fake-team-a-key", "fake-team-b-key"]) {
+      selected = { ...selected, apiKey };
+      assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
+    }
+    assert.deepEqual(calls.map((call) => call.headers.get("x-api-key")), [
+      "fake-personal-key", "fake-team-a-key", "fake-team-b-key",
+    ]);
+    for (const call of calls) {
+      assert.equal(call.url, `${selected.baseURL}/v1/messages`);
+      for (const header of ["x-organization-id", "x-project-id", "bigmodel-organization", "bigmodel-project"]) {
+        assert.equal(call.headers.get(header), null);
+      }
+      assert.ok(!JSON.stringify(call.body).includes("organizationId"));
+      assert.ok(!JSON.stringify(call.body).includes("projectId"));
+      assert.ok(!JSON.stringify(call.body).includes("productId"));
+    }
+  });
+});
+
+test("ZCode 团队凭据失败时不发送上游请求", async () => {
+  await fixture(async ({ create }) => {
+    let current: (() => Promise<Snapshot>) | undefined = async () => ({
+      ...snapshot(), providerID: "builtin:zai-coding-plan", apiKey: "fake-personal-key",
+    });
+    let upstreamCalls = 0;
+    const handler = create({ current: async () => {
+      if (!current) throw new ZcodeConfigError("无法读取 ZCode 团队项目凭据");
+      return current();
+    }, fetch: async () => { upstreamCalls++; return upstream(); } });
+    assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
+    current = undefined;
+    const response = await handler(request("zcode/glm-5.3"));
+    assert.equal(response.status >= 500 && response.status < 600, true);
+    assert.equal(upstreamCalls, 1);
+  });
+});
+
 test("ZCode 客户端 AbortSignal 可中断等待中的流读取", async () => {
   await fixture(async ({ create }) => {
     const abort = new AbortController();

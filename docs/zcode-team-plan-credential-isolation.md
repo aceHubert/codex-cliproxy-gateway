@@ -2,7 +2,7 @@
 
 ## 状态与决策
 
-2026-09-18 评审发现，优先级 P1，尚未修复。用户明确要求团队套餐留作技术债，下轮再解决，本轮保留现有实现。
+2026-09-19 已修复。个人与团队选择保留独立凭据身份，团队项目 Key 按官方流程解析，缓存按团队上下文与凭据文件指纹失效；实现与验收记录见 [执行计划](exec-plans/completed/zcode-team-plan-adapter.md)。
 
 本项承接 [技术债追踪](exec-plans/tech-debt-tracker.md) 中 ZCode 3.12.3 延迟项的第 ⑦ 项，相关背景见 [读取层最小加固计划](exec-plans/completed/zcode-3.12.3-compat.md)。
 
