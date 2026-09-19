@@ -22,16 +22,24 @@ export interface UiStatus {
 export interface UiConfig {
   editable: {
     zcode: boolean;
+    codebuddy: boolean;
     requestLogging: boolean;
     logDir: string;
     maxRequestLogs: number;
     maxGatewayLogBytes: number;
     selectedModels: string[];
   };
+  /** 本机 provider 配置的存在性探测结果：决定对应开关是否显示。 */
+  detected: {
+    zcode: boolean;
+    codebuddy: boolean;
+  };
   readonly: {
     upstreamBaseUrl: string;
     upstreamType: string;
     upstreamOnly: boolean;
+    /** 路由模式：由 upstreamOnly 取反导出（false -> dynamic），直接展示模式名而非布尔值。 */
+    routerMode: "dynamic" | "upstream-only";
     host: string;
     port: number;
     mountPath: string;
@@ -45,6 +53,7 @@ export interface UiConfig {
 /** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。 */
 export interface UiConfigChanges {
   zcode?: boolean;
+  codebuddy?: boolean;
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;

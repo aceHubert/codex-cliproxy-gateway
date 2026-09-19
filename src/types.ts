@@ -46,6 +46,8 @@ export interface GatewayConfig {
   upstreamOnly?: boolean;
   /** 是否启用 ZCode Responses 入口；默认关闭。 */
   zcode?: boolean;
+  /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时按禁用处理。 */
+  codebuddy?: boolean;
 }
 
 /**

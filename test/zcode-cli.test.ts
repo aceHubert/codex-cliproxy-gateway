@@ -24,6 +24,7 @@ function installedConfig(paths: ReturnType<typeof resolvePaths>) {
     maxGatewayLogBytes: 0,
     upstreamOnly: false,
     zcode: false,
+    codebuddy: false,
     logDir: paths.logDir,
   };
 }

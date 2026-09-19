@@ -72,5 +72,10 @@ export function catalogFileFor(paths: ResolvedPaths, upstreamType: UpstreamType)
 
 /** 网关自管的全部目录文件；新增上游类型时必须同步补充，供卸载清理与 config.toml 守卫使用。 */
 export function managedCatalogFiles(paths: ResolvedPaths): string[] {
-  return [catalogFileFor(paths, "cliproxy"), catalogFileFor(paths, "newapi"), path.join(paths.runtimeHome, "zcode-catalog.json")];
+  return [
+    catalogFileFor(paths, "cliproxy"),
+    catalogFileFor(paths, "newapi"),
+    path.join(paths.runtimeHome, "zcode-catalog.json"),
+    path.join(paths.runtimeHome, "codebuddy-catalog.json"),
+  ];
 }

@@ -16,6 +16,8 @@ import { restartLaunchAgent } from "./launchd.ts";
 import { realPathOrResolve, resolvePaths } from "./paths.ts";
 import { isRequestLogName, safeLogPath } from "./request-log.ts";
 import { atomicWrite } from "./toml.ts";
+import { codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
+import { zcodeConfigPresent } from "./zcode/config.ts";
 import {
   configuredUpstreamType,
   fetchConfiguredUpstreamCatalog,
@@ -36,6 +38,10 @@ import type { GatewayConfig, ResolvedPaths } from "./types.ts";
  * - Host 头白名单（127.0.0.1/localhost/[::1] + UI 端口），挡 DNS rebinding；
  * - Origin 头存在且非同源即拒绝；不输出任何 CORS 头；
  * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.codex-cliproxy-gateway/ui-token（0600）。
+ *
+ * 除「拉取模型」外，UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
+ * codebuddyCredentialsPresent）：只 fs.existsSync 判断 ~/.zcode 与 .info 是否存在，
+ * 不打开、不解析、不返回凭据内容，响应里只有布尔值。
  */
 
 const GATEWAY_LOG_TAIL_BYTES = 256 * 1024;
@@ -58,6 +64,14 @@ export interface WebUiContext {
   instanceOnly?: boolean;
   /** 测试注入用的重启调度；缺省在 RESTART_DELAY_MS 后 kickstart LaunchAgent。 */
   scheduleRestart?: (paths: ResolvedPaths) => void;
+  /**
+   * provider 本地配置探测的注入路径（测试用）：缺省按 paths.home 解析 ~/.zcode、
+   * 按平台默认位置解析 CodeBuddy/WorkBuddy 认证目录。只影响存在性探测，不读取凭据内容。
+   */
+  providerDeps?: {
+    zcodeHome?: string;
+    codebuddyAuthDir?: string;
+  };
   /**
    * 模型选择功能的测试注入点：上游 key 读取与「停止 Codex app-server」。
    * 缺省分别走 keychain 分派的 readApiKey 与 stopCodexAppServers。
@@ -295,21 +309,30 @@ function statusResponse(config: GatewayConfig): Response {
   });
 }
 
-function configResponse(paths: ResolvedPaths): Response {
+function configResponse(paths: ResolvedPaths, providerDeps?: WebUiContext["providerDeps"]): Response {
   const live = readGatewayConfigFile(paths.gatewayConfig);
   return Response.json({
     editable: {
       zcode: live.zcode === true,
+      codebuddy: live.codebuddy === true,
       requestLogging: live.requestLogging === true,
       logDir: live.logDir || path.join(path.dirname(live.catalogPath), "logs"),
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
     },
+    // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
+    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。
+    detected: {
+      zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
+      codebuddy: codebuddyCredentialsPresent(providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory()),
+    },
     readonly: {
       upstreamBaseUrl: sanitizeUrlValue(live.upstreamBaseUrl),
       upstreamType: live.upstreamType === "newapi" ? "newapi" : "cliproxy",
       upstreamOnly: live.upstreamOnly === true,
+      // 路由模式按 upstreamOnly 取反导出：false 对应 dynamic（动态路由），避免直接展示布尔值。
+      routerMode: live.upstreamOnly === true ? "upstream-only" : "dynamic",
       host: live.host,
       port: live.port,
       mountPath: live.mountPath,
@@ -436,7 +459,7 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
 
   if (route === "config" && request.method === "GET") {
     try {
-      return configResponse(ctx.paths);
+      return configResponse(ctx.paths, ctx.providerDeps);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
@@ -515,11 +538,14 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
     }
     const { catalog, modelsConfigFile } = fetched;
     const bySlug = new Map(catalog.models.map((model) => [model.slug, model]));
-    const unknownId = selected.find((slug) => !bySlug.has(slug));
-    if (unknownId) return badRequest(`Unknown model ID: ${unknownId}`);
+    // 与 `models --sync` 的当前选择语义一致：上游已不存在的旧选择直接剔除，
+    // 而不是让整个保存失败；这样 UI 在保存后会自动收敛到最新可选目录。
     const ordered = catalog.models
       .map((model) => model.slug)
       .filter((slug) => selected.includes(slug));
+    if (config.upstreamOnly === true && ordered.length === 0) {
+      return badRequest("Upstream-only mode requires at least one selected model; the catalog would be empty");
+    }
     try {
       await rebuildCatalog(ctx.paths, config, ordered.map((slug) => bySlug.get(slug)!), modelsConfigFile);
       applySelectedModelsPatch(ctx.paths, ordered, ctx.instanceOnly !== true);

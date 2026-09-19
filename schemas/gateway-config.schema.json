@@ -105,6 +105,11 @@
       "type": "boolean",
       "default": false
     },
+    "codebuddy": {
+      "description": "是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "type": "boolean",
+      "default": false
+    },
     "cpaOnly": {
       "description": "已过时，由 upstreamOnly 取代；命令前置同步会自动迁移并移除该键。",
       "type": "boolean",

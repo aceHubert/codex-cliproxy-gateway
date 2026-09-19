@@ -115,6 +115,17 @@ function expiresAt(apiKey: string): number | undefined {
   } catch { /* 非 JWT Key 不推测有效期。 */ }
 }
 
+/**
+ * 本机 ZCode 配置是否就绪：setting.json（渠道/provider 选择）与 config.json
+ * （provider 路由）都存在才算可用——两者缺一，缓存取快照时必然报错。只做
+ * 存在性探测，不读文件内容；home 与 v2 两种布局各自按 readPreferred 的回退顺序判定。
+ */
+export function zcodeConfigPresent(homeDirectory: string): boolean {
+  const home = path.resolve(homeDirectory);
+  const locations = (name: string) => [path.join(home, name), path.join(home, "v2", name)];
+  return ["setting.json", "config.json"].every((name) => locations(name).some((file) => fs.existsSync(file)));
+}
+
 /** 文件检查同步完成，凭证仅按 Key 的实际变化构建；事件不废弃有效快照。 */
 export function createZcodeConfigCache(homeDirectory: string, dependencies: ZcodeCacheDependencies = {}): ZcodeConfigCache {
   const home = path.resolve(homeDirectory);
