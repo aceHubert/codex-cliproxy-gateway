@@ -21,6 +21,7 @@ test("changelog prepends each release once", () => {
 test("changelog starts at the first commit when the repository has no tags", () => {
   assert.deepEqual(changelogArgs("abc123"), [
     "bunx",
+    "--no-install",
     "lerna-changelog",
     "--next-version-from-metadata",
     "--from=abc123",
