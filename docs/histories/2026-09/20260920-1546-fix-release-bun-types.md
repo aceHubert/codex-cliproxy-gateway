@@ -16,7 +16,7 @@
 **Key Actions:**
 - **[类型依赖]**: 显式固定 `@types/node@26.4.1`，避免 `bun-types@1.4.2` 的 `@types/node: "*"` 在发布环境解析到不兼容的 22.x 类型包。
 - **[发布链路]**: `lerna-changelog` 改用 `bunx --no-install` 执行，禁止 changelog 阶段隐式安装或重算依赖，防止发布提交意外漂移 `bun.lock`。
-- **[PR 质量门]**: 新增 `Release check` workflow；PR 指向 `main` 时先执行 `bun ci` 与完整 `release:check`，避免类型或构建问题等到 merge 后的 Deploy 才暴露。
+- **[PR 质量门]**: 新增 `Release check` workflow；PR 指向 `main` 时先执行 `bun ci` 与 Deploy 等价的跳测 `release:check`，提前拦截类型与打包错误。Linux runner 无法执行依赖 macOS/本机状态的安装类用例，因此不在 PR workflow 中强制全量测试。
 - **[回归测试]**: 更新 changelog 参数测试，锁定 `--no-install` 行为。
 
 ### 🧠 Design Intent (Why)
@@ -26,13 +26,13 @@
 > 数据来自本次任务相关代码变更，不含本历史记录。
 
 - **Files changed:** 5
-- **Insertions:** +42
+- **Insertions:** +43
 - **Deletions:** -3
 
 | File | +Added | -Removed |
 | --- | ---: | ---: |
 | `bun.lock` | +7 | -2 |
-| `.github/workflows/release-check.yml` | +31 | -0 |
+| `.github/workflows/release-check.yml` | +32 | -0 |
 | `package.json` | +1 | -0 |
 | `scripts/changelog.ts` | +2 | -1 |
 | `test/changelog.test.ts` | +1 | -0 |
@@ -50,5 +50,5 @@
 - `bun test test/changelog.test.ts`
 - `bun run check`（460 个测试全部通过，并完成 UI / CLI 构建）
 - `CODEX_CLIPROXY_SKIP_TESTS=1 bun run release:check`
-- `bun run release:check`（PR workflow 的完整检查路径）
+- `CODEX_CLIPROXY_SKIP_TESTS=1 bun run release:check`（PR workflow 与 Deploy 的检查路径）
 - `git diff --check`

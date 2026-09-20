@@ -17,8 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # PR 阶段执行完整 typecheck + test + build，不允许发布脚本跳过测试。
-      CODEX_CLIPROXY_SKIP_TESTS: "0"
+      # Linux runner 无法执行依赖 macOS/本机状态的安装类用例；
+      # 与 Deploy 的 preversion 保持一致，提前拦截 typecheck 与打包错误。
+      CODEX_CLIPROXY_SKIP_TESTS: "1"
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions/setup-node@v7.0.0
