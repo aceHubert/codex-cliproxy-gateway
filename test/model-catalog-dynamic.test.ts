@@ -211,6 +211,11 @@ test("missing or invalid CPA catalog falls back to the official catalog", async 
     const upstreamOnlyCodex = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
     assert.deepEqual(await upstreamOnlyCodex.json(), { models: [{ slug: "gpt-official" }] });
 
+    fs.writeFileSync(catalogPath, JSON.stringify({ models: [] }));
+    const empty = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
+    assert.equal(empty.status, 200);
+    assert.deepEqual(await empty.json(), { models: [{ slug: "gpt-official" }] });
+
     fs.writeFileSync(catalogPath, "{invalid\n");
     const split = createGatewayHandler({ ...baseConfig, upstreamOnly: false }, "test-key", "invalid");
     const invalid = await split(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
@@ -306,8 +311,10 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
   }));
   fs.writeFileSync(paths.configToml, 'model = "gpt-native"\n');
   const clientVersions: string[] = [];
+  let fetchCount = 0;
   globalThis.fetch = (async (url: string | URL | Request) => {
     const target = String(url);
+    fetchCount += 1;
     clientVersions.push(new URL(target).searchParams.get("client_version") ?? "");
     // models.json 下载（releases URL）返回空覆盖表；其余按 CLIProxy catalog 应答。
     if (target.includes("releases/latest/download/models.json")) {
@@ -348,11 +355,19 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
       (model: { slug: string }) => model.slug,
     ), ["proxy-model"]);
 
-    // upstream-only 模式要求非空选择；"pass" 不再是特殊值，按普通模型 ID 解析报未知。
-    await assert.rejects(
-      runCli(["models", "--sync", "--upstream-only", "--select", "none"]),
-      /Select at least one CLIProxy model/,
+    // 显式空选择在读取上游目录前短路：不访问 CPA，也不再让 Codex 加载空静态目录。
+    const fetchesBeforeNone = fetchCount;
+    await runCli(["models", "--sync", "--upstream-only", "--select", "none"]);
+    assert.equal(fetchCount, fetchesBeforeNone, "--select none 不得访问上游目录");
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")).models, []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).selectedModels, []);
+    assert.equal(
+      readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"),
+      undefined,
+      "空选择不写 model_catalog_json，让 Codex 回退官方目录",
     );
+    assert.match(auditEntries(), /selectedModels: \["proxy-model"\] -> \[\]/);
+    assert.match(auditEntries(), /model_catalog_json \(config\.toml\): .+ -> null/);
     await assert.rejects(
       runCli(["models", "--sync", "--upstream-only", "--select", "pass"]),
       /Unknown model ID: pass/,

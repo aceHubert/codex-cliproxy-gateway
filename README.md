@@ -108,7 +108,9 @@ codex-cliproxy models --sync --select "gpt-*"
 ```
 
 模型 ID 以当前上游列表为准；`*` 匹配任意字符，`?` 匹配单个字符，
-通配符没有命中时按空选择处理。`--select none` 可清空第三方上游选择。
+通配符没有命中时按空选择处理。`--select none` 会直接清空第三方上游选择，
+并在拉取目录前短路，不访问 CPA 或 new-api 的 `/models`；在仅上游模式下
+也不写入空的 `model_catalog_json`，让 Codex 回退官方模型目录。
 
 如需使用维护者提供的模型元数据文件，可在安装或同步时添加：
 
