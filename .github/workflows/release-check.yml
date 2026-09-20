@@ -1,0 +1,31 @@
+name: Release check
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # PR 阶段执行完整 typecheck + test + build，不允许发布脚本跳过测试。
+      CODEX_CLIPROXY_SKIP_TESTS: "0"
+    steps:
+      - uses: actions/checkout@v6.0.2
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2.2.0
+        with:
+          bun-version: "1.3.5"
+      - run: bun ci
+      - run: bun run release:check

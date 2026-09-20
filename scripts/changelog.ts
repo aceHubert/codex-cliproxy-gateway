@@ -21,7 +21,8 @@ function hasReachableTag(): boolean {
 }
 
 export function changelogArgs(firstCommit?: string): string[] {
-  const args = ["bunx", "lerna-changelog", "--next-version-from-metadata"];
+  // 发布流程只允许使用已安装依赖，避免 bunx 隐式安装导致 bun.lock 漂移。
+  const args = ["bunx", "--no-install", "lerna-changelog", "--next-version-from-metadata"];
   return firstCommit ? [...args, `--from=${firstCommit}`] : args;
 }
 
