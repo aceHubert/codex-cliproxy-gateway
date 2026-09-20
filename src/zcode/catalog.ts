@@ -8,21 +8,19 @@ import type { ModelCatalog } from "../types.ts";
 import type { ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
 
 const MODEL_IDS = vendorModels["z.ai"].map((model) => model.name);
-/** 对外统一命名空间：api-key 自定义 provider 沿用裸 zcode/ 前缀，保持既有行为。 */
+/** 旧版单 API Key 命名空间；新版多 Key 目录不再生成该前缀。 */
 const ZCODE_PREFIX = "zcode/";
-/** 套餐作用域前缀与 ZcodeSelection.kind 一一对应；模型在套餐间重叠时会话靠这段选套餐。 */
-const PLAN_PREFIXES: Record<ZcodeSelection["kind"], string> = {
+/** 套餐作用域前缀；API Key 因可有多个 provider，前缀由 provider ID 动态生成。 */
+const PLAN_PREFIXES: Partial<Record<ZcodeSelection["kind"], string>> = {
   "individual-coding-plan": "zcode-individual-coding-plan/",
   "team-coding-plan": "zcode-team-coding-plan/",
   "start-plan": "zcode-start-plan/",
-  "api-key": ZCODE_PREFIX,
 };
 /** 显示名后缀与 ZCode 客户端模型选择器的套餐分组（个人/团队/免费）一致。 */
-const PLAN_DISPLAY_SUFFIXES: Record<ZcodeSelection["kind"], string> = {
+const PLAN_DISPLAY_SUFFIXES: Partial<Record<ZcodeSelection["kind"], string>> = {
   "individual-coding-plan": " (ZCode个人)",
   "team-coding-plan": " (ZCode团队)",
   "start-plan": " (ZCode免费)",
-  "api-key": " (ZCode)",
 };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -35,9 +33,22 @@ export function zcodeModelPlan(model: string): ZcodeSelection["kind"] | undefine
   if (!isZcodeModel(model)) return undefined;
   const id = model.toLowerCase();
   for (const [kind, prefix] of Object.entries(PLAN_PREFIXES) as [ZcodeSelection["kind"], string][]) {
-    if (kind !== "api-key" && id.startsWith(prefix)) return kind;
+    if (id.startsWith(prefix)) return kind;
   }
-  return id.startsWith(ZCODE_PREFIX) ? "api-key" : undefined;
+  return id.startsWith(ZCODE_PREFIX) || /^zcode-[^/]+\//.test(id) ? "api-key" : undefined;
+}
+
+export function zcodeAPIProviderPrefix(providerID: string): string {
+  return `zcode-${encodeURIComponent(providerID)}/`;
+}
+
+/** 从 `zcode-<providerId>/model` 提取 provider ID；URL 编码用于容忍特殊 ID。 */
+export function zcodeAPIProviderIDFromModel(model: string): string | undefined {
+  if (zcodeModelPlan(model) !== "api-key") return undefined;
+  const match = /^zcode-([^/]+)\//i.exec(model);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]!); }
+  catch { return undefined; }
 }
 
 /** 目录使用厂商规范名称，上游使用当前套餐配置中的原始模型拼写。 */
@@ -45,7 +56,13 @@ export function zcodeUpstreamModel(model: string, snapshot: ZcodeProviderSnapsho
   const plan = zcodeModelPlan(model);
   // 套餐段必须与快照的连接形态一致：会话选了哪个套餐，就只能用该套餐的模型拼写。
   if (!plan || plan !== snapshot.plan) return;
-  const id = model.slice(PLAN_PREFIXES[plan].length).toLowerCase();
+  const prefix = plan === "api-key"
+    ? model.toLowerCase().startsWith(zcodeAPIProviderPrefix(snapshot.providerID))
+      ? zcodeAPIProviderPrefix(snapshot.providerID)
+      : ZCODE_PREFIX
+    : PLAN_PREFIXES[plan]!;
+  if (!model.toLowerCase().startsWith(prefix.toLowerCase())) return;
+  const id = model.slice(prefix.length).toLowerCase();
   if (!id) return;
   if (!MODEL_IDS.some((candidate) => candidate.toLowerCase() === id)) return;
   return snapshot.modelIds.find((candidate) => candidate.toLowerCase() === id);
@@ -83,7 +100,13 @@ export function buildZcodeVendorCatalog(overrideFile?: string): ModelCatalog {
 
 /** /models 只按快照套餐的支持集合筛选并加套餐作用域前缀，不重新合成厂商元数据。 */
 export function createZcodeCatalog(snapshot: ZcodeProviderSnapshot, cached: ModelCatalog): ModelCatalog {
-  return createZcodeCatalogForModels(snapshot.modelIds, cached, snapshot.plan);
+  return createZcodeCatalogForModels(
+    snapshot.modelIds,
+    cached,
+    snapshot.plan,
+    snapshot.plan === "api-key" ? snapshot.providerID : undefined,
+    snapshot.providerName,
+  );
 }
 
 /** 按套餐支持集合（或多个套餐/entitlement 的能力并集）合成带套餐作用域前缀的目录。 */
@@ -91,12 +114,22 @@ export function createZcodeCatalogForModels(
   modelIds: readonly string[],
   cached: ModelCatalog,
   plan: ZcodeSelection["kind"] = "api-key",
+  apiProviderID?: string,
+  apiProviderName?: string,
 ): ModelCatalog {
   const supported = new Set(modelIds.map((model) => model.toLowerCase()));
+  const prefix = plan === "api-key" && apiProviderID
+    ? zcodeAPIProviderPrefix(apiProviderID)
+    : PLAN_PREFIXES[plan] ?? ZCODE_PREFIX;
+  const suffix = plan === "api-key" && apiProviderID
+    ? `（ZCode ${apiProviderName ?? apiProviderID}）`
+    : PLAN_DISPLAY_SUFFIXES[plan] ?? " (ZCode)";
   return { models: cached.models.filter((entry) => supported.has(entry.slug.toLowerCase())).map((entry) => ({
     ...entry,
-    slug: `${PLAN_PREFIXES[plan]}${entry.slug}`,
-    display_name: `${(entry.display_name ?? entry.slug).replace(/ \(ZCode\)$/, "")}${PLAN_DISPLAY_SUFFIXES[plan]}`,
+    slug: `${prefix}${entry.slug}`,
+    display_name: `${(entry.display_name ?? entry.slug)
+      .replace(/ \(ZCode[^)]*\)$/, "")
+      .replace(/（ZCode[^）]*）$/, "")}${suffix}`,
   })) };
 }
 

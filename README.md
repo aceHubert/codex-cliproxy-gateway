@@ -173,6 +173,7 @@ codex-cliproxy config --log off
 | `--max-log-size SIZE` | 主日志大小上限，支持 `512KB`、`10MB`、`1M`；`0` 表示不限。 |
 | `--zcode on\|off` | 开关 ZCode 模型，默认关闭。 |
 | `--codebuddy on\|off` | 开关 CodeBuddy/WorkBuddy 模型，默认关闭。 |
+| `--codebuddy-region auto\|cn\|intl` | 选择 CodeBuddy/WorkBuddy 模型目录的刷新地域，默认 `auto`。 |
 
 参数可以组合使用。CLI 配置写入仅支持 macOS：已安装后台服务时自动重启网关，
 没有后台服务时仅保存配置，需自行重启前台进程。
@@ -209,9 +210,17 @@ codex-cliproxy config --zcode off
 
 ```bash
 codex-cliproxy config --codebuddy on
+codex-cliproxy config --codebuddy-region cn
 ```
 
-在 Codex 中选择 `codebuddy/` 或 `workbuddy/` 开头的模型，
+模型列表的显示名会带 CN/INTL 地域标识和 C/W 产品标识；C 表示 CodeBuddy CLI，
+W 表示 WorkBuddy。选择对应条目后，网关会按该条目路由到对应地域登录；
+缺少该地域凭据时直接报错，不会回退到另一个地域。
+
+`--codebuddy-region` 只控制模型目录刷新使用哪个地域的登录：`cn` 和 `intl`
+固定对应地域，指定地域暂无凭据时回退 `auto`；`auto` 使用最近刷新的登录。
+切换该配置并重启网关后，Codex 中的模型列表会随目录刷新更新。
+
 实际列表取决于当前登录的产品和账号权限。网关不会代为登录或刷新登录凭据；
 提示凭据过期或即将过期时，请回到对应客户端重新登录。
 

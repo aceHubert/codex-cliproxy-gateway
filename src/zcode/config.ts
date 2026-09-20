@@ -21,6 +21,8 @@ export interface ZcodeSelection {
 export interface ZcodeProviderSnapshot {
   family: ZcodeFamily;
   providerID: string;
+  /** provider_config 的显示名；仅用于目录展示，不参与鉴权。 */
+  providerName?: string;
   /** 该快照所属的套餐连接形态；决定对外 slug 作用域、显示名与鉴权头差异。 */
   plan: ZcodeSelection["kind"];
   apiKey: string;
@@ -39,11 +41,10 @@ export interface ZcodeCacheDependencies {
   now?: () => number;
   fetch?: typeof fetch;
   env?: NodeJS.ProcessEnv;
-  /**
-   * 固定解析某个套餐槽位（个人/团队/Start Plan/api-key），缺省跟随 ZCode 客户端
-   * 当前渠道的选择。套餐槽位从两个渠道的连接形态汇总而来，当前渠道优先。
-   */
+  /** 固定解析某个套餐槽位（个人/团队/Start Plan/api-key），缺省跟随当前选择。 */
   plan?: ZcodeSelection["kind"];
+  /** 固定 API Key provider；plan 为 api-key 时用于区分多个官方 Key。 */
+  apiProviderID?: string;
   /** 只统计实际业务 Key 的构建，不接收或暴露密钥。 */
   onCredentialBuild?: () => void;
   /** 用于验证差分检查只在需要时读取 provider 配置。 */
@@ -100,6 +101,11 @@ function baseURL(value: unknown): string {
   }
   return url.href.replace(/\/+$/, "");
 }
+const OFFICIAL_API_BASE_URLS: Record<ZcodeFamily, readonly string[]> = {
+  zai: ["https://api.z.ai/api/anthropic", "https://api.z.ai/api/anthropic/v1"],
+  bigmodel: ["https://open.bigmodel.cn/api/anthropic", "https://open.bigmodel.cn/api/anthropic/v1"],
+};
+const RESERVED_API_PROVIDER_IDS = new Set(["individual-coding-plan", "team-coding-plan", "start-plan"]);
 function isPlan(selection: ZcodeSelection): boolean {
   return selection.kind !== "api-key";
 }
@@ -164,7 +170,17 @@ function hasOAuthCredential(credentials: Record<string, unknown>, family: ZcodeF
  * 优先，条目缺失或形状非法时回退该渠道的 legacy `modelProviderFamilySelectedKeys`。
  * `scope` 只用于报错文案：当前渠道沿用「当前渠道」，另一渠道写明渠道名。
  */
-function familySelection(setting: Record<string, unknown>, family: ZcodeFamily, scope: string): ZcodeSelection {
+function familySelection(
+  setting: Record<string, unknown>,
+  family: ZcodeFamily,
+  scope: string,
+  officialAPIKeyProviderID?: () => string | undefined,
+): ZcodeSelection {
+  const officialAPISelection = (): ZcodeSelection => {
+    const providerID = officialAPIKeyProviderID?.();
+    if (providerID) return { family, kind: "api-key", providerID };
+    invalid(`ZCode ${scope}未找到可用的官方 API Key provider`);
+  };
   const entry = connectionSelection(setting, family);
   if (entry) {
     const kind = entry.kind;
@@ -173,6 +189,11 @@ function familySelection(setting: Record<string, unknown>, family: ZcodeFamily, 
       return { family, kind, providerID: `builtin:${family}-coding-plan`, team: teamContext(entry) };
     }
     if (kind === "start-plan") return { family, kind, providerID: `builtin:${family}-start-plan` };
+    if (kind === "api-key") {
+      // 新版 ZCode 可能把 API Key 也表达为连接形态，但条目本身不携带 provider ID；
+      // 此时从 provider_config 中按官方模板或官方 baseURL 定位。
+      return officialAPISelection();
+    }
     // 条目存在且 kind 已解析，说明用户做了真实的新选择；回退会静默跟随冻结的旧渠道。
     invalid(`ZCode ${scope}的选择类型 "${kind}" 暂不被网关支持，请在 ZCode 中切换到 Coding Plan 或 Start Plan`);
   }
@@ -180,7 +201,11 @@ function familySelection(setting: Record<string, unknown>, family: ZcodeFamily, 
   if (typeof selected !== "string" || selected.indexOf(":") < 1) invalid(`ZCode ${scope}缺少有效 provider 选择`);
   const providerID = selected.slice(selected.indexOf(":") + 1);
   if (!providerID) invalid(`ZCode ${scope}的 provider ID 为空`);
-  return { family, kind: legacyKind(family, providerID), providerID };
+  const kind = legacyKind(family, providerID);
+  // 仅官方 API Key 的 builtin:zai / builtin:bigmodel 已被 ZCode 忽略；它们只反映
+  // 手工修改过的陈旧磁盘状态。Coding Plan / Start Plan 的 builtin 套餐镜像不受影响。
+  if (kind === "api-key" && providerID === `builtin:${family}`) return officialAPISelection();
+  return { family, kind, providerID };
 }
 
 export interface ZcodePlanSelections {
@@ -196,26 +221,144 @@ const PLAN_UNAVAILABLE: Record<ZcodeSelection["kind"], string> = {
   "individual-coding-plan": "没有可用的个人 Coding Plan 连接，请在 ZCode 中连接个人套餐",
   "team-coding-plan": "没有可用的团队 Coding Plan 连接，请在 ZCode 中连接团队套餐",
   "start-plan": "没有可用的 Start Plan 连接，请在 ZCode 中连接后重试",
-  "api-key": "ZCode 当前渠道未选择自定义 provider",
+  "api-key": "ZCode 当前渠道未找到可用的官方 API Key provider",
 };
 
 /**
  * 按套餐槽位汇总两个渠道的连接形态（当前渠道优先），供网关把多个套餐同时暴露给
- * 会话级路由。api-key 只跟随当前渠道的自定义 provider 选择；单个渠道解析失败只
- * 影响该渠道能提供的槽位，不拖垮另一个渠道。
+ * 会话级路由。api-key 优先跟随当前渠道的显式 provider 选择，缺失时按官方
+ * baseURL 从 provider_config 定位；单个渠道解析失败只影响该渠道能提供的槽位。
  */
-function readZcodePlanSelections(home: string): ZcodePlanSelections {
+interface ZcodeAPIProviderRoute {
+  providerID: string;
+  providerName?: string;
+  apiKey: string;
+  baseURL: string;
+  modelIds: readonly string[];
+  officialTemplate: boolean;
+}
+
+function providerConfigRules(value: Record<string, unknown>): Record<string, unknown>[] {
+  const config = record(value.config) ? value.config : undefined;
+  const rulesConfig = config && record(config.providerConfigRules) ? config.providerConfigRules : undefined;
+  const rules = rulesConfig && Array.isArray(rulesConfig.providerRules) ? rulesConfig.providerRules : undefined;
+  return rules?.filter(record) ?? [];
+}
+
+function providerModelIds(config: Record<string, unknown> | undefined): readonly string[] {
+  const models = modelIds(config?.modelOrder);
+  return models.length ? models : modelIds(config?.personalModelIds);
+}
+
+function officialAPIProviderRoute(rule: Record<string, unknown>, family: ZcodeFamily): ZcodeAPIProviderRoute | undefined {
+  if (rule.enabled === false) return undefined;
+  const providerID = typeof rule.providerId === "string" ? rule.providerId.trim() : "";
+  const rawProviderName = typeof rule.providerName === "string" ? rule.providerName.trim() : "";
+  // 显示名只做目录标签；形状不可展示时回退 provider ID，不让请求凭据失效。
+  const providerName = rawProviderName && rawProviderName.length <= 128 && !/[\x00-\x1f\x7f]/.test(rawProviderName)
+    ? rawProviderName
+    : undefined;
+  const config = record(rule.config) ? rule.config : undefined;
+  const access = config && record(config.access) ? config.access : undefined;
+  const apiKey = access?.apiKey;
+  if (!providerID || typeof apiKey !== "string" || !apiKey || /[^\x21-\x7e]/.test(apiKey)) return undefined;
+
+  const officialTemplateID = `${family}-api`;
+  if (rule.templateId === officialTemplateID) {
+    return { providerID, ...(providerName ? { providerName } : {}), apiKey, baseURL: OFFICIAL_API_BASE_URLS[family][0]!,
+      modelIds: providerModelIds(config), officialTemplate: true };
+  }
+
+  const api = config && record(config.api) ? config.api : undefined;
+  if (api?.type !== "anthropic-messages" || typeof api.baseUrl !== "string") return undefined;
+  let url: string;
+  try { url = baseURL(api.baseUrl); }
+  catch { return undefined; }
+  if (!OFFICIAL_API_BASE_URLS[family].includes(url)) return undefined;
+  return { providerID, ...(providerName ? { providerName } : {}), apiKey, baseURL: url,
+    modelIds: providerModelIds(config), officialTemplate: false };
+}
+
+function officialAPIKeyProviderID(value: Record<string, unknown>, family: ZcodeFamily): string | undefined {
+  const routes = providerConfigRules(value).flatMap((rule) => {
+    const route = officialAPIProviderRoute(rule, family);
+    return route ? [route] : [];
+  });
+  return (routes.find((route) => route.officialTemplate) ?? routes[0])?.providerID;
+}
+
+export interface ZcodeAPIKeyProvider {
+  family: ZcodeFamily;
+  providerID: string;
+  providerName?: string;
+}
+
+/** 列出 provider_config 中全部可用官方 API Key，供目录为每个 Key 建独立路由。 */
+export function readZcodeAPIKeyProviders(homeDirectory: string): ZcodeAPIKeyProvider[] {
+  const home = path.resolve(homeDirectory);
+  const providerConfig = readOptionalPreferred(home, "provider_config.json");
+  const orderConfig = record(providerConfig.config) ? providerConfig.config : undefined;
+  const order = orderConfig && Array.isArray(orderConfig.providerOrder)
+    ? orderConfig.providerOrder.filter((id): id is string => typeof id === "string")
+    : [];
+  const rank = new Map(order.map((id, index) => [id, index]));
+  const providers = (["zai", "bigmodel"] as const).flatMap((family) =>
+    providerConfigRules(providerConfig).flatMap((rule) => {
+      const route = officialAPIProviderRoute(rule, family);
+      return route ? [{ family, ...route }] : [];
+    }));
+  const seen = new Set<string>();
+  const result = providers.filter((provider) => {
+    const identity = provider.providerID.toLowerCase();
+    if (RESERVED_API_PROVIDER_IDS.has(identity)) {
+      invalid(`ZCode 官方 API Key provider ID "${provider.providerID}" 与套餐前缀冲突`);
+    }
+    if (seen.has(identity)) {
+      invalid(`ZCode provider_config 中官方 API Key provider ID重复: ${provider.providerID}`);
+    }
+    seen.add(identity);
+    return true;
+  }).map(({ family, providerID, providerName }) => ({ family, providerID, ...(providerName ? { providerName } : {}) }));
+  return result.sort((a, b) => (rank.get(a.providerID) ?? order.length) - (rank.get(b.providerID) ?? order.length)
+    || a.providerID.localeCompare(b.providerID));
+}
+
+function readAPIKeyRoute(home: string, selection: ZcodeSelection): Omit<ZcodeProviderSnapshot, "expiresAt"> {
+  const providerConfig = readPreferred(home, "provider_config.json");
+  const route = providerConfigRules(providerConfig)
+    .map((rule) => officialAPIProviderRoute(rule, selection.family))
+    .find((candidate) => candidate?.providerID === selection.providerID);
+  if (!route) invalid("找不到 ZCode provider_config 中当前可用的官方 API Key provider");
+  return {
+    family: selection.family,
+    providerID: route.providerID,
+    plan: "api-key",
+    ...(route.providerName ? { providerName: route.providerName } : {}),
+    apiKey: route.apiKey,
+    baseURL: route.baseURL,
+    modelIds: route.modelIds,
+  };
+}
+
+function readZcodePlanSelections(home: string, requestedPlan?: ZcodeSelection["kind"]): ZcodePlanSelections {
   const setting = readPreferred(home, "setting.json");
   const domain = setting.providerFamilyDomain;
   if (domain !== "zai" && domain !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
   const plans: ZcodePlanSelections["plans"] = {};
   const failures: ZcodePlanSelections["failures"] = {};
+  let providerConfig: Record<string, unknown> | undefined;
+  const readProviderConfig = (): Record<string, unknown> => providerConfig ??= readOptionalPreferred(home, "provider_config.json");
   const other = domain === "zai" ? "bigmodel" : "zai";
   // 文件缺失只撤销 OAuth 套餐槽位；损坏或权限问题仍需明确报错，不能静默降级。
   const credentials = readOptionalPreferred(home, "credentials.json");
   for (const family of [domain, other] as const) {
     try {
-      const selection = familySelection(setting, family, family === domain ? "当前渠道" : `${family} 渠道`);
+      const selection = familySelection(
+        setting,
+        family,
+        family === domain ? "当前渠道" : `${family} 渠道`,
+        () => officialAPIKeyProviderID(readProviderConfig(), family),
+      );
       if (selection.kind === "api-key") {
         if (family === domain) plans["api-key"] ??= selection;
       } else if (hasOAuthCredential(credentials, family)) {
@@ -228,17 +371,35 @@ function readZcodePlanSelections(home: string): ZcodePlanSelections {
   // Start Plan 不依赖连接形态：账号态 OAuth 即可鉴权，资格由 billing/balance 判定、
   // 上游最终拒绝；槽位兜底指向当前渠道的 start-plan provider，让免费档始终可选。
   plans["start-plan"] ??= { family: domain, kind: "start-plan", providerID: `builtin:${domain}-start-plan` };
+  // API Key 只读 provider_config；即使当前渠道正在使用套餐，也允许会话级路由
+  // 主动选择官方 API Key 槽位。
+  if (requestedPlan === "api-key" && !plans["api-key"]) {
+    const providerID = officialAPIKeyProviderID(readProviderConfig(), domain);
+    if (providerID) plans["api-key"] = { family: domain, kind: "api-key", providerID };
+  }
   return { domain, plans, failures };
 }
 
-function readSelection(home: string, plan?: ZcodeSelection["kind"]): ZcodeSelection {
+function readAPIKeySelection(home: string, providerID: string): ZcodeSelection {
+  const provider = readZcodeAPIKeyProviders(home).find((candidate) => candidate.providerID === providerID);
+  if (!provider) invalid(`找不到 ZCode provider_config 中官方 API Key provider ${providerID}`);
+  return { family: provider.family, kind: "api-key", providerID };
+}
+
+function readSelection(home: string, plan?: ZcodeSelection["kind"], apiProviderID?: string): ZcodeSelection {
+  if (plan === "api-key" && apiProviderID) return readAPIKeySelection(home, apiProviderID);
   if (plan === undefined) {
     const setting = readPreferred(home, "setting.json");
     const family = setting.providerFamilyDomain;
     if (family !== "zai" && family !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
-    return familySelection(setting, family, "当前渠道");
+    return familySelection(
+      setting,
+      family,
+      "当前渠道",
+      () => officialAPIKeyProviderID(readPreferred(home, "provider_config.json"), family),
+    );
   }
-  const { domain, plans, failures } = readZcodePlanSelections(home);
+  const { domain, plans, failures } = readZcodePlanSelections(home, plan);
   const selection = plans[plan];
   if (selection) return selection;
   // 槽位缺失时优先透出当前渠道的解析根因（如未知 kind），比笼统的缺连接提示更可
@@ -248,8 +409,11 @@ function readSelection(home: string, plan?: ZcodeSelection["kind"]): ZcodeSelect
 }
 /** models 的字典键才是上游 ID；显示名和其他元数据不参与路由投影。 */
 function modelIds(value: unknown): readonly string[] {
-  if (!record(value)) return Object.freeze([]);
-  const ids = Object.keys(value).map((id) => id.trim()).filter(Boolean).sort((a, b) => {
+  // 新版 ZCode 会把 models 写成数组；旧版是模型 ID 到元数据的对象。
+  const values = Array.isArray(value)
+    ? value.filter((id): id is string => typeof id === "string")
+    : record(value) ? Object.keys(value) : [];
+  const ids = values.map((id) => id.trim()).filter(Boolean).sort((a, b) => {
     const lowerA = a.toLowerCase();
     const lowerB = b.toLowerCase();
     // 同一 ID 的不同拼写也稳定排序，避免字典插入顺序改变所选拼写。
@@ -265,6 +429,7 @@ function modelIds(value: unknown): readonly string[] {
 }
 function readRoute(home: string, selection: ZcodeSelection): Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string } {
   const { family, providerID, kind: plan } = selection;
+  if (selection.kind === "api-key") return readAPIKeyRoute(home, selection);
   const config = readPreferred(home, "config.json");
   const provider = record(config.provider) && Object.hasOwn(config.provider, providerID) ? config.provider[providerID] : undefined;
   if (!record(provider) || !record(provider.options)) invalid("找不到 ZCode 当前 provider 的 options");
@@ -299,20 +464,23 @@ function expiresAt(apiKey: string): number | undefined {
 }
 
 /**
- * 本机 ZCode 配置是否就绪：setting.json（渠道/provider 选择）与 config.json
- * （provider 路由）都存在才算可用——两者缺一，缓存取快照时必然报错。只做
- * 存在性探测，不读文件内容；home 与 v2 两种布局各自按 readPreferred 的回退顺序判定。
+ * 本机 ZCode 配置是否就绪：setting.json 与 config.json/provider_config.json 至少
+ * 一组可用路由都存在才算可用。只做存在性探测，不读文件内容；home 与 v2 两种布局
+ * 各自按 readPreferred 的回退顺序判定。
  */
 export function zcodeConfigPresent(homeDirectory: string): boolean {
   const home = path.resolve(homeDirectory);
   const locations = (name: string) => [path.join(home, name), path.join(home, "v2", name)];
-  return ["setting.json", "config.json"].every((name) => locations(name).some((file) => fs.existsSync(file)));
+  return locations("setting.json").some((file) => fs.existsSync(file))
+    && ["config.json", "provider_config.json"]
+    .some((name) => locations(name).some((file) => fs.existsSync(file)));
 }
 
 /** 文件检查同步完成，凭证仅按 Key 的实际变化构建；事件不废弃有效快照。 */
 export function createZcodeConfigCache(homeDirectory: string, dependencies: ZcodeCacheDependencies = {}): ZcodeConfigCache {
   const home = path.resolve(homeDirectory);
   const plan = dependencies.plan;
+  const apiProviderID = dependencies.apiProviderID;
   const now = dependencies.now ?? Date.now;
   const watch = dependencies.watch ?? fs.watch;
   const stat = dependencies.stat ?? fs.statSync;
@@ -325,7 +493,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   }
   for (const directory of [home, path.join(home, "v2")]) {
     const entries = names.get(directory) ?? new Set<string>();
-    for (const file of ["setting.json", "config.json", "credentials.json"]) entries.add(file);
+    for (const file of ["setting.json", "config.json", "provider_config.json", "credentials.json"]) entries.add(file);
     names.set(directory, entries);
   }
   const directories = [...names.keys()].sort((a, b) => a.length - b.length);
@@ -335,7 +503,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let credential: { apiKey: string; expiresAt?: number } | undefined;
   let failure: ZcodeConfigError | undefined;
   let closed = false;
-  const dirtyFiles = new Set<string>(["setting.json", "config.json", "credentials.json"]);
+  const dirtyFiles = new Set<string>(["setting.json", "config.json", "provider_config.json", "credentials.json"]);
   let selection: ZcodeSelection | undefined;
   let route: (Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string }) | undefined;
   let routeFailure: ZcodeConfigError | undefined;
@@ -389,7 +557,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     }
     if (file === "setting.json" && selection) {
       try {
-        const next = readSelection(home, plan);
+        const next = readSelection(home, plan, apiProviderID);
         if (selectionIdentity(next) !== selectionIdentity(selection)) {
           credentialGeneration++;
           resolving = undefined;
@@ -407,7 +575,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       }
     }
     if (file) dirtyFiles.add(file);
-    else for (const name of ["setting.json", "config.json", "credentials.json"]) dirtyFiles.add(name);
+    else for (const name of ["setting.json", "config.json", "provider_config.json", "credentials.json"]) dirtyFiles.add(name);
     firstEventAt ??= now();
     clearTimeout(debounce);
     debounce = setTimeout(check, Math.max(0, Math.min(100, 500 - (now() - firstEventAt))));
@@ -431,7 +599,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       const watcher = watch(directory, { persistent: false }, (_event, filename) => {
         const name = filename?.toString();
         if (name === undefined || names.get(directory)!.has(name)) {
-          markDirty(name && ["setting.json", "config.json", "credentials.json"].includes(name) ? name : undefined);
+          markDirty(name && ["setting.json", "config.json", "provider_config.json", "credentials.json"].includes(name) ? name : undefined);
         }
       });
       const entry = { watcher, identity, closing: false };
@@ -471,9 +639,11 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     catch { stop("无法持续监听 ZCode 配置，请检查权限并重启网关"); return; }
     try {
       let selectionChanged = false;
-      if (!selection || changed.has("setting.json") || (isPlan(selection) && changed.has("credentials.json"))) {
+      if (!selection || changed.has("setting.json") || (isPlan(selection) && changed.has("credentials.json"))
+        // API Key 槽位可能由官方 baseURL 扫描得到，provider 镜像变化也要重新选路。
+        || (selection.kind === "api-key" && changed.has("provider_config.json"))) {
         let next: ZcodeSelection;
-        try { next = readSelection(home, plan); }
+        try { next = readSelection(home, plan, apiProviderID); }
         catch (error) {
           const hadSelection = selection !== undefined;
           selection = undefined;
@@ -561,7 +731,8 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           /* 无账号身份（旧安装）仍保留 config 镜像里的独立业务 Key。 */
         }
       } else if (selectionChanged) oauthProjection = undefined;
-      if (selectionChanged || changed.has("config.json") || oauthChanged || (!route && !routeFailure)) {
+      if (selectionChanged || changed.has("config.json") || changed.has("provider_config.json") || oauthChanged
+        || (!route && !routeFailure)) {
         dependencies.onConfigRead?.();
         try { route = readRoute(home, selection); routeFailure = undefined; }
         catch (error) {
@@ -658,11 +829,13 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       }
       if (!snapshot || snapshot.family !== next.family || snapshot.providerID !== next.providerID
         || snapshot.plan !== next.plan
+        || snapshot.providerName !== next.providerName
         || snapshot.apiKey !== routeApiKey || snapshot.baseURL !== next.baseURL
         || snapshot.modelIds.length !== next.modelIds.length
         || snapshot.modelIds.some((id, index) => id !== next.modelIds[index])) {
         snapshot = Object.freeze({ family: next.family, providerID: next.providerID, plan: next.plan, apiKey: routeApiKey,
           baseURL: next.baseURL, modelIds: next.modelIds,
+          ...(next.providerName ? { providerName: next.providerName } : {}),
           ...(currentCredential.expiresAt === undefined ? {} : { expiresAt: currentCredential.expiresAt }) });
       }
       failure = undefined;
@@ -684,7 +857,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     // 第一个到期请求执行共享重读；同值过期之后只等待文件事件。
     if (expiryCheckedKey !== snapshot.apiKey) {
       expiryCheckedKey = snapshot.apiKey;
-      dirtyFiles.add("config.json");
+      dirtyFiles.add(selection?.kind === "api-key" ? "provider_config.json" : "config.json");
       if (selection?.kind === "team-coding-plan") {
         dirtyFiles.add("credentials.json");
         teamForceRefresh = true;

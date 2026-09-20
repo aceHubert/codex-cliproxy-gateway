@@ -10,6 +10,8 @@ import {
   isZcodeModel,
   mergeZcodeCatalog,
   writeZcodeServedCatalog,
+  zcodeAPIProviderIDFromModel,
+  zcodeAPIProviderPrefix,
   zcodeModelPlan,
   zcodeUpstreamModel,
 } from "../src/zcode/catalog.ts";
@@ -80,7 +82,7 @@ test("ZCode 对外目录按当前套餐落盘，内容不变时不重复写盘",
     const vendor = buildZcodeVendorCatalog();
     const coding = createZcodeCatalog(snapshot("zai", [IDS[0]]), vendor);
     assert.equal(writeZcodeServedCatalog(file, coding), true);
-    assert.deepEqual(read(file).models.map((model) => model.slug), [`zcode/${IDS[0]}`]);
+    assert.deepEqual(read(file).models.map((model) => model.slug), [`zcode-zai-test/${IDS[0]}`]);
     assert.ok(read(file).content_hash);
 
     // 固定旧时间，避免依赖文件系统时间分辨率或测试 sleep。
@@ -92,7 +94,7 @@ test("ZCode 对外目录按当前套餐落盘，内容不变时不重复写盘",
     // 套餐切换后目录文件随之收敛，不再包含旧套餐模型。
     const start = createZcodeCatalog(snapshot("zai", [IDS[1]]), vendor);
     assert.equal(writeZcodeServedCatalog(file, start), true);
-    assert.deepEqual(read(file).models.map((model) => model.slug), [`zcode/${IDS[1]}`]);
+    assert.deepEqual(read(file).models.map((model) => model.slug), [`zcode-zai-test/${IDS[1]}`]);
   });
 });
 
@@ -106,13 +108,13 @@ test("ZCode 配置失效时对外目录落空，不留旧套餐模型", { timeou
   });
 });
 
-test("两种渠道复用同一厂商目录，统一 zcode/ 前缀且套餐只取大小写无关交集", { timeout: 60_000 }, () => {
+test("两种渠道复用同一厂商目录，API Key 按 provider 前缀且大小写无关交集", { timeout: 60_000 }, () => {
   fixture(() => {
     const vendor = buildZcodeVendorCatalog();
     const zai = createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase(), "test-unsupported-id"]), vendor);
     const bigmodel = createZcodeCatalog(snapshot("bigmodel", [IDS[1].toUpperCase()]), vendor);
-    assert.deepEqual(zai.models.map((entry) => entry.slug), [`zcode/${IDS[0]}`]);
-    assert.deepEqual(bigmodel.models.map((entry) => entry.slug), [`zcode/${IDS[1]}`]);
+    assert.deepEqual(zai.models.map((entry) => entry.slug), [`zcode-zai-test/${IDS[0]}`]);
+    assert.deepEqual(bigmodel.models.map((entry) => entry.slug), [`zcode-bigmodel-test/${IDS[1]}`]);
     assert.equal(zai.models[0]!.context_window, vendor.models[0]!.context_window);
     assert.equal(bigmodel.models[0]!.context_window, vendor.models[1]!.context_window);
     assert.deepEqual(vendor.models.map((entry) => entry.slug), IDS, "厂商目录不因套餐变化被改写");
@@ -126,23 +128,23 @@ test("ZCode 套餐筛选使用 slug 不使用 entry.name 或显示别名", { tim
     const vendor = buildZcodeVendorCatalog();
     const renamed = { models: vendor.models.map((entry) => ({ ...entry, name: "test-display-alias", display_name: "另一个显示名" })) };
     assert.equal(createZcodeCatalog(snapshot("zai", ["test-display-alias"]), renamed).models.length, 0);
-    assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase()]), renamed).models[0]!.slug, `zcode/${IDS[0]}`);
+    assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase()]), renamed).models[0]!.slug, `zcode-zai-test/${IDS[0]}`);
   });
 });
 
 test("ZCode 上游模型保留配置原始拼写，旧厂商前缀与套餐外模型均拒绝", { timeout: 60_000 }, () => {
   const original = IDS[0].toUpperCase();
   const selected = snapshot("zai", [original, "test-unsupported-id"]);
-  assert.equal(zcodeUpstreamModel(`zcode/${IDS[0]}`, selected), original);
-  assert.equal(zcodeUpstreamModel(`ZCODE/${original}`, selected), original);
+  assert.equal(zcodeUpstreamModel(`zcode-zai-test/${IDS[0]}`, selected), original);
+  assert.equal(zcodeUpstreamModel(`ZCODE-ZAI-TEST/${original}`, selected), original);
   assert.equal(zcodeUpstreamModel(`z.ai/${IDS[0]}`, selected), undefined);
   assert.equal(zcodeUpstreamModel(`bigmodel/${IDS[0]}`, selected), undefined);
-  assert.equal(zcodeUpstreamModel("zcode/test-unsupported-id", selected), undefined);
-  assert.equal(zcodeUpstreamModel(`zcode/${IDS[1]}`, selected), undefined);
-  assert.equal(zcodeUpstreamModel(`cliproxy/zcode/${IDS[0]}`, selected), undefined);
+  assert.equal(zcodeUpstreamModel("zcode-zai-test/test-unsupported-id", selected), undefined);
+  assert.equal(zcodeUpstreamModel(`zcode-zai-test/${IDS[1]}`, selected), undefined);
+  assert.equal(zcodeUpstreamModel(`cliproxy/zcode-zai-test/${IDS[0]}`, selected), undefined);
   assert.equal(zcodeUpstreamModel(IDS[0], selected), undefined);
   // 渠道由套餐快照决定，统一命名空间下两种渠道都能解析同一模型。
-  assert.equal(zcodeUpstreamModel(`zcode/${IDS[0]}`, snapshot("bigmodel", [original])), original);
+  assert.equal(zcodeUpstreamModel(`zcode-bigmodel-test/${IDS[0]}`, snapshot("bigmodel", [original])), original);
 });
 
 test("套餐段必须与快照连接形态一致：会话只能用所选套餐的模型拼写", { timeout: 60_000 }, () => {
@@ -150,7 +152,7 @@ test("套餐段必须与快照连接形态一致：会话只能用所选套餐�
   const start = snapshot("zai", [original], "start-plan");
   assert.equal(zcodeUpstreamModel(`zcode-start-plan/${IDS[0]}`, start), original);
   // 套餐段与快照不符（个人/团队/自定义/免费互串）一律拒绝。
-  assert.equal(zcodeUpstreamModel(`zcode/${IDS[0]}`, start), undefined);
+  assert.equal(zcodeUpstreamModel(`zcode-zai-test/${IDS[0]}`, start), undefined);
   assert.equal(zcodeUpstreamModel(`zcode-individual-coding-plan/${IDS[0]}`, start), undefined);
   assert.equal(zcodeUpstreamModel(`zcode-start-plan/${IDS[0]}`, snapshot("zai", [original])), undefined);
   assert.equal(zcodeUpstreamModel(`zcode-start-plan/${IDS[0]}`, snapshot("zai", [original], "individual-coding-plan")), undefined);
@@ -158,15 +160,15 @@ test("套餐段必须与快照连接形态一致：会话只能用所选套餐�
   assert.equal(zcodeUpstreamModel(`zcode-individual-coding-plan/${IDS[0]}`, snapshot("zai", [original], "individual-coding-plan")), original);
 });
 
-test("对外模型 ID 解析套餐作用域，未声明的 zcode- 段不属于任何套餐", () => {
+test("对外模型 ID 解析套餐作用域，API Key 段解析 provider ID", () => {
   assert.equal(zcodeModelPlan(`zcode/${IDS[0]}`), "api-key");
   assert.equal(zcodeModelPlan(`ZCODE-START-PLAN/${IDS[0]}`), "start-plan");
   assert.equal(zcodeModelPlan(`zcode-individual-coding-plan/${IDS[0]}`), "individual-coding-plan");
   assert.equal(zcodeModelPlan(`zcode-team-coding-plan/${IDS[0]}`), "team-coding-plan");
-  assert.equal(zcodeModelPlan(`zcode-unknown-plan/${IDS[0]}`), undefined);
+  assert.equal(zcodeModelPlan(`zcode-zai-api/${IDS[0]}`), "api-key");
   assert.equal(zcodeModelPlan(`z.ai/${IDS[0]}`), undefined);
   assert.equal(zcodeModelPlan(IDS[0]), undefined);
-  // 命名空间判定同时覆盖裸前缀与套餐段，未声明的段仍进入网关后按 404 处理。
+  // 命名空间判定同时覆盖裸前缀、套餐段与 API provider 段。
   assert.equal(isZcodeModel(`zcode/${IDS[0]}`), true);
   assert.equal(isZcodeModel(`zcode-team-coding-plan/${IDS[0]}`), true);
   assert.equal(isZcodeModel(`zcode-unknown-plan/${IDS[0]}`), true);
@@ -184,12 +186,28 @@ test("目录按套餐作用域生成前缀与显示名分组", { timeout: 60_000
     assert.deepEqual(individual.models.map((entry) => entry.slug), [`zcode-individual-coding-plan/${IDS[0]}`]);
     assert.deepEqual(team.models.map((entry) => entry.slug), [`zcode-team-coding-plan/${IDS[0]}`]);
     assert.deepEqual(start.models.map((entry) => entry.slug), [`zcode-start-plan/${IDS[1]}`]);
-    assert.deepEqual(custom.models.map((entry) => entry.slug), [`zcode/${IDS[0]}`]);
+    assert.deepEqual(custom.models.map((entry) => entry.slug), [`zcode-zai-test/${IDS[0]}`]);
     assert.equal(individual.models[0]!.display_name, `GLM-5.3 (ZCode个人)`);
     assert.equal(team.models[0]!.display_name, `GLM-5.3 (ZCode团队)`);
     assert.equal(start.models[0]!.display_name, `GLM-5.3-Flash (ZCode免费)`);
-    assert.equal(custom.models[0]!.display_name, `GLM-5.3 (ZCode)`);
+    assert.equal(custom.models[0]!.display_name, `GLM-5.3（ZCode zai-test）`);
   });
+});
+
+test("多个 ZCode API Key 使用 providerId 前缀和 providerName 显示名", () => {
+  const vendor = buildZcodeVendorCatalog();
+  const named = { ...snapshot("zai", [IDS[0]], "api-key"), providerID: "zai-api", providerName: "工作 Key" };
+  const anonymous = { ...snapshot("zai", [IDS[1]], "api-key"), providerID: "custom-official" };
+  const namedCatalog = createZcodeCatalog(named, vendor);
+  const anonymousCatalog = createZcodeCatalog(anonymous, vendor);
+  assert.equal(namedCatalog.models[0]!.slug, `zcode-zai-api/${IDS[0]}`);
+  assert.equal(namedCatalog.models[0]!.display_name, `GLM-5.3（ZCode 工作 Key）`);
+  assert.equal(anonymousCatalog.models[0]!.slug, `zcode-custom-official/${IDS[1]}`);
+  assert.equal(anonymousCatalog.models[0]!.display_name, `GLM-5.3-Flash（ZCode custom-official）`);
+  assert.equal(zcodeAPIProviderPrefix("zai-api"), "zcode-zai-api/");
+  assert.equal(zcodeAPIProviderIDFromModel(`zcode-zai-api/${IDS[0]}`), "zai-api");
+  assert.equal(zcodeAPIProviderIDFromModel(`zcode-custom-official/${IDS[1]}`), "custom-official");
+  assert.equal(zcodeAPIProviderIDFromModel(`zcode-individual-coding-plan/${IDS[0]}`), undefined);
 });
 
 test("ZCode 合并只保留 zcode/ 顶层命名空间，上游厂商条目与 cliproxy/z.ai 原样保留", { timeout: 60_000 }, () => {
@@ -217,7 +235,8 @@ test("ZCode 对外目录不携带配置凭证", { timeout: 60_000 }, () => {
     const publicCatalog = createZcodeCatalog(selected, vendor);
     writeZcodeServedCatalog(file, publicCatalog);
     for (const contents of [fs.readFileSync(file, "utf8"), JSON.stringify(publicCatalog)]) {
-      for (const secret of [selected.apiKey, selected.providerID, selected.baseURL, String(selected.expiresAt),
+      // providerID/providerName 是用户要求的公开路由标识，不属于凭据。
+      for (const secret of [selected.apiKey, selected.baseURL, String(selected.expiresAt),
         "apiKey", "access_token", "refresh_token", "zcodejwttoken"]) {
         assert.equal(contents.includes(secret), false, `目录不能包含 ${secret}`);
       }
