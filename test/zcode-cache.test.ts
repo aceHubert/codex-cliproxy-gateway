@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
@@ -156,7 +157,7 @@ test("ZCode 到期同值 Key 共享一次重读且不延期，不随请求重复
   });
 });
 
-test("ZCode credentials 无关、同值、损坏或丢失不撤销业务 Key", { timeout: 60_000 }, async () => {
+test("ZCode credentials 无关或同值不撤销业务 Key，损坏失效，缺失回退镜像", { timeout: 60_000 }, async () => {
   await fixture(async (home) => {
     const mock = mockWatch();
     let builds = 0;
@@ -172,12 +173,16 @@ test("ZCode credentials 无关、同值、损坏或丢失不撤销业务 Key", {
       fs.writeFileSync(path.join(home, "credentials.json"), "broken");
       mock.change(home, "credentials.json");
       await sleep(130);
-      assert.equal(await cache.get(), original);
+      await assert.rejects(() => cache.get(), ZcodeConfigError);
       fs.unlinkSync(path.join(home, "credentials.json"));
       mock.change(home, "credentials.json");
       await sleep(130);
-      assert.equal(await cache.get(), original);
-      assert.equal(builds, 1);
+      const restored = await cache.get();
+      assert.equal(restored.apiKey, original.apiKey);
+      assert.equal(restored.providerID, original.providerID);
+      assert.deepEqual(restored.modelIds, original.modelIds);
+      // 损坏时失效并释放凭据，删除文件后按镜像重新构建一次。
+      assert.equal(builds, 2);
     } finally { cache.close(); }
   });
 });
@@ -373,6 +378,8 @@ test("ZCode START 计划 credentials 仅当前渠道 token 变化重读 config",
     const cache = createZcodeConfigCache(home, { watch: mock.watch, onConfigRead() { reads++; }, onCredentialBuild() { builds++; } });
     try {
       const initial = await cache.get();
+      // 套餐服务鉴权走 zcodejwttoken（OAuth 换出的 biz JWT），不是 OAuth access token。
+      assert.equal(initial.apiKey, "test-session");
       for (let i = 0; i < 3; i++) {
         json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-access", zcodejwttoken: "test-session",
           "oauth:bigmodel:access_token": `test-other-${i}`, user_info: { changed: i }, "oauth:active_provider": i });
@@ -381,23 +388,23 @@ test("ZCode START 计划 credentials 仅当前渠道 token 变化重读 config",
         assert.equal(await cache.get(), initial);
       }
       assert.equal(reads, 1);
-      json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-changed", zcodejwttoken: "test-session" });
+      json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-access", zcodejwttoken: "test-changed" });
       mock.change(home, "credentials.json");
       await sleep(130);
       assert.equal(reads, 2);
-      assert.equal(builds, 1);
-      assert.equal(await cache.get(), initial);
-      json(path.join(home, "v2/credentials.json"), { "oauth:zai:access_token": "test-fallback" });
+      assert.equal(builds, 2);
+      assert.equal((await cache.get()).apiKey, "test-changed");
+      json(path.join(home, "v2/credentials.json"), { zcodejwttoken: "test-fallback" });
       fs.writeFileSync(path.join(home, "credentials.json"), "broken");
       mock.change(home, "credentials.json");
       await sleep(130);
       assert.equal(reads, 2);
-      assert.equal(await cache.get(), initial);
+      await assert.rejects(cache.get(), ZcodeConfigError);
       fs.unlinkSync(path.join(home, "credentials.json"));
       mock.change(home, "credentials.json");
       await sleep(130);
       assert.equal(reads, 3);
-      assert.equal(await cache.get(), initial);
+      assert.equal((await cache.get()).apiKey, "test-fallback");
     } finally { cache.close(); }
   });
 });
@@ -440,5 +447,625 @@ test("ZCode models 使用字典键稳定去重排序，变化仅发布路由快�
       }
       assert.equal(builds, 1);
     } finally { cache.close(); }
+  });
+});
+
+/** ZCode 3.12.3 起切换套餐只写 providerFamilyConnectionSelections[family].kind。 */
+function connectionSettings(kind: string | null, family: "zai" | "bigmodel" = "zai", extra: Record<string, unknown> = {}) {
+  const setting: Record<string, unknown> = { providerFamilyDomain: family, ...extra };
+  if (kind !== null && !Object.hasOwn(setting, "providerFamilyConnectionSelections")) {
+    setting.providerFamilyConnectionSelections = {
+      [family]: kind === "team-coding-plan"
+        ? { kind, productId: "product-cache", organizationId: "organization-cache", projectId: "project-cache" }
+        : { kind },
+    };
+  }
+  return setting;
+}
+function planConfig(family: "zai" | "bigmodel" = "zai") {
+  const url = family === "bigmodel" ? URL_B : URL_A;
+  const startKey = jwt(Math.floor(Date.now() / 1000) + 3600);
+  return { provider: {
+    [`builtin:${family}-coding-plan`]: { options: { apiKey: "test-coding-key", baseURL: url }, models: { "glm-5": {} } },
+    [`builtin:${family}-start-plan`]: { options: { apiKey: startKey, baseURL: url }, models: { "glm-5": {} } },
+  } };
+}
+
+const TEAM_A = { productId: "product-a", organizationId: "organization-a", projectId: "project-a" };
+const TEAM_B = { productId: "product-b", organizationId: "organization-b", projectId: "project-b" };
+function teamSettings(team: { productId: string; organizationId: string; projectId: string }) {
+  return connectionSettings("team-coding-plan", "zai", {
+    providerFamilyConnectionSelections: { zai: { kind: "team-coding-plan", ...team } },
+  });
+}
+function bigmodelTeamSettings() {
+  return connectionSettings("team-coding-plan", "bigmodel", {
+    providerFamilyConnectionSelections: { bigmodel: { kind: "team-coding-plan", ...TEAM_A } },
+  });
+}
+function encryptedCredential(value: string): string {
+  const key = createHash("sha256").update("test-zcode-secret").digest();
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return `enc:v1:${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${ciphertext.toString("base64url")}`;
+}
+function teamCredentials(token = "test-team-oauth") {
+  return { "oauth:zai:access_token": token, zcodejwttoken: "test-zcode-jwt" };
+}
+function teamFetch(keys: Record<string, string>, calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = []): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    calls.push({ method: init?.method, url, headers, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+    const project = url.includes(TEAM_A.projectId) ? TEAM_A
+      : url.includes("project-cache") ? { ...TEAM_A, projectId: "project-cache" }
+      : TEAM_B;
+    const apiKey = keys[project.projectId];
+    if (url.endsWith("/api/biz/customer/getCustomerInfo")) {
+      return Response.json({ code: 0, data: { organizations: [...[TEAM_A, TEAM_B].map((team) => ({
+        organizationId: team.organizationId, projects: [{ projectId: team.projectId }],
+      })), { organizationId: "organization-cache", projects: [{ projectId: "project-cache" }] }] } });
+    }
+    if (/\/api_keys$/.test(url)) {
+      if (init?.method === "POST") return Response.json({ code: 0, data: { apiKey, keyType: 2, name: "zcode-team-api-key" } });
+      return Response.json({ code: 0, data: [{ apiKey, keyType: 2, name: "zcode-team-api-key" }] });
+    }
+    if (/\/api_keys\/copy\//.test(url)) return Response.json({ code: 0, data: { secretKey: `${apiKey}-secret` } });
+    throw new Error(`测试未模拟团队凭据接口: ${url}`);
+  }) as typeof fetch;
+}
+
+test("ZCode 3.12.3 connectionSelections 把已知 kind 归一化为 legacy providerID", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), connectionSettings("team-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), teamCredentials());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch: teamFetch({ "project-cache": "test-team-key" }) });
+    try {
+      for (const kind of ["individual-coding-plan", "team-coding-plan"] as const) {
+        json(path.join(home, "setting.json"), connectionSettings(kind));
+        mock.change(home, "setting.json");
+        await eventually(async () => {
+          const snapshot = await cache.get();
+          assert.equal(snapshot.family, "zai");
+          assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
+          assert.equal(snapshot.apiKey, kind === "individual-coding-plan" ? "test-coding-key" : "test-team-key.test-team-key-secret");
+        });
+      }
+      json(path.join(home, "setting.json"), connectionSettings("start-plan"));
+      mock.change(home, "setting.json");
+      await eventually(async () => {
+        const snapshot = await cache.get();
+        assert.equal(snapshot.providerID, "builtin:zai-start-plan");
+        assert.equal(snapshot.apiKey, "test-zcode-jwt");
+        assert.equal(snapshot.expiresAt, undefined);
+      });
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人套餐优先读取当前账号的加密缓存 Key", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const provider = "account:zai-individual-coding-plan";
+    const credentialKey = `account-provider:coding-plan:${provider}:account:user-cache-id:api-key`;
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), {
+      "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-cache-id", username: "user" })),
+      [credentialKey]: encryptedCredential("encrypted-personal-key"),
+    });
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "encrypted-personal-key");
+      json(path.join(home, "credentials.json"), {
+        "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-cache-id", username: "user" })),
+        [credentialKey]: encryptedCredential("rotated-personal-key"),
+      });
+      mock.change(home, "credentials.json");
+      await eventually(async () => assert.equal((await cache.get()).apiKey, "rotated-personal-key"));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 同渠道换账号后不沿用上一账号的个人 Key", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const provider = "account:zai-individual-coding-plan";
+    const accountA = `account-provider:coding-plan:${provider}:account:user-a:api-key`;
+    const accountB = `account-provider:coding-plan:${provider}:account:user-b:api-key`;
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "stale-mirror-key", baseURL: URL_A }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), {
+      "oauth:zai:access_token": "oauth-a",
+      "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-a" })),
+      [accountA]: encryptedCredential("key-a"),
+    });
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      plan: "individual-coding-plan",
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "key-a");
+      // 同一渠道切到账号 B，但 B 的 account-provider Key 尚未落盘：
+      // 必须失效，不能回退 config.json 里属于账号 A 的镜像 Key。
+      json(path.join(home, "credentials.json"), {
+        "oauth:zai:access_token": "oauth-b",
+        "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-b" })),
+      });
+      mock.change(home, "credentials.json");
+      await eventually(async () => {
+        await assert.rejects(() => cache.get(), /个人套餐凭据不可用/);
+      });
+      // 账号 B 的 Key 落盘后恢复。
+      json(path.join(home, "credentials.json"), {
+        "oauth:zai:access_token": "oauth-b",
+        "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-b" })),
+        [accountB]: encryptedCredential("key-b"),
+      });
+      mock.change(home, "credentials.json");
+      await eventually(async () => assert.equal((await cache.get()).apiKey, "key-b"));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人套餐识别 user_info.user_id 并读取对应账号 Key", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const provider = "account:zai-individual-coding-plan";
+    const key = `account-provider:coding-plan:${provider}:account:user-id-account:api-key`;
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), {
+      "oauth:zai:access_token": "oauth-current",
+      "oauth:zai:user_info": encryptedCredential(JSON.stringify({ user_id: "user-id-account", email: "user@example.com" })),
+      [key]: encryptedCredential("key-by-user-id"),
+    });
+    const cache = createZcodeConfigCache(home, {
+      watch: mockWatch().watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      plan: "individual-coding-plan",
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "key-by-user-id");
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人与团队项目切换使用相互隔离的当前凭据", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = [];
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), teamCredentials());
+    let builds = 0;
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      fetch: teamFetch({ "project-a": "team-a-key", "project-b": "team-b-key" }, calls),
+      onCredentialBuild() { builds++; },
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "test-coding-key");
+      for (const team of [TEAM_A, TEAM_B]) {
+        json(path.join(home, "setting.json"), teamSettings(team));
+        mock.change(home, "setting.json");
+        await eventually(async () => {
+          const snapshot = await cache.get();
+          assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
+          assert.equal(snapshot.apiKey, `${team.projectId === TEAM_A.projectId ? "team-a-key" : "team-b-key"}.team-${team.projectId === TEAM_A.projectId ? "a" : "b"}-key-secret`);
+        });
+      }
+      json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+      mock.change(home, "setting.json");
+      await eventually(async () => assert.equal((await cache.get()).apiKey, "test-coding-key"));
+      assert.equal(builds, 4);
+      assert.ok(calls.some((call) => call.url.includes(TEAM_A.organizationId) && call.url.includes(TEAM_A.projectId)));
+      assert.ok(calls.some((call) => call.url.includes(TEAM_B.organizationId) && call.url.includes(TEAM_B.projectId)));
+      assert.ok(calls.every((call) => !call.url.includes("product-a") && !call.url.includes("product-b")));
+      assert.ok(calls.filter((call) => call.url.includes(TEAM_B.projectId)).every((call) => call.headers.get("authorization") === "test-team-oauth"));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 团队字段缺失、凭据损坏或文件变化不会回退旧快照", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    let calls = 0;
+    const fetch: typeof globalThis.fetch = (async (...args: Parameters<typeof globalThis.fetch>) => {
+      calls++;
+      return teamFetch({ "project-a": "team-a-key" })(...args);
+    }) as typeof fetch;
+    json(path.join(home, "setting.json"), teamSettings(TEAM_A));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), teamCredentials());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch, env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" } });
+    try {
+      assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+      json(path.join(home, "credentials.json"), { ...teamCredentials(), audit: 1 });
+      mock.change(home, "credentials.json");
+      const callsAfterInitial = calls;
+      await eventually(async () => {
+        assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+        assert.ok(calls > callsAfterInitial);
+      });
+      json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "enc:v1:bad" });
+      mock.change(home, "credentials.json");
+      await eventually(async () => await assert.rejects(cache.get(), /团队凭据/));
+      json(path.join(home, "setting.json"), connectionSettings("team-coding-plan", "zai", {
+        providerFamilyConnectionSelections: { zai: { kind: "team-coding-plan", organizationId: "organization-a", projectId: "project-a" } },
+      }));
+      mock.change(home, "setting.json");
+      await eventually(async () => await assert.rejects(cache.get(), /productId/));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 团队套餐删除 credentials.json 后失效且恢复后重建 Key", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { authorization: string | null }[] = [];
+    const fetch: typeof globalThis.fetch = (async (...args: Parameters<typeof globalThis.fetch>) => {
+      calls.push({ authorization: new Headers(args[1]?.headers).get("authorization") });
+      return teamFetch({ "project-a": "team-a-key" })(...args);
+    }) as typeof fetch;
+    json(path.join(home, "setting.json"), teamSettings(TEAM_A));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), teamCredentials());
+    let builds = 0;
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      fetch,
+      onCredentialBuild() { builds++; },
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+      const callsAfterInitial = calls.length;
+      fs.unlinkSync(path.join(home, "credentials.json"));
+      mock.change(home, "credentials.json");
+      await assert.rejects(cache.get(), /团队凭据|credentials/);
+      assert.equal(calls.length, callsAfterInitial);
+      assert.equal(builds, 1);
+
+      json(path.join(home, "credentials.json"), teamCredentials("restored-team-oauth"));
+      mock.change(home, "credentials.json");
+      await eventually(async () => {
+        assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+        assert.ok(calls.length > callsAfterInitial);
+      });
+      assert.equal(builds, 2);
+      assert.ok(calls.slice(callsAfterInitial).every((call) => call.authorization === "restored-team-oauth"));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 团队凭据支持 enc:v1 并在项目 Key 缺失时按官方流程创建", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { method?: string; url: string; body?: unknown }[] = [];
+    json(path.join(home, "setting.json"), teamSettings(TEAM_A));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), { "oauth:zai:access_token": encryptedCredential("encrypted-team-oauth") });
+    const fetch: typeof globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ method: init?.method, url: String(input), ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+      const url = String(input);
+      if (/\/api_keys$/.test(url) && init?.method === "GET") return Response.json({ code: 0, data: [] });
+      return teamFetch({ "project-a": "created-team-key" })(input, init);
+    }) as typeof fetch;
+    const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch, env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" } });
+    try {
+      assert.equal((await cache.get()).apiKey, "created-team-key.created-team-key-secret");
+      const created = calls.find((call) => call.method === "POST");
+      assert.ok(created?.url.endsWith(`/api/biz/v1/organization/${TEAM_A.organizationId}/projects/${TEAM_A.projectId}/api_keys`));
+      assert.deepEqual(created?.body, { keyType: 2, name: "zcode-team-api-key" });
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode BigModel 团队读取实际 OAuth 键且忽略旧个人停用镜像", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const disabledConfig = planConfig("bigmodel");
+    const provider = disabledConfig.provider["builtin:bigmodel-coding-plan"]!;
+    Object.assign(provider, { enabled: false, systemDisabledReason: "oauth_provider_inactive" });
+    json(path.join(home, "setting.json"), bigmodelTeamSettings());
+    json(path.join(home, "config.json"), disabledConfig);
+    json(path.join(home, "credentials.json"), { "oauth:bigmodel:access_token": "bigmodel-team-oauth" });
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      fetch: teamFetch({ "project-a": "bigmodel-team-key" }),
+    });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.family, "bigmodel");
+      assert.equal(snapshot.providerID, "builtin:bigmodel-coding-plan");
+      assert.equal(snapshot.apiKey, "bigmodel-team-key.bigmodel-team-key-secret");
+      assert.deepEqual(snapshot.modelIds, ["glm-5"]);
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode Start Plan 忽略旧 Coding Plan 的停用镜像", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const disabledConfig = planConfig("zai");
+    const provider = disabledConfig.provider["builtin:zai-start-plan"]!;
+    Object.assign(provider, { enabled: false, systemDisabledReason: "coding_plan_not_entitled" });
+    json(path.join(home, "setting.json"), connectionSettings("start-plan"));
+    json(path.join(home, "config.json"), disabledConfig);
+    json(path.join(home, "credentials.json"), { zcodejwttoken: "current-start-jwt" });
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.family, "zai");
+      assert.equal(snapshot.providerID, "builtin:zai-start-plan");
+      assert.equal(snapshot.apiKey, "current-start-jwt");
+      assert.notEqual(snapshot.apiKey, disabledConfig.provider["builtin:zai-start-plan"]!.options.apiKey);
+      assert.deepEqual(snapshot.modelIds, ["glm-5"]);
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 全新安装只有 connectionSelections 时可选通并命中 config 镜像", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // 无任何 legacy 选择字段：只有 3.12.3 全新安装机器才会出现这个组合。
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan", "bigmodel"));
+    json(path.join(home, "config.json"), planConfig("bigmodel"));
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.family, "bigmodel");
+      assert.equal(snapshot.providerID, "builtin:bigmodel-coding-plan");
+      assert.equal(snapshot.apiKey, "test-coding-key");
+      assert.equal(snapshot.baseURL, URL_B);
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode connectionSelections 条目缺失或形状非法时回退 legacy 解析", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const id = "custom:account:provider";
+    const legacy = { providerFamilyDomain: "zai", modelProviderFamilySelectedKeys: { zai: `apikey:${id}` } };
+    const cases = [
+      // 迁移惰性持久化：升级后未重启、api-key 模式被迁移跳过、team 连接未解析，
+      // 三个窗口下磁盘只有 legacy 选择。
+      legacy,
+      { ...legacy, providerFamilyConnectionSelections: "garbage" },
+      { ...legacy, providerFamilyConnectionSelections: { zai: "garbage" } },
+      { ...legacy, providerFamilyConnectionSelections: { zai: { kind: 123 } } },
+      { ...legacy, providerFamilyConnectionSelections: { zai: { kind: "" } } },
+      { ...legacy, providerFamilyConnectionSelections: {} },
+      // 其他 family 的选择不干预当前渠道。
+      { ...legacy, providerFamilyConnectionSelections: { bigmodel: { kind: "individual-coding-plan" } } },
+    ];
+    for (const [index, broken] of cases.entries()) {
+      json(path.join(home, "setting.json"), broken);
+      json(path.join(home, "config.json"), { provider: { [id]: { options: { apiKey: `test-legacy-key-${index}`, baseURL: URL_A }, models: { "glm-5": {} } } } });
+      const cache = createZcodeConfigCache(home, { watch: mock.watch });
+      try {
+        const snapshot = await cache.get();
+        assert.equal(snapshot.providerID, id);
+        assert.equal(snapshot.apiKey, `test-legacy-key-${index}`);
+      } finally { cache.close(); }
+      fs.unlinkSync(path.join(home, "setting.json"));
+    }
+  });
+});
+
+test("ZCode connectionSelections 未知 kind 报错且不回退冻结的 legacy 选择", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // legacy 选择仍存在（升级安装），但条目里已是未知 kind 时必须报错而不是静默跟随旧渠道。
+    json(path.join(home, "setting.json"), { providerFamilyDomain: "zai",
+      modelProviderFamilySelectedKeys: { zai: "plan:builtin:zai-coding-plan" },
+      providerFamilyConnectionSelections: { zai: { kind: "future-plan" } } });
+    json(path.join(home, "config.json"), planConfig());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      await assert.rejects(cache.get(), (error: unknown) => {
+        assert.ok(error instanceof ZcodeConfigError);
+        assert.ok(error.message.includes("future-plan"));
+        return true;
+      });
+      json(path.join(home, "setting.json"), connectionSettings("another-unknown-kind"));
+      mock.change(home, "setting.json");
+      await eventually(async () => {
+        await assert.rejects(cache.get(), (error: unknown) => {
+          assert.ok(error instanceof ZcodeConfigError);
+          assert.ok(error.message.includes("another-unknown-kind"));
+          return true;
+        });
+      });
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 套餐槽位汇总两个渠道的连接，plan 缓存固定解析各自槽位", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // 模拟真实 3.14.0 磁盘：zai 连个人、bigmodel 连团队，两个渠道的连接并存。
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: {
+        zai: { kind: "individual-coding-plan" },
+        bigmodel: { kind: "team-coding-plan", productId: "product-a", organizationId: "organization-a", projectId: "project-a" },
+      },
+    });
+    json(path.join(home, "v2", "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "test-coding-key", baseURL: URL_A }, models: { "glm-5": {} } },
+      "builtin:bigmodel-coding-plan": { options: { apiKey: "", baseURL: URL_B }, models: { "glm-5": {} } },
+      "builtin:zai-start-plan": { options: { apiKey: "stale-mirror-jwt", baseURL: URL_A }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), {
+      "oauth:zai:access_token": "test-access",
+      "oauth:bigmodel:access_token": "test-team-oauth",
+      zcodejwttoken: "test-zcode-jwt",
+    });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    const team = createZcodeConfigCache(home, { watch: mock.watch, plan: "team-coding-plan", fetch: teamFetch({ "project-a": "test-team-key" }) });
+    const startPlan = createZcodeConfigCache(home, { watch: mock.watch, plan: "start-plan" });
+    const apiKey = createZcodeConfigCache(home, { watch: mock.watch, plan: "api-key" });
+    try {
+      assert.equal((await individual.get()).providerID, "builtin:zai-coding-plan");
+      assert.equal((await individual.get()).apiKey, "test-coding-key");
+      const teamSnapshot = await team.get();
+      assert.equal(teamSnapshot.family, "bigmodel");
+      assert.equal(teamSnapshot.providerID, "builtin:bigmodel-coding-plan");
+      assert.equal(teamSnapshot.plan, "team-coding-plan");
+      assert.equal(teamSnapshot.apiKey, "test-team-key.test-team-key-secret");
+      assert.equal((await startPlan.get()).providerID, "builtin:zai-start-plan");
+      assert.equal((await startPlan.get()).apiKey, "test-zcode-jwt");
+      assert.equal((await startPlan.get()).plan, "start-plan");
+      // api-key 槽位只跟随当前渠道：zai 连的是个人，没有自定义 provider 选择。
+      await assert.rejects(() => apiKey.get(), /未选择自定义 provider/);
+    } finally {
+      individual.close();
+      team.close();
+      startPlan.close();
+      apiKey.close();
+    }
+  });
+});
+
+test("ZCode 仅保留仍有 OAuth 凭证的套餐连接槽位", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // 3.14.0 切换渠道后 zai 的个人连接可能仍留在 setting.json，但账号实际只有
+    // bigmodel 团队凭证；无凭证的残留槽位不能继续暴露旧个人 Key。
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "bigmodel",
+      providerFamilyConnectionSelections: {
+        zai: { kind: "individual-coding-plan" },
+        bigmodel: { kind: "team-coding-plan", productId: "product-a", organizationId: "organization-a", projectId: "project-a" },
+      },
+    });
+    json(path.join(home, "v2", "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "stale-personal-key", baseURL: URL_A }, models: { "glm-5": {} } },
+      "builtin:bigmodel-coding-plan": { options: { apiKey: "", baseURL: URL_B }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), { "oauth:bigmodel:access_token": "bigmodel-team-oauth" });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    const team = createZcodeConfigCache(home, { watch: mock.watch, plan: "team-coding-plan", fetch: teamFetch({ "project-a": "test-team-key" }) });
+    try {
+      await assert.rejects(() => individual.get(), /没有可用的个人 Coding Plan 连接/);
+      const snapshot = await team.get();
+      assert.equal(snapshot.family, "bigmodel");
+      assert.equal(snapshot.apiKey, "test-team-key.test-team-key-secret");
+    } finally { individual.close(); team.close(); }
+  });
+});
+
+test("ZCode bigmodel 团队槽位不接受 zai 凭证回退", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    // 当前已切回 zai 个人，bigmodel 团队连接只是磁盘残留；此时仅有 oauth:zai
+    // 不能证明 bigmodel 团队仍已登录。
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: {
+        zai: { kind: "individual-coding-plan" },
+        bigmodel: { kind: "team-coding-plan", productId: "product-a", organizationId: "organization-a", projectId: "project-a" },
+      },
+    });
+    json(path.join(home, "v2", "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "zai-personal-key", baseURL: URL_A }, models: { "glm-5": {} } },
+      "builtin:bigmodel-coding-plan": { options: { apiKey: "", baseURL: URL_B }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "zai-personal-oauth" });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    const team = createZcodeConfigCache(home, { watch: mock.watch, plan: "team-coding-plan" });
+    try {
+      assert.equal((await individual.get()).family, "zai");
+      await assert.rejects(() => team.get(), /没有可用的团队 Coding Plan 连接/);
+    } finally { individual.close(); team.close(); }
+  });
+});
+
+test("ZCode 个人连接在对应渠道凭证恢复后重新可用", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), {});
+    const cache = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    try {
+      await assert.rejects(() => cache.get(), /没有可用的个人 Coding Plan 连接/);
+      json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "restored-oauth" });
+      mock.change(home, "credentials.json");
+      await eventually(async () => {
+        const snapshot = await cache.get();
+        assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
+        assert.equal(snapshot.apiKey, "test-coding-key");
+      });
+      json(path.join(home, "credentials.json"), {});
+      mock.change(home, "credentials.json");
+      await eventually(async () => {
+        await assert.rejects(() => cache.get(), /没有可用的个人 Coding Plan 连接/);
+      });
+    } finally { cache.close(); }
+  });
+});
+
+test("单个渠道解析失败只影响该渠道的套餐槽位", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: {
+        zai: { kind: "another-unknown-kind" },
+        bigmodel: { kind: "team-coding-plan", productId: "product-a", organizationId: "organization-a", projectId: "project-a" },
+      },
+    });
+    json(path.join(home, "v2", "config.json"), { provider: {
+      "builtin:bigmodel-coding-plan": { options: { apiKey: "", baseURL: URL_B }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), {
+      "oauth:bigmodel:access_token": "test-team-oauth", zcodejwttoken: "test-zcode-jwt",
+    });
+    const team = createZcodeConfigCache(home, { watch: mock.watch, plan: "team-coding-plan", fetch: teamFetch({ "project-a": "test-team-key" }) });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    try {
+      assert.equal((await team.get()).providerID, "builtin:bigmodel-coding-plan");
+      // 个人槽位缺失时，优先透出当前渠道的根因（未知 kind 携带原值）。
+      await assert.rejects(() => individual.get(), (error: unknown) => {
+        assert.ok(error instanceof ZcodeConfigError);
+        assert.match(error.message, /another-unknown-kind/);
+        return true;
+      });
+    } finally { team.close(); individual.close(); }
+  });
+});
+
+test("渠道连接形态变化时 plan 缓存重新解析槽位", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-access", zcodejwttoken: "test-access" });
+    const startPlan = createZcodeConfigCache(home, { watch: mock.watch, plan: "start-plan" });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    try {
+      assert.equal((await individual.get()).providerID, "builtin:zai-coding-plan");
+      // Start Plan 槽位不依赖连接形态：zai 连着个人时免费档依然可解析。
+      const initialStart = await startPlan.get();
+      assert.equal(initialStart.providerID, "builtin:zai-start-plan");
+      assert.equal(initialStart.apiKey, "test-access");
+      json(path.join(home, "setting.json"), connectionSettings("start-plan"));
+      mock.change(home, "setting.json");
+      // 个人槽位随连接形态消失；免费槽位不受影响，快照对象保持稳定。
+      await eventually(async () => {
+        await assert.rejects(() => individual.get(), /没有可用的个人 Coding Plan 连接/);
+      });
+      assert.equal(await startPlan.get(), initialStart);
+    } finally { startPlan.close(); individual.close(); }
   });
 });

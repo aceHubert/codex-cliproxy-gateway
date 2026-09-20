@@ -4,7 +4,7 @@ import { translateZcodeRequest, ZcodeRequestError } from "../src/zcode/request.t
 import { createZcodeResponse } from "../src/zcode/response.ts";
 import { encodeZcodeThinking } from "../src/zcode/wire.ts";
 
-const clientModel = "z.ai/GLM-5.3";
+const clientModel = "zcode/GLM-5.3";
 function translate(body: Record<string, unknown>) { return translateZcodeRequest({ model: clientModel, ...body }, "glm-5.3"); }
 
 test("完整保留 function 与 freeform 历史，并按 Anthropic 结构合并同轮调用", () => {
@@ -280,7 +280,7 @@ test("重复工具输出明确拒绝而不同调用输出保持顺序", () => {
 });
 
 test("忽略外部损坏及不同模型 reasoning 私有项并保留普通历史", () => {
-  const invalid = ["official-opaque", "zcode-thinking-v1:broken", undefined, encodeZcodeThinking("z.ai/other", [{ type: "thinking", thinking: "不可传", signature: "secret" }])];
+  const invalid = ["official-opaque", "zcode-thinking-v1:broken", undefined, encodeZcodeThinking("zcode/other", [{ type: "thinking", thinking: "不可传", signature: "secret" }])];
   for (const encrypted_content of invalid) {
     const result = translate({ input: [{ type: "reasoning", encrypted_content, summary: [{ type: "summary_text", text: "也不转发" }] }, { role: "user", content: "继续" }] });
     assert.deepEqual(result.body.messages, [{ role: "user", content: [{ type: "text", text: "继续" }] }]);

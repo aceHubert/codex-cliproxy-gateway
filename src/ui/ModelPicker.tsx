@@ -27,6 +27,12 @@ function normalizeModels(models: UpstreamModel[]): UpstreamModel[] {
   return normalized;
 }
 
+/** 拉取成功后按最新上游目录收敛选择：已下线或已隐藏的旧 ID 不再留在表单里。 */
+export function retainAvailableModelIds(selectedModels: string[], availableModels: UpstreamModel[]): string[] {
+  const available = new Set(normalizeModels(availableModels).map((model) => model.slug));
+  return uniqueModelIds(selectedModels).filter((slug) => available.has(slug));
+}
+
 export function ModelPicker({
   selectedModels,
   onChange,
@@ -89,6 +95,9 @@ export function ModelPicker({
       const nextModels = normalizeModels(result.models);
       const nextSlugs = new Set(nextModels.map((model) => model.slug));
       setAvailableModels(nextModels);
+      // 上游目录是当前可选模型的唯一事实来源：拉取成功时立即剔除已下线的旧选择，
+      // 与保存接口的过滤语义一致，避免界面继续展示无法保存的 ID。
+      onChange(retainAvailableModelIds(selectedModels, nextModels));
       setPendingModels((current) => current.filter((slug) =>
         nextSlugs.has(slug) && !selectedSet.has(slug)));
       setFetchPhase("idle");
@@ -102,7 +111,7 @@ export function ModelPicker({
       setFetchError(cause instanceof Error ? cause.message : String(cause));
       setFetchPhase("failed");
     });
-  }, [onAuthExpired, selectedSet]);
+  }, [onAuthExpired, onChange, selectedModels, selectedSet]);
 
   const openPanel = () => {
     if (disabled) return;

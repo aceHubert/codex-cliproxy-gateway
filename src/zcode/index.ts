@@ -2,8 +2,9 @@ import os from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
 import { createZcodeConfigCache, ZcodeConfigError } from "./config.ts";
-import type { ZcodeConfigCache } from "./config.ts";
-import { createZcodeCatalog, loadZcodeCatalogCache, zcodeModelFamily, zcodeUpstreamModel } from "./catalog.ts";
+import type { ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
+import { clearModelsCacheEntries, invalidateModelsCache } from "../catalog.ts";
+import { buildZcodeVendorCatalog, createZcodeCatalog, isZcodeModel, writeZcodeServedCatalog, zcodeModelPlan, zcodeUpstreamModel } from "./catalog.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
 import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
 import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
@@ -18,7 +19,10 @@ import type { GatewayConfig, ModelCatalog, ProcessLogTarget } from "../types.ts"
 
 export interface ZcodeDependencies {
   zcodeHome?: string;
+  /** 注入的自定义缓存绑定到 api-key（裸 zcode/）路由；其余套餐路由用 planCaches 覆盖。 */
   configCache?: ZcodeConfigCache;
+  /** 按套餐注入的缓存（测试用）；注入模式下未覆盖的套餐不创建真实缓存。 */
+  planCaches?: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>>;
   identity?: ZcodeIdentity;
   /** Codex 自己的目录缓存；zcode-catalog.json 重建时过期它，让 Codex 重新拉取 /models。 */
   codexModelsCacheFile?: string;
@@ -46,8 +50,9 @@ export function validateZcodeConfig(config: GatewayConfig): void {
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 ZCode 时网关只能监听环回地址");
   }
-  if (["z.ai/", "bigmodel/"].some((reserved) => config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved)))) {
-    throw new Error("启用 ZCode 时 z.ai/ 和 bigmodel/ 前缀保留给 ZCode，请调整第三方 prefix");
+  if (config.prefix && ("zcode/".startsWith(config.prefix) || config.prefix.startsWith("zcode/")
+    || config.prefix.startsWith("zcode-"))) {
+    throw new Error("启用 ZCode 时 zcode/ 与 zcode- 前缀保留给 ZCode，请调整第三方 prefix");
   }
 }
 
@@ -58,7 +63,88 @@ export function zcodeError(status: number, message: string, type = "invalid_requ
 export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDependencies = {}) {
   validateZcodeConfig(config);
   const enabled = zcodeEnabled(config);
-  const cache = enabled ? dependencies.configCache ?? createZcodeConfigCache(dependencies.zcodeHome ?? path.join(os.homedir(), ".zcode")) : undefined;
+  // 厂商全量目录只依赖构建期静态数据与可选覆盖规则，先建好再挂 watch 回调。
+  const vendorCatalog = enabled
+    ? buildZcodeVendorCatalog(path.join(path.dirname(config.catalogPath), "models.json"))
+    : undefined;
+  /** 套餐或选择变化时立即撤下 Codex 缓存里的旧 ZCode 条目，避免旧套餐模型继续可选。 */
+  const dropCachedZcodeModels = () => {
+    if (dependencies.codexModelsCacheFile) {
+      clearModelsCacheEntries(dependencies.codexModelsCacheFile, isZcodeModel);
+    }
+  };
+  const servedCatalogFile = path.join(path.dirname(config.catalogPath), "zcode-catalog.json");
+  /** 当前对外目录（各套餐作用域前缀的并集）。watch 或启动时重建，/v1/models 只读取这里。 */
+  let servedCatalog: ModelCatalog = { models: [] };
+  /** 已发布目录对应的各套餐快照；仅在身份变化时才重算，避免每次 /v1/models 重新求交集。 */
+  let publishedSnapshots: (ZcodeProviderSnapshot | undefined)[] | undefined;
+  /** 收敛 Codex 缓存：撤下已不在当前对外目录里的 ZCode 条目；返回是否发生了删除。 */
+  const pruneCodexCache = (catalog: ModelCatalog): boolean => {
+    if (!dependencies.codexModelsCacheFile) return false;
+    const current = new Set(catalog.models.map((model) => model.slug.toLowerCase()));
+    return clearModelsCacheEntries(
+      dependencies.codexModelsCacheFile,
+      (slug) => isZcodeModel(slug) && !current.has(slug.toLowerCase()),
+    );
+  };
+  const publishServedCatalog = (catalog: ModelCatalog) => {
+    servedCatalog = catalog;
+    const changed = writeZcodeServedCatalog(servedCatalogFile, catalog);
+    if (!changed || !dependencies.codexModelsCacheFile) return;
+    // 目录变化：既撤下已下线条目，也过期新鲜度让 Codex 主动重拉一次。
+    pruneCodexCache(catalog);
+    invalidateModelsCache(dependencies.codexModelsCacheFile);
+  };
+  /**
+   * 会话级套餐路由：模型 slug 的套餐段（zcode-<kind>/ 或裸 zcode/）决定快照、目录
+   * 与凭据来自哪条路由；每条路由一个独立配置缓存，key 的解析与上游调用本身不变。
+   * start-plan 暂不暴露：zcode-plan 中继在鉴权之外还要求阿里云 captcha（code 3007），
+   * 网关无法 headless 通过，暴露了也无法调用（见 docs/exec-plans/tech-debt-tracker.md）。
+   */
+  const planRoutes: { plan: ZcodeSelection["kind"]; cache?: ZcodeConfigCache; snapshot?: ZcodeProviderSnapshot }[] =
+    (["individual-coding-plan", "team-coding-plan", "api-key"] as const).map((plan) => ({ plan }));
+  const republishFromPlans = () => {
+    if (!vendorCatalog) return;
+    const current = planRoutes.map((route) => route.snapshot);
+    const previous = publishedSnapshots;
+    if (previous && current.length === previous.length
+      && current.every((snapshot, index) => snapshot === previous[index])) return;
+    publishedSnapshots = current;
+    // 各可用套餐目录的并集：单套餐失效只撤下自己的条目，其余套餐继续可选。
+    const models: ModelCatalog["models"] = [];
+    const seen = new Set<string>();
+    for (const route of planRoutes) {
+      if (!route.snapshot) continue;
+      for (const entry of createZcodeCatalog(route.snapshot, vendorCatalog).models) {
+        const slug = entry.slug.toLowerCase();
+        if (seen.has(slug)) continue;
+        seen.add(slug);
+        models.push(entry);
+      }
+    }
+    publishServedCatalog({ models });
+  };
+  if (enabled) {
+    const home = dependencies.zcodeHome ?? path.join(os.homedir(), ".zcode");
+    // 注入模式（测试）只为显式给出的套餐建缓存，避免读到真实的 ~/.zcode。
+    const injected: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>> | undefined = dependencies.planCaches
+      ?? (dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
+    for (const route of planRoutes) {
+      route.cache = injected?.[route.plan]
+        ?? (injected ? undefined : createZcodeConfigCache(home, {
+          plan: route.plan,
+          // 选择变化只撤下本套餐的快照并重发并集；另一个套餐的条目不受影响。
+          onSelectionChange: () => {
+            route.snapshot = undefined;
+            republishFromPlans();
+          },
+          onSnapshotChange: (snapshot) => {
+            route.snapshot = snapshot;
+            republishFromPlans();
+          },
+        }));
+    }
+  }
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const activeRequests = new Set<AbortController>();
   const identity = enabled ? dependencies.identity ?? readZcodeIdentity() : undefined;
@@ -75,35 +161,41 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     processLog: dependencies.processLog,
   } : undefined;
   let closed = false;
-  let vendorCatalog: ModelCatalog | undefined;
-  if (enabled) {
-    try {
-      const directory = path.dirname(config.catalogPath);
-      vendorCatalog = loadZcodeCatalogCache(
-        path.join(directory, "zcode-catalog.json"),
-        path.join(directory, "models.json"),
-        dependencies.codexModelsCacheFile,
-      );
-    } catch (error) {
-      cache?.close();
-      contexts.close();
-      throw error;
-    }
+  /** 启动首读：为每个套餐路由建立快照并写盘，随后完全由 watch 事件驱动。 */
+  if (enabled && vendorCatalog) {
+    void Promise.allSettled(planRoutes.map(async (route) => {
+      if (route.cache) route.snapshot = await route.cache.get();
+    })).then(() => {
+      if (closed) return;
+      // 所有套餐都失败且从未发布过目录：撤下上一次运行留在 Codex 缓存里的条目。
+      if (publishedSnapshots === undefined && !planRoutes.some((route) => route.snapshot)) dropCachedZcodeModels();
+      republishFromPlans();
+    });
   }
 
   return {
     async catalog(): Promise<ModelCatalog> {
-      if (!cache || closed) return { models: [] };
-      try {
-        return createZcodeCatalog(await cache.get(), vendorCatalog!);
-      } catch { return { models: [] }; }
+      if (closed || planRoutes.every((route) => !route.cache)) return { models: [] };
+      const neverPublished = publishedSnapshots === undefined;
+      // watch 是主驱动；注入的自定义缓存没有回调，这里按快照身份做一次廉价兜底。
+      await Promise.all(planRoutes.map(async (route) => {
+        if (!route.cache) return;
+        try { route.snapshot = await route.cache.get(); }
+        catch { route.snapshot = undefined; }
+      }));
+      // 所有套餐都失效且从未发布过目录时，撤下 Codex 缓存里的遗留 ZCode 条目。
+      if (neverPublished && !planRoutes.some((route) => route.snapshot)) dropCachedZcodeModels();
+      republishFromPlans();
+      return servedCatalog;
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
       const group = logGroupFromPath(incoming.pathname);
-      const family = zcodeModelFamily(input.model);
+      const zcode = isZcodeModel(input.model);
+      // 渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权与日志分流；模型 ID 不携带渠道。
+      let family: ZcodeFamily | undefined;
       let key = "";
       let upstreamUrl: string | undefined;
       let upstreamRequestHeaders: Headers | undefined;
@@ -136,7 +228,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         return value;
       };
       const log = (status: number, body: string, headers = new Headers(), logicalError?: string) => {
-        if (logged || !family) return;
+        if (logged || !zcode || !family) return;
         logged = true;
         const durationMs = Date.now() - start;
         const at = incoming.pathname + incoming.search;
@@ -163,7 +255,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         log(status, JSON.stringify({ error: { type, message: redact(message) } }), response.headers);
         return response;
       };
-      if (!cache || closed) return fail(503, "ZCode 未启用或网关已关闭", "configuration_error");
+      if (closed || planRoutes.every((route) => !route.cache)) return fail(503, "ZCode 未启用或网关已关闭", "configuration_error");
       const abort = new AbortController();
       const onAbort = () => abort.abort(request.signal.reason);
       let cleaned = false;
@@ -178,11 +270,16 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       try {
         if (request.signal.aborted) onAbort();
         abort.signal.throwIfAborted();
-        const snapshot = await cache.get();
+        // 会话级套餐选择：模型 slug 的套餐段决定走哪条路由；key 的解析与上游调用链路不变。
+        const requested = typeof input.model === "string" ? input.model : "";
+        const route = planRoutes.find((entry) => entry.plan === zcodeModelPlan(requested));
+        if (!route?.cache) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
+        const snapshot = await route.cache.get();
         key = snapshot.apiKey;
+        family = snapshot.family;
         abort.signal.throwIfAborted();
-        const model = typeof input.model === "string" ? zcodeUpstreamModel(input.model, snapshot) : undefined;
-        if (!family || family !== snapshot.family || !model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前选择的渠道或厂商目录"); }
+        const model = zcodeUpstreamModel(requested, snapshot);
+        if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
         const translated = translateZcodeRequest(input, model);
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
         const routedUrl = endpointRouting
@@ -310,7 +407,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     close(): void {
       if (closed) return;
       closed = true;
-      cache?.close();
+      for (const route of planRoutes) route.cache?.close();
       contexts.close();
       for (const request of activeRequests) request.abort();
       activeRequests.clear();

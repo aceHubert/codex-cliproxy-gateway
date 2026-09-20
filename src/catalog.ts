@@ -139,6 +139,36 @@ export function invalidateModelsCache(file: string): void {
   }, null, 2)}\n`);
 }
 
+/**
+ * 从 Codex 目录缓存中移除匹配条目，同时过期时间戳与版本。用于 provider 配置变化或
+ * 解析失败时立即撤下旧模型：只重置新鲜度会保留已下线条目，客户端仍可继续选择。
+ */
+export function clearModelsCacheEntries(file: string, matches: (slug: string) => boolean): boolean {
+  let current: Record<string, unknown> = { models: [] };
+  if (fs.existsSync(file)) {
+    try {
+      const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
+    } catch {}
+  }
+  const models = Array.isArray(current.models)
+    ? (current.models as unknown[]).filter((model) => {
+      const slug = model && typeof model === "object" && typeof (model as { slug?: unknown }).slug === "string"
+        ? (model as { slug: string }).slug
+        : "";
+      return !slug || !matches(slug);
+    })
+    : [];
+  if (Array.isArray(current.models) && models.length === current.models.length) return false;
+  atomicWrite(file, `${JSON.stringify({
+    ...current,
+    fetched_at: "2000-01-01T00:00:00Z",
+    client_version: "0.0.0",
+    models,
+  }, null, 2)}\n`);
+  return true;
+}
+
 export async function fetchCliProxyCatalog(
   baseUrl: string,
   apiKey: string,

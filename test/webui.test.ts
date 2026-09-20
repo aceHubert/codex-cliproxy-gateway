@@ -244,14 +244,31 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
     const response = await handler(authedRequest("/ui/api/config"));
     assert.equal(response.status, 200);
     const payload = await response.json() as {
-      editable: { zcode: boolean; maxRequestLogs: number; selectedModels: string[] };
-      readonly: { upstreamBaseUrl: string };
+      editable: { zcode: boolean; codebuddy: boolean; maxRequestLogs: number; selectedModels: string[] };
+      readonly: { upstreamBaseUrl: string; upstreamOnly: boolean; routerMode: string };
     };
     assert.equal(payload.editable.zcode, false);
+    assert.equal(payload.editable.codebuddy, false);
     assert.equal(payload.editable.maxRequestLogs, 0);
     // 模型选择已迁入可编辑分组（保存走 /ui/api/upstream/models，同步重建目录文件）。
     assert.deepEqual(payload.editable.selectedModels, ["glm-5.3", "kimi-k2"]);
     assert.equal(payload.readonly.upstreamBaseUrl, "http://127.0.0.1:8317/v1");
+    // 路由模式按 upstreamOnly 取反导出，不直接暴露布尔值。
+    assert.equal(payload.readonly.upstreamOnly, false);
+    assert.equal(payload.readonly.routerMode, "dynamic");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 的 routerMode 随 upstreamOnly 取反", async () => {
+  const { handler, home } = await makeFixture({ config: { upstreamOnly: true } });
+  try {
+    const payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      readonly: { upstreamOnly: boolean; routerMode: string };
+    };
+    assert.equal(payload.readonly.upstreamOnly, true);
+    assert.equal(payload.readonly.routerMode, "upstream-only");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -277,21 +294,63 @@ test("UI responses redact URL query strings that may carry tokens", async () => 
   }
 });
 
+test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据内容", async () => {
+  const fixture = await makeFixture();
+  const { paths, config, home, uiHtmlPath } = fixture;
+  // 探测路径显式注入到临时 home，绝不碰真机的 ~/.zcode 与认证目录。
+  const authDir = path.join(home, "auth");
+  fs.mkdirSync(authDir, { recursive: true });
+  const infoFile = path.join(authDir, "Tencent-Cloud.coding-copilot.info");
+  const handler = (request: Request) =>
+    handleWebUiRequest(request, config, {
+      paths,
+      uiHtmlPath,
+      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir },
+    }, config.port);
+  try {
+    const absent = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { zcode: boolean; codebuddy: boolean };
+    };
+    assert.equal(absent.detected.zcode, false, "无 ~/.zcode 时不显示 ZCode 开关");
+    assert.equal(absent.detected.codebuddy, false, "无 .info 时不显示 CodeBuddy 开关");
+
+    fs.mkdirSync(path.join(home, ".zcode"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".zcode", "setting.json"), "{}");
+    // .info 写入伪造凭据正文：探测不得读取或回显它。
+    fs.writeFileSync(infoFile, JSON.stringify({ auth: { accessToken: "ccp-secret-token" } }));
+    const present = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { zcode: boolean; codebuddy: boolean };
+    };
+    assert.equal(present.detected.zcode, false, "缺 config.json 时仍不算就绪");
+    assert.equal(present.detected.codebuddy, true, ".info 存在即视为已登录");
+
+    fs.writeFileSync(path.join(home, ".zcode", "config.json"), "{}");
+    const ready = await handler(authedRequest("/ui/api/config"));
+    const readyText = await ready.text();
+    assert.ok(!readyText.includes("ccp-secret-token"), "探测结果不得包含凭据内容");
+    const readyPayload = JSON.parse(readyText) as { detected: { zcode: boolean } };
+    assert.equal(readyPayload.detected.zcode, true, "两个配置文件齐备后算就绪");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("POST /ui/api/config applies supported fields, syncs state, and writes an audit entry", async () => {
   const { handler, paths, home } = await makeFixture();
   try {
     fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, pendingRestart: false, config: null }, null, 2)}\n`);
     const response = await handler(authedRequest("/ui/api/config", {
-      json: { zcode: true, maxRequestLogs: "5", maxGatewayLogBytes: "10MB" },
+      json: { zcode: true, codebuddy: true, maxRequestLogs: "5", maxGatewayLogBytes: "10MB" },
     }));
     assert.equal(response.status, 200);
     const payload = await response.json() as { restarting: boolean; applied: string[] };
     // 临时目录里没有 LaunchAgent，因此只写配置不触发重启调度。
     assert.equal(payload.restarting, false);
-    assert.deepEqual(payload.applied, ["zcode", "maxRequestLogs", "maxGatewayLogBytes"]);
+    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "maxRequestLogs", "maxGatewayLogBytes"]);
 
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, unknown>;
     assert.equal(saved.zcode, true);
+    assert.equal(saved.codebuddy, true);
     assert.equal(saved.maxRequestLogs, 5);
     assert.equal(saved.maxGatewayLogBytes, 10 * 1024 * 1024);
 
@@ -334,6 +393,7 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       { json: { maxRequestLogs: "-3" }, message: /non-negative integer/ },
       { json: { maxGatewayLogBytes: "abc" }, message: /byte size/ },
       { json: { zcode: "yes" }, message: /boolean/ },
+      { json: { codebuddy: "on" }, message: /boolean/ },
       { json: { upstreamBaseUrl: "http://evil" }, message: /Unsupported field/ },
       { json: {}, message: /no supported fields/ },
     ];
@@ -480,6 +540,15 @@ test("POST /ui/api/upstream/models requires a non-empty selection and keeps the 
     assert.match(emptyBody.error.message, /at least one/);
     assert.equal(upstream.requests.length, 0);
 
+    // 已选 ID 在上游全部消失时，过滤后的目录为空；upstream-only 仍拒绝保存。
+    const stale = await handler(authedRequest("/ui/api/upstream/models", {
+      json: { selectedModels: ["retired-upstream-model"] },
+    }));
+    assert.equal(stale.status, 400);
+    const staleBody = await stale.json() as { error: { message: string } };
+    assert.match(staleBody.error.message, /at least one/);
+    assert.equal(fs.existsSync(paths.catalogFile), false);
+
     const response = await handler(authedRequest("/ui/api/upstream/models", {
       json: { selectedModels: ["kimi-k2"] },
     }));
@@ -497,7 +566,7 @@ test("POST /ui/api/upstream/models requires a non-empty selection and keeps the 
   }
 });
 
-test("POST /ui/api/upstream/models rejects unknown model IDs and malformed payloads", async () => {
+test("POST /ui/api/upstream/models drops stale IDs and still rejects malformed payloads", async () => {
   const upstream = await startFakeUpstream((_request, response) => {
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ models: [
@@ -510,19 +579,17 @@ test("POST /ui/api/upstream/models rejects unknown model IDs and malformed paylo
     webUi: { upstreamDeps: { readKey: () => "test-secret-key" } },
   });
   try {
-    const unknown = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["glm-5.3", "no-such-model"] },
+    const filtered = await handler(authedRequest("/ui/api/upstream/models", {
+      json: { selectedModels: ["glm-5.3", "no-such-model", "hidden-model"] },
     }));
-    assert.equal(unknown.status, 400);
-    const unknownBody = await unknown.json() as { error: { message: string } };
-    assert.match(unknownBody.error.message, /Unknown model ID: no-such-model/);
-
-    const hidden = await handler(authedRequest("/ui/api/upstream/models", {
-      json: { selectedModels: ["glm-5.3", "hidden-model"] },
-    }));
-    assert.equal(hidden.status, 400);
-    assert.match(((await hidden.json()) as { error: { message: string } }).error.message, /Unknown model ID: hidden-model/);
-    assert.equal(fs.existsSync(paths.catalogFile), false);
+    assert.equal(filtered.status, 200);
+    const filteredBody = await filtered.json() as { selected: string[]; count: number };
+    assert.deepEqual(filteredBody.selected, ["glm-5.3"]);
+    assert.equal(filteredBody.count, 1);
+    const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")) as { models: Array<{ slug: string }> };
+    assert.deepEqual(catalog.models.map((model) => model.slug), ["glm-5.3"]);
+    const savedAfterFilter = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels?: string[] };
+    assert.deepEqual(savedAfterFilter.selectedModels, ["glm-5.3"]);
 
     const notArray = await handler(authedRequest("/ui/api/upstream/models", {
       json: { selectedModels: "glm-5.3" },
@@ -538,7 +605,7 @@ test("POST /ui/api/upstream/models rejects unknown model IDs and malformed paylo
 
     // 校验失败不写盘：config.json 的选择保持原样。
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels?: string[] };
-    assert.deepEqual(saved.selectedModels, ["glm-5.3", "kimi-k2"]);
+    assert.deepEqual(saved.selectedModels, ["glm-5.3"]);
   } finally {
     await upstream.close();
     fs.rmSync(home, { recursive: true, force: true });
@@ -868,7 +935,7 @@ test("ensureUiToken reuses an existing token and generates a fresh one when miss
 });
 
 test("POST /ui/api/config rejects combinations the restarted gateway would refuse to boot", async () => {
-  const { handler, paths, home } = await makeFixture({ config: { prefix: "z.ai/" } });
+  const { handler, paths, home } = await makeFixture({ config: { prefix: "zcode/" } });
   try {
     const before = fs.readFileSync(paths.gatewayConfig, "utf8");
     const response = await handler(authedRequest("/ui/api/config", { json: { zcode: true } }));
@@ -876,6 +943,20 @@ test("POST /ui/api/config rejects combinations the restarted gateway would refus
     const payload = await response.json() as { error: { message: string } };
     assert.match(payload.error.message, /前缀保留给 ZCode/);
     // 校验失败不写盘：原配置逐字节保留，运行中的服务不受影响。
+    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("POST /ui/api/config rejects codebuddy prefix conflicts before writing", async () => {
+  const { handler, paths, home } = await makeFixture({ config: { prefix: "workbuddy/" } });
+  try {
+    const before = fs.readFileSync(paths.gatewayConfig, "utf8");
+    const response = await handler(authedRequest("/ui/api/config", { json: { codebuddy: true } }));
+    assert.equal(response.status, 400);
+    const payload = await response.json() as { error: { message: string } };
+    assert.match(payload.error.message, /前缀保留给 CodeBuddy\/WorkBuddy/);
     assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });

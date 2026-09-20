@@ -4,6 +4,7 @@ import { atomicWrite } from "./toml.ts";
 import { gatewayConfigWarnings, isJsonObject, migrateLegacyConfig } from "./config.ts";
 import { logConfigChange, type ConfigChange } from "./process-log.ts";
 import { validateZcodeConfig } from "./zcode/index.ts";
+import { validateCodebuddyConfig } from "./codebuddy/index.ts";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
@@ -69,12 +70,13 @@ function writeGatewayConfigFile(file: string, value: GatewayConfig): void {
 /** Web UI 表单可提交的字段；数值/大小字段按字符串提交，与服务端 CLI 解析规则一致。 */
 export interface WebUiConfigPatch {
   zcode?: unknown;
+  codebuddy?: unknown;
   requestLogging?: unknown;
   maxRequestLogs?: unknown;
   maxGatewayLogBytes?: unknown;
 }
 
-const SUPPORTED_PATCH_FIELDS = new Set(["zcode", "requestLogging", "maxRequestLogs", "maxGatewayLogBytes"]);
+const SUPPORTED_PATCH_FIELDS = new Set(["zcode", "codebuddy", "requestLogging", "maxRequestLogs", "maxGatewayLogBytes"]);
 
 /** selectedModels 提交校验：字符串数组，去首尾空白，拒绝空项与重复项。 */
 export function parseSelectedModels(value: unknown): string[] {
@@ -107,6 +109,7 @@ export function applySelectedModelsPatch(
   }
   config.selectedModels = selectedModels;
   validateZcodeConfig(config);
+  validateCodebuddyConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
@@ -148,6 +151,11 @@ export function applyWebUiConfigPatch(
     if (config.zcode !== patch.zcode) change("zcode", patch.zcode);
     config.zcode = patch.zcode;
   }
+  if (patch.codebuddy !== undefined) {
+    if (typeof patch.codebuddy !== "boolean") throw new Error("codebuddy expects a boolean");
+    if (config.codebuddy !== patch.codebuddy) change("codebuddy", patch.codebuddy);
+    config.codebuddy = patch.codebuddy;
+  }
   if (patch.requestLogging !== undefined) {
     if (typeof patch.requestLogging !== "boolean") throw new Error("requestLogging expects a boolean");
     if (config.requestLogging !== patch.requestLogging) change("requestLogging", patch.requestLogging);
@@ -177,9 +185,10 @@ export function applyWebUiConfigPatch(
     // 所有字段的值都未变化：不写盘也不落审计，直接返回当前配置。
     return { config, applied };
   }
-  // 组合校验先于写盘：保留前缀冲突、非回环监听等组合会被新进程的 validateZcodeConfig
+  // 组合校验先于写盘：保留前缀冲突、非回环监听等组合会被新进程的 validate*Config
   // 拒绝启动——在这里挡下并保留原配置，避免"保存成功但重启后网关与管理页一起死亡"。
   validateZcodeConfig(config);
+  validateCodebuddyConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

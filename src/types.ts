@@ -17,6 +17,9 @@ export interface ModelCatalog {
 /** 第三方上游类型：cliproxy 直接消费其 Codex 目录；newapi 从 OpenAI /models 列表本地合成目录。 */
 export type UpstreamType = "cliproxy" | "newapi";
 
+/** CodeBuddy 凭据地域：auto 按最近登录选择，cn/intl 固定地域并在无凭据时回退 auto。 */
+export type CodebuddyRegion = "auto" | "cn" | "intl";
+
 export interface GatewayConfig {
   $schema?: string;
   configVersion?: string;
@@ -46,6 +49,10 @@ export interface GatewayConfig {
   upstreamOnly?: boolean;
   /** 是否启用 ZCode Responses 入口；默认关闭。 */
   zcode?: boolean;
+  /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时按禁用处理。 */
+  codebuddy?: boolean;
+  /** CodeBuddy/WorkBuddy 凭据地域选择；缺省 auto。 */
+  codebuddyRegion?: CodebuddyRegion;
 }
 
 /**

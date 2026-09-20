@@ -20,6 +20,16 @@ function unique(values: string[]): string[] {
   return [...new Set(values)];
 }
 
+/**
+ * 轻量 glob 匹配：`*` 匹配任意字符（含空串），`?` 匹配单个字符，其余字符按字面量处理。
+ * 模型 ID 允许大小写与 `-`、`/`、`.` 等字符，这里不做归一化，保持与精确匹配一致的语义。
+ */
+function globToRegExp(pattern: string): RegExp {
+  const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const source = escaped.replace(/\\\*/g, ".*").replace(/\\\?/g, ".");
+  return new RegExp(`^${source}$`);
+}
+
 export function modelPickerEntries(models: ModelEntry[]): { slug: string; label: string }[] {
   return [...new Map(models.map((model) => [model.slug, model])).values()]
     .sort((left, right) => left.slug.localeCompare(right.slug))
@@ -62,6 +72,15 @@ export function parseModelSelection(input: unknown, availableModels: string[]): 
         throw new Error(`Selection number is outside 1-${models.length}: ${token}`);
       }
       selected.add(models[index - 1]);
+      continue;
+    }
+
+    // 含通配符的选择器按 glob 匹配，零命中时返回空集而不是报错。
+    if (token.includes("*") || token.includes("?")) {
+      const pattern = globToRegExp(token);
+      for (const model of models) {
+        if (pattern.test(model)) selected.add(model);
+      }
       continue;
     }
 

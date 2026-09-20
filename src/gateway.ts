@@ -4,7 +4,15 @@ import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } fro
 import { readApiKey } from "./keychain.ts";
 import { createZcodeAdapter, validateZcodeConfig, zcodeEnabled, zcodeError } from "./zcode/index.ts";
 import type { ZcodeDependencies, GatewayHandler } from "./zcode/index.ts";
-import { mergeZcodeCatalog, zcodeModelFamily } from "./zcode/catalog.ts";
+import { isZcodeModel, mergeZcodeCatalog } from "./zcode/catalog.ts";
+import {
+  codebuddyEnabled,
+  codebuddyError,
+  createCodebuddyAdapter,
+  validateCodebuddyConfig,
+} from "./codebuddy/index.ts";
+import type { CodebuddyDependencies } from "./codebuddy/index.ts";
+import { isCodebuddyModel, mergeCodebuddyCatalog } from "./codebuddy/catalog.ts";
 import {
   dialUpstreamWebSocket,
   forwardedHeaders,
@@ -438,7 +446,15 @@ export function isZcodeResponsesWebSocket(request: Request, config: GatewayConfi
   return zcodeEnabled(config)
     && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
     && request.headers.get("upgrade")?.toLowerCase() === "websocket"
-    && zcodeModelFamily(modelFromRoutingHint(request)) !== undefined;
+    && isZcodeModel(modelFromRoutingHint(request));
+}
+
+/** CodeBuddy/WorkBuddy Responses 同样只走 HTTP/SSE，WebSocket 升级一律本地拒绝。 */
+export function isCodebuddyResponsesWebSocket(request: Request, config: GatewayConfig): boolean {
+  return codebuddyEnabled(config)
+    && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket"
+    && isCodebuddyModel(modelFromRoutingHint(request));
 }
 
 /**
@@ -459,6 +475,7 @@ export function responsesWebSocketTarget(
   const prefix = config.prefix || "cliproxy/";
   const hintedModel = modelFromRoutingHint(request);
   if (isZcodeResponsesWebSocket(request, config)) return null;
+  if (isCodebuddyResponsesWebSocket(request, config)) return null;
   const route = config.upstreamOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
     : decideThreadRoute(request, hintedModel, prefix, cpaThreads, cpaTurns);
@@ -555,8 +572,8 @@ function modelCatalogResponse(
     data: catalog.models.map((model) => ({
       id: model.slug,
       object: "model",
-      owned_by: zcodeEnabled && zcodeModelFamily(model.slug)
-        ? zcodeModelFamily(model.slug) === "zai" ? "z.ai" : "bigmodel"
+      owned_by: zcodeEnabled && isZcodeModel(model.slug) ? "zcode"
+        : isCodebuddyModel(model.slug) ? "codebuddy"
         : owner === "mixed"
         ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
         : owner,
@@ -600,13 +617,15 @@ async function catalogModelsResponse(
   config: GatewayConfig,
   clientVersionFile?: string,
   zcodeCatalog?: ModelCatalog,
+  codebuddyCatalog?: ModelCatalog,
 ): Promise<Response> {
   const incomingUrl = new URL(request.url);
   const clientVersion = incomingUrl.searchParams.get("client_version");
-  const respond = (catalog: ModelCatalog, owner: "cliproxy" | "mixed" | "openai") => modelCatalogResponse(
-    zcodeCatalog ? mergeZcodeCatalog(catalog, zcodeCatalog) : catalog,
-    clientVersion, owner, config.prefix, Boolean(zcodeCatalog),
-  );
+  const respond = (catalog: ModelCatalog, owner: "cliproxy" | "mixed" | "openai") => {
+    let merged = zcodeCatalog ? mergeZcodeCatalog(catalog, zcodeCatalog) : catalog;
+    if (codebuddyCatalog) merged = mergeCodebuddyCatalog(merged, codebuddyCatalog);
+    return modelCatalogResponse(merged, clientVersion, owner, config.prefix, Boolean(zcodeCatalog));
+  };
   if (config.upstreamOnly === true) {
     writeModelsCache(clientVersionFile, clientVersion);
     try {
@@ -643,9 +662,9 @@ async function catalogModelsResponse(
     }
   }
   if (!native) {
-    if (zcodeCatalog?.models.length) {
+    if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length) {
       let base: ModelCatalog = { models: [] };
-      try { base = mergeDynamicCatalog(base, config); } catch { /* 有效 ZCode 目录独立可用。 */ }
+      try { base = mergeDynamicCatalog(base, config); } catch { /* 有效 ZCode/CodeBuddy 目录独立可用。 */ }
       return respond(base, config.upstreamOnly ? "cliproxy" : "mixed");
     }
     return Response.json(
@@ -676,9 +695,12 @@ export function createGatewayHandler(
   clientVersionFile?: string,
   zcodeDependencies?: ZcodeDependencies,
   processLog?: ProcessLogTarget,
+  codebuddyDependencies?: CodebuddyDependencies,
 ): GatewayHandler {
   const handleZcode = createZcodeAdapter(config, { ...zcodeDependencies, processLog });
+  const handleCodebuddy = createCodebuddyAdapter(config, { ...codebuddyDependencies, processLog });
   const zcodeRequests = new WeakSet<Request>();
+  const codebuddyRequests = new WeakSet<Request>();
   const preparedBodies = new WeakMap<Request, { bytes?: ArrayBuffer; json?: Record<string, unknown> }>();
   /** 本次请求实际打到哪个上游。日志包装层在 handleCore 之外，只能这样把它取回来。 */
   const upstreams = new WeakMap<Request, string>();
@@ -734,23 +756,29 @@ export function createGatewayHandler(
     }
 
     if (incomingUrl.pathname === `${mountPath}/models` && request.method === "GET") {
-      return catalogModelsResponse(request, config, clientVersionFile, zcodeEnabled(config) ? await handleZcode.catalog() : undefined);
+      return catalogModelsResponse(
+        request, config, clientVersionFile,
+        zcodeEnabled(config) ? await handleZcode.catalog() : undefined,
+        codebuddyEnabled(config) ? await handleCodebuddy.catalog() : undefined,
+      );
     }
 
     const responsePath = incomingUrl.pathname === `${mountPath}/responses`;
     const compactPath = incomingUrl.pathname === `${mountPath}/responses/compact`;
     const hintedModel = modelFromRoutingHint(request);
     if (isZcodeResponsesWebSocket(request, config)) return websocketNotSupportedResponse("zcode-http-only");
-    if (zcodeEnabled(config) && (responsePath || compactPath) && request.method === "POST") {
+    if (isCodebuddyResponsesWebSocket(request, config)) return websocketNotSupportedResponse("codebuddy-http-only");
+    if ((zcodeEnabled(config) || codebuddyEnabled(config)) && (responsePath || compactPath) && request.method === "POST") {
       const bytes = await readBodyBytes(request);
       let json: Record<string, unknown> | undefined;
       try { json = decodeJsonBody(bytes, request.headers); }
       catch (error) {
-        if (zcodeModelFamily(hintedModel)) return zcodeError(400, error instanceof Error ? error.message : "无效请求正文");
+        if (isZcodeModel(hintedModel)) return zcodeError(400, error instanceof Error ? error.message : "无效请求正文");
+        if (isCodebuddyModel(hintedModel)) return codebuddyError(400, error instanceof Error ? error.message : "无效请求正文");
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
-      if (zcodeModelFamily(model)) {
+      if (zcodeEnabled(config) && isZcodeModel(model)) {
         zcodeRequests.add(request);
         if (!json) return zcodeError(400, "ZCode Responses 请求必须是 JSON 对象");
         json = { ...json, model };
@@ -766,6 +794,23 @@ export function createGatewayHandler(
         }
         json.input = rewriteCompactionHistory(json.input);
         return handleZcode.forward(request, json);
+      }
+      if (codebuddyEnabled(config) && isCodebuddyModel(model)) {
+        codebuddyRequests.add(request);
+        if (!json) return codebuddyError(400, "CodeBuddy Responses 请求必须是 JSON 对象");
+        json = { ...json, model };
+        if (compactPath || hasCompactionTrigger(json.input)) {
+          const input = json;
+          return handleCodebuddy.forward(request, buildCompactionRequest(input, String(model)), (payload) => {
+            if (payload.status !== "completed") return compactionError("CodeBuddy 上游未完成上下文压缩");
+            const summary = responseText(payload);
+            if (!summary) return compactionError("CodeBuddy 上游没有返回压缩摘要");
+            return compactPath ? Response.json({ output: compactV1Output(input.input, summary) })
+              : syntheticCompactionResponse(payload, String(model), summary, input.stream === true);
+          });
+        }
+        json.input = rewriteCompactionHistory(json.input);
+        return handleCodebuddy.forward(request, json);
       }
     }
 
@@ -913,7 +958,7 @@ export function createGatewayHandler(
     }
   };
 
-  if (!logging) return Object.assign(handleCore, { close: handleZcode.close });
+  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); } });
 
   return Object.assign(async (request: Request): Promise<Response> => {
     const requestTime = localTime();
@@ -958,7 +1003,7 @@ export function createGatewayHandler(
     }
 
     const response = await handleCore(request);
-    if (zcodeRequests.has(request)) return response;
+    if (zcodeRequests.has(request) || codebuddyRequests.has(request)) return response;
     const url = incoming.pathname + incoming.search;
 
     // 必须异步消费 clone：await 会读完整个响应流，令 SSE 退化成一次性返回。
@@ -1001,7 +1046,7 @@ export function createGatewayHandler(
       // Logging must never break the request flow.
     });
     return response;
-  }, { close: handleZcode.close });
+  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); } });
 }
 
 /**
@@ -1081,15 +1126,17 @@ export function startGateway(
   clientVersionFile?: string,
   zcodeDependencies?: ZcodeDependencies,
   processLog?: ProcessLogTarget,
+  codebuddyDependencies?: CodebuddyDependencies,
 ): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
   validateZcodeConfig(config);
+  validateCodebuddyConfig(config);
   const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
   const cpaThreads = new Set<string>();
   const cpaTurns = new Set<string>();
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog);
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies);
   let server: Bun.Server<RealtimeSocketData>;
   try {
     server = Bun.serve<RealtimeSocketData>({
@@ -1105,7 +1152,8 @@ export function startGateway(
           return handler(request);
         }
         if (incoming.pathname === "/zai" || incoming.pathname.startsWith("/zai/")
-          || isZcodeResponsesWebSocket(request, config)) return handler(request);
+          || isZcodeResponsesWebSocket(request, config)
+          || isCodebuddyResponsesWebSocket(request, config)) return handler(request);
         const target = realtimeWebSocketTarget(request, config);
         if (target) {
           const accessError = realtimeAccessError(request, realtimeProviderMode);

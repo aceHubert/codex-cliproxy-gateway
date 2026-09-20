@@ -18,6 +18,7 @@ import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。 */
 interface FormState {
   zcode: boolean;
+  codebuddy: boolean;
   requestLogging: boolean;
   maxRequestLogs: string;
   maxGatewayLogBytes: string;
@@ -97,6 +98,7 @@ export function ConfigPage({
       setConfig(next);
       setForm({
         zcode: next.editable.zcode,
+        codebuddy: next.editable.codebuddy,
         requestLogging: next.editable.requestLogging,
         maxRequestLogs: String(next.editable.maxRequestLogs ?? 0),
         maxGatewayLogBytes: logSize.value,
@@ -121,12 +123,17 @@ export function ConfigPage({
   const genericDirty = useMemo(() => {
     if (!config || !form) return false;
     return form.zcode !== config.editable.zcode
+      || form.codebuddy !== config.editable.codebuddy
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
       || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
   }, [config, form]);
   const dirty = modelsDirty || genericDirty;
   const upstreamOnly = config?.readonly.upstreamOnly === true;
+  // 开关按本机配置探测结果显示：未检测到本地配置时隐藏，避免展示永远无法生效的入口；
+  // 开关已开启时（例如用户删掉了本机配置）仍显示，便于在 UI 里关回。
+  const showZcode = Boolean(config && (config.detected.zcode || config.editable.zcode));
+  const showCodebuddy = Boolean(config && (config.detected.codebuddy || config.editable.codebuddy));
 
   /** 网关重启完成后恢复：刷新配置与状态并提示已生效。 */
   useEffect(() => {
@@ -179,6 +186,7 @@ export function ConfigPage({
       }
       const changes: UiConfigChanges = {};
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
+      if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
       if (formSnapshot.requestLogging !== config.editable.requestLogging) {
         changes.requestLogging = formSnapshot.requestLogging;
       }
@@ -356,29 +364,62 @@ export function ConfigPage({
                     />
                   </div>
                 </div>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelZcode")}</span>
-                    <span className="field-keyname">zcode</span>
+                {showZcode && (
+                  <div className="field-row">
+                    <div className="field-label-group">
+                      <span className="field-label">{t("labelZcode")}</span>
+                      <span className="field-keyname">zcode</span>
+                    </div>
+                    <div className="field-control-area">
+                      {/* upstream-only 模式下网关按禁用处理 zcode 入口（zcodeEnabled）：
+                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
+                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={form.zcode}
+                          disabled={upstreamOnly}
+                          onChange={(event) => setForm({ ...form, zcode: event.target.checked })}
+                        />
+                        <span className="slider" />
+                      </label>
+                      <p className="field-desc">{t("descZcode")}</p>
+                      {upstreamOnly && (
+                        <p className="field-desc zcode-disabled-hint">{t("zcodeDisabledHint")}</p>
+                      )}
+                      {!config.detected.zcode && (
+                        <p className="field-desc zcode-disabled-hint">{t("zcodeMissingHint")}</p>
+                      )}
+                    </div>
                   </div>
-                  <div className="field-control-area">
-                    {/* upstream-only 模式下网关按禁用处理 zcode 入口（zcodeEnabled）：
-                        开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                    <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
-                      <input
-                        type="checkbox"
-                        checked={form.zcode}
-                        disabled={upstreamOnly}
-                        onChange={(event) => setForm({ ...form, zcode: event.target.checked })}
-                      />
-                      <span className="slider" />
-                    </label>
-                    <p className="field-desc">{t("descZcode")}</p>
-                    {upstreamOnly && (
-                      <p className="field-desc zcode-disabled-hint">{t("zcodeDisabledHint")}</p>
-                    )}
+                )}
+                {showCodebuddy && (
+                  <div className="field-row">
+                    <div className="field-label-group">
+                      <span className="field-label">{t("labelCodebuddy")}</span>
+                      <span className="field-keyname">codebuddy</span>
+                    </div>
+                    <div className="field-control-area">
+                      {/* upstream-only 模式下网关按禁用处理 codebuddy 入口（codebuddyEnabled）：
+                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
+                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={form.codebuddy}
+                          disabled={upstreamOnly}
+                          onChange={(event) => setForm({ ...form, codebuddy: event.target.checked })}
+                        />
+                        <span className="slider" />
+                      </label>
+                      <p className="field-desc">{t("descCodebuddy")}</p>
+                      {upstreamOnly && (
+                        <p className="field-desc zcode-disabled-hint">{t("codebuddyDisabledHint")}</p>
+                      )}
+                      {!config.detected.codebuddy && (
+                        <p className="field-desc zcode-disabled-hint">{t("codebuddyMissingHint")}</p>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
               </>
             )}
           </div>
@@ -400,6 +441,18 @@ export function ConfigPage({
               <span>{t("card2Note")}</span>
             </div>
             <div className="card-body">
+              <ReadonlyRow label={t("labelRouterMode")} keyname="routerMode">
+                <div className="readonly-box">
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span className={`pill-badge ${upstreamOnly ? "pill-purple" : "pill-green"}`}>
+                      {upstreamOnly ? t("badgePureUpstream") : t("badgeDynamicRouting")}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                    {upstreamOnly ? t("descPureUpstream") : t("descUpstreamOnly")}
+                  </span>
+                </div>
+              </ReadonlyRow>
               <ReadonlyRow label={t("labelUpstreamUrl")} keyname="upstreamBaseUrl">
                 <div className="readonly-box">
                   <span>{config.readonly.upstreamBaseUrl}</span>
@@ -413,19 +466,6 @@ export function ConfigPage({
                     <span className="pill-badge pill-cyan">active</span>
                   </div>
                   <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("hintOtherType")}</span>
-                </div>
-              </ReadonlyRow>
-              <ReadonlyRow label={t("labelUpstreamOnly")} keyname="upstreamOnly">
-                <div className="readonly-box">
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span>{String(config.readonly.upstreamOnly)}</span>
-                    <span className={`pill-badge ${config.readonly.upstreamOnly ? "pill-purple" : "pill-green"}`}>
-                      {config.readonly.upstreamOnly ? t("badgePureUpstream") : t("badgeDynamicRouting")}
-                    </span>
-                  </div>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    {config.readonly.upstreamOnly ? t("descPureUpstream") : t("descUpstreamOnly")}
-                  </span>
                 </div>
               </ReadonlyRow>
               <ReadonlyRow label={t("labelHostPort")} keyname="host / port">

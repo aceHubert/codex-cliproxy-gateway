@@ -15,7 +15,7 @@ export interface RequestLogSink {
 }
 
 const LOG_PREFIX = "cliproxy";
-export type LogNamespace = "cliproxy" | "zai" | "bigmodel";
+export type LogNamespace = "cliproxy" | "zai" | "bigmodel" | "codebuddy" | "workbuddy";
 
 const SENSITIVE_HEADERS = new Set([
   "authorization",
@@ -89,7 +89,7 @@ export function websocketLogFile(group: string, sessionId?: string): LogFileRef 
  * 绝不能被请求日志的保留计数删掉。
  * `error-` 形仍被识别，是为了让旧的错误摘要文件按同一保留策略自然老化，而不是永远留下。
  */
-const REQUEST_LOG_NAME = /^(?:cliproxy|zai|bigmodel)-(?:error-\d{14}|.+-(?:http|ws)-[^/]+)\.log$/;
+const REQUEST_LOG_NAME = /^(?:cliproxy|zai|bigmodel|codebuddy|workbuddy)-(?:error-\d{14}|.+-(?:http|ws)-[^/]+)\.log$/;
 
 export function isRequestLogName(name: string): boolean {
   return REQUEST_LOG_NAME.test(name);

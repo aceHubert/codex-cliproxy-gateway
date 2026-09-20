@@ -36,6 +36,7 @@ import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstanc
 import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
 import { validateZcodeConfig, zcodeEnabled } from "./zcode/index.ts";
+import { codebuddyEnabled, validateCodebuddyConfig } from "./codebuddy/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -71,6 +72,7 @@ const DEFAULTS = {
   maxGatewayLogBytes: 0,
   upstreamOnly: false,
   zcode: false,
+  codebuddy: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
 interface BackupRecord {
@@ -106,7 +108,7 @@ Usage:
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--zcode on|off] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--codebuddy-region auto|cn|intl] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy web
   codex-cliproxy status
 
@@ -121,7 +123,7 @@ Install options:
   --official-url URL   default: existing openai_base_url or official Codex
   --key-env NAME       read the API key from this environment variable
                         (default: API_KEY)
-  --select SELECTOR     model numbers/ranges, exact IDs, all, or none
+  --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
   --upstream-only       use only the third-party upstream's models with their
                         original IDs (--cpa-only is a deprecated alias)
   --model-merge-json URL  GitHub repository or HTTP(S) models.json URL
@@ -138,7 +140,7 @@ Models:
   models --sync         refresh models in dynamic split routing
   models --sync --upstream-only
                         switch to a static upstream-only catalog with original model IDs
-  --select SELECTOR     model numbers/ranges, exact IDs, all, or none
+  --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
   --model-merge-json URL  update the cached models.json override
   --restart-codex       stop Codex app-server after sync to refresh the model picker;
                         active tasks may error and require recovery or reopening
@@ -146,6 +148,11 @@ Models:
 Config:
   config                print the current gateway settings
   config --zcode on|off toggle ZCode Responses-to-Anthropic compatibility
+  config --codebuddy on|off
+                        toggle CodeBuddy/WorkBuddy Responses compatibility
+  config --codebuddy-region auto|cn|intl
+                        prefer CodeBuddy credentials from a region; auto uses
+                        the most recently refreshed login
   config --log on|off   toggle request logging
   config --max-request-logs N
                         max request log files kept across the directory; 0 (default) means unlimited
@@ -431,6 +438,8 @@ export function applyRoutingMode(
 /** 审计只跟踪这些字段；其余键（如 $schema、configVersion）不属于用户可见配置。 */
 const AUDITED_FIELDS = [
   "zcode",
+  "codebuddy",
+  "codebuddyRegion",
   "upstreamOnly",
   "requestLogging",
   "logDir",
@@ -1053,6 +1062,7 @@ function serve(options: CliOptions): void {
     paths.upstreamModelsCacheFile,
     { codexModelsCacheFile: paths.modelsCacheFile },
     processLog,
+    { codexModelsCacheFile: paths.modelsCacheFile },
   );
   // 本进程已带着当前配置启动：此前置位的 pendingRestart 已完成使命，清掉它，
   // 避免下一次命令被误补一次重启；临时实例不动生产 state。
@@ -1242,6 +1252,8 @@ function onOffValue(options: CliOptions, key: string): boolean | undefined {
  */
 async function configCommand(options: CliOptions): Promise<void> {
   const zcodeTarget = onOffValue(options, "zcode");
+  const codebuddyTarget = onOffValue(options, "codebuddy");
+  const codebuddyRegionOption = stringOption(options, "codebuddy-region");
   const logTarget = onOffValue(options, "log");
   const maxLogsOption = stringOption(options, "max-request-logs");
   const maxLogSizeOption = stringOption(options, "max-log-size");
@@ -1250,13 +1262,17 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && codebuddyRegionOption === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
+    const codebuddyActive = codebuddyEnabled(config);
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
       zcode: zcodeActive,
       // upstream-only 下开关保存但不生效；单独报出原始值，避免配置与运行时看起来脱节。
       ...(config.zcode === true && !zcodeActive ? { zcodeConfigured: true } : {}),
+      codebuddy: codebuddyActive,
+      ...(config.codebuddy === true && !codebuddyActive ? { codebuddyConfigured: true } : {}),
+      codebuddyRegion: config.codebuddyRegion ?? "auto",
       requestLogging: config.requestLogging === true,
       logDir: config.logDir || paths.logDir,
       maxRequestLogs: config.maxRequestLogs ?? 0,
@@ -1276,6 +1292,21 @@ async function configCommand(options: CliOptions): Promise<void> {
       ? "ZCode compatibility saved but inactive: upstream-only mode treats ZCode as disabled."
       : `ZCode compatibility ${zcodeTarget ? "enabled" : "disabled"}.`);
   }
+  if (codebuddyTarget !== undefined) {
+    config.codebuddy = codebuddyTarget;
+    const codebuddyActive = codebuddyEnabled(config);
+    applied.push(codebuddyTarget && !codebuddyActive
+      ? "CodeBuddy compatibility saved but inactive: upstream-only mode treats CodeBuddy as disabled."
+      : `CodeBuddy compatibility ${codebuddyTarget ? "enabled" : "disabled"}.`);
+  }
+  if (codebuddyRegionOption !== undefined) {
+    const normalized = codebuddyRegionOption.trim().toLowerCase();
+    if (normalized !== "auto" && normalized !== "cn" && normalized !== "intl") {
+      throw new Error(`--codebuddy-region expects auto, cn, or intl, got "${codebuddyRegionOption}"`);
+    }
+    config.codebuddyRegion = normalized;
+    applied.push(`CodeBuddy region preference set to ${normalized}.`);
+  }
   if (maxLogsOption !== undefined) {
     config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
     applied.push(`Max log files per group set to ${
@@ -1294,8 +1325,9 @@ async function configCommand(options: CliOptions): Promise<void> {
     applied.push(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
   }
   // 与 Web UI 同一规则：组合校验先于写盘与重启，失败时保留原配置和运行中的服务
-  // （否则保存成功、新进程却被 validateZcodeConfig 拒绝启动，网关直接不可用）。
+  // （否则保存成功、新进程却被 validate*Config 拒绝启动，网关直接不可用）。
   validateZcodeConfig(config);
+  validateCodebuddyConfig(config);
   writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
@@ -1396,6 +1428,10 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
       current.zcode = false;
       dirty = true;
     }
+    if (!Object.hasOwn(current, "codebuddy")) {
+      current.codebuddy = false;
+      dirty = true;
+    }
     if (dirty) {
       writeGatewayConfig(configFile, current);
       if (configFile === paths.gatewayConfig && fs.existsSync(paths.stateFile)) {
@@ -1451,7 +1487,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["zcode", "log", "max-request-logs", "max-log-size"],
+  config: ["zcode", "codebuddy", "codebuddy-region", "log", "max-request-logs", "max-log-size"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };
 

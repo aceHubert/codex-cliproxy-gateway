@@ -2749,12 +2749,17 @@ test("invalid upstreamType warns without rejecting the config", () => {
 });
 
 
-test("model selection supports indexes, ranges, IDs, all, and none", () => {
+test("model selection supports indexes, ranges, IDs, globs, all, and none", () => {
   const models = ["alpha", "beta", "gamma", "delta"];
   assert.deepEqual(parseModelSelection("1,3-4", models), ["alpha", "gamma", "delta"]);
   assert.deepEqual(parseModelSelection("beta,4", models), ["beta", "delta"]);
+  assert.deepEqual(parseModelSelection("alpha,beta*", models), ["alpha", "beta"]);
+  assert.deepEqual(parseModelSelection("?elta", models), ["delta"]);
   assert.deepEqual(parseModelSelection("all", models), models);
   assert.deepEqual(parseModelSelection("none", models), []);
+  // 通配符零命中是合法的空选择，精确 ID 未命中仍视为拼写错误。
+  assert.deepEqual(parseModelSelection("gpt-*", models), []);
+  assert.throws(() => parseModelSelection("missing", models), /Unknown model ID: missing/);
   assert.equal(parseModelSelection("", models), null);
 });
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { syncGatewayConfigFile } from "../src/cli.ts";
 import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings, migrateLegacyConfig } from "../src/config.ts";
+import { zcodeConfigPresent } from "../src/zcode/config.ts";
 import { resolvePaths } from "../src/paths.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
 
@@ -125,5 +126,37 @@ test("非法旧对象不能迁移为布尔字段，非法新字段保留以供�
       assert.deepEqual(synced.zcode, "zcode" in extra ? extra.zcode : false);
       assert.deepEqual(gatewayConfigWarnings(synced), "zcode" in extra ? ["$.zcode should be boolean"] : []);
     });
+  }
+});
+
+test("zcodeConfigPresent 要求 setting.json 与 config.json 同时存在", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-zcode-present-"));
+  try {
+    const home = path.join(root, ".zcode");
+    assert.equal(zcodeConfigPresent(home), false, "目录不存在视为未配置");
+    fs.mkdirSync(home, { recursive: true });
+    assert.equal(zcodeConfigPresent(home), false, "空目录视为未配置");
+    fs.writeFileSync(path.join(home, "setting.json"), "{}");
+    assert.equal(zcodeConfigPresent(home), false, "只有 setting.json 不算就绪");
+    fs.writeFileSync(path.join(home, "config.json"), "{}");
+    assert.equal(zcodeConfigPresent(home), true, "两个文件齐备即就绪");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("zcodeConfigPresent 认可 v2 布局与 home/v2 混合布局", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-zcode-present-"));
+  try {
+    const home = path.join(root, ".zcode");
+    fs.mkdirSync(path.join(home, "v2"), { recursive: true });
+    fs.writeFileSync(path.join(home, "v2", "setting.json"), "{}");
+    fs.writeFileSync(path.join(home, "v2", "config.json"), "{}");
+    assert.equal(zcodeConfigPresent(home), true, "v2 布局算就绪");
+    fs.writeFileSync(path.join(home, "config.json"), "{}");
+    fs.rmSync(path.join(home, "v2", "config.json"));
+    assert.equal(zcodeConfigPresent(home), true, "setting 在 v2、config 在 home 也算就绪");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

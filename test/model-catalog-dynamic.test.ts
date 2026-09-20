@@ -8,6 +8,7 @@ import { runCli } from "../src/cli.ts";
 import { resolvePaths } from "../src/paths.ts";
 import { readRootTomlString } from "../src/toml.ts";
 import {
+  clearModelsCacheEntries,
   fetchCliProxyCatalog,
   invalidateModelsCache,
 } from "../src/catalog.ts";
@@ -247,6 +248,33 @@ test("models cache invalidation preserves models and resets freshness fields", (
       models: [{ slug: "gpt-current" }],
       etag: "keep",
     });
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("clearModelsCacheEntries removes only matching slugs and expires freshness", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "models-cache-clear-"));
+  const cacheFile = path.join(directory, "models_cache.json");
+  try {
+    fs.writeFileSync(cacheFile, JSON.stringify({
+      fetched_at: "2026-08-18T00:00:00Z",
+      client_version: "1.2.3",
+      models: [{ slug: "gpt-keep" }, { slug: "zcode/glm-5.3" }, { slug: "zcode/glm-5.3-flash" }],
+      etag: "keep",
+    }));
+    const changed = clearModelsCacheEntries(cacheFile, (slug) => slug === "zcode/glm-5.3");
+    assert.equal(changed, true);
+    assert.deepEqual(JSON.parse(fs.readFileSync(cacheFile, "utf8")), {
+      fetched_at: "2000-01-01T00:00:00Z",
+      client_version: "0.0.0",
+      models: [{ slug: "gpt-keep" }, { slug: "zcode/glm-5.3-flash" }],
+      etag: "keep",
+    });
+    // 没有命中时不得改写文件，避免每次 /models 都触发无谓写盘。
+    const before = fs.readFileSync(cacheFile, "utf8");
+    assert.equal(clearModelsCacheEntries(cacheFile, (slug) => slug === "absent"), false);
+    assert.equal(fs.readFileSync(cacheFile, "utf8"), before);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
