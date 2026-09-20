@@ -276,6 +276,11 @@ function upstreamLabel(config: GatewayConfig): string {
   return configuredUpstreamType(config) === "newapi" ? "new-api" : "CLIProxy";
 }
 
+/** 显式空选择：必须在读取上游目录前识别，避免为了清空选择而访问上游。 */
+function isSelectNone(selector: string | undefined): boolean {
+  return selector?.trim().toLowerCase() === "none";
+}
+
 function getInstallApiKey(baseUrl: string, keyEnv?: string): string {
   const envName = keyEnv || "API_KEY";
   const value = (Object.hasOwn(process.env, envName)
@@ -668,9 +673,11 @@ async function install(options: CliOptions): Promise<void> {
   );
   config.configVersion = GATEWAY_CONFIG_VERSION;
   applyRoutingMode(config, paths, upstreamOnly);
-  const { patchedToml: modelCatalogToml } = applyModelCatalogToml(
+  const installSelector = stringOption(options, "select");
+  // 先保留原有的受管 model_catalog_json 守卫；真正是否写入要等选择结果确定。
+  applyModelCatalogToml(
     currentToml,
-    upstreamOnly,
+    upstreamOnly && !isSelectNone(installSelector),
     paths,
     config.catalogPath,
   );
@@ -685,29 +692,43 @@ async function install(options: CliOptions): Promise<void> {
     && !Boolean(modelMergeJson)
     && fs.existsSync(config.catalogPath);
 
-  const proxyCatalog = await fetchUpstreamCatalog(
-    config.upstreamBaseUrl,
-    apiKey,
-    configuredUpstreamType(config),
-    upstreamClientVersion(paths, configuredUpstreamType(config)),
-    newapiCatalogOptions(configuredUpstreamType(config), rules),
-  );
-  const availableModels = proxyCatalog.models;
-  console.log(`${upstreamLabel(config)} authentication verified; ${availableModels.length} models found.`);
   let selectedModels: string[];
-  if (reuseCatalog) {
-    selectedModels = configuredSelectedModels(paths, config);
-    console.log(`Reusing the existing ${upstreamLabel(config)} catalog; model selection unchanged.`);
+  const selectNone = isSelectNone(installSelector);
+  const proxyCatalog: ModelCatalog = selectNone
+    ? { models: [] }
+    : await fetchUpstreamCatalog(
+      config.upstreamBaseUrl,
+      apiKey,
+      configuredUpstreamType(config),
+      upstreamClientVersion(paths, configuredUpstreamType(config)),
+      newapiCatalogOptions(configuredUpstreamType(config), rules),
+    );
+  if (selectNone) {
+    selectedModels = [];
+    console.log(`${upstreamLabel(config)} model catalog fetch skipped by --select none.`);
   } else {
-    selectedModels = await chooseModels({
-      availableModels,
-      currentSelection: Array.isArray(config.selectedModels) ? config.selectedModels : undefined,
-      selector: stringOption(options, "select"),
-      requireNonEmpty: upstreamOnly,
-    });
+    console.log(`${upstreamLabel(config)} authentication verified; ${proxyCatalog.models.length} models found.`);
+    selectedModels = reuseCatalog
+      ? configuredSelectedModels(paths, config)
+      : await chooseModels({
+        availableModels: proxyCatalog.models,
+        currentSelection: Array.isArray(config.selectedModels) ? config.selectedModels : undefined,
+        selector: stringOption(options, "select"),
+        requireNonEmpty: upstreamOnly,
+      });
+  }
+  if (!selectNone && reuseCatalog) {
+    console.log(`Reusing the existing ${upstreamLabel(config)} catalog; model selection unchanged.`);
+  } else if (!selectNone) {
     console.log(`Selected ${selectedModels.length} ${upstreamLabel(config)} models.`);
   }
   config.selectedModels = selectedModels;
+  const { patchedToml: modelCatalogToml } = applyModelCatalogToml(
+    currentToml,
+    upstreamOnly && selectedModels.length > 0,
+    paths,
+    config.catalogPath,
+  );
 
   // 切换模式不动纯净备份；旧密钥/旧 state 先留底，失败时恢复。
   const previousState = switching ? fs.readFileSync(paths.stateFile, "utf8") : undefined;
@@ -929,25 +950,39 @@ async function models(options: CliOptions): Promise<void> {
 
   applyRoutingMode(config, paths, upstreamOnly);
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  const { patchedToml, previousCatalog } = applyModelCatalogToml(source, upstreamOnly, paths, config.catalogPath);
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
-  const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
+  // 同步前先拒绝非受管 model_catalog_json，避免后续模型覆盖文件下载产生半更新。
+  applyModelCatalogToml(source, upstreamOnly && !isSelectNone(selector), paths, config.catalogPath);
   const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, config, Boolean(modelMergeJson));
-  const proxyCatalog = await fetchUpstreamCatalog(
-    config.upstreamBaseUrl,
-    apiKey,
-    configuredUpstreamType(config),
-    upstreamClientVersion(paths, configuredUpstreamType(config)),
-    newapiCatalogOptions(configuredUpstreamType(config), rules),
+  const selectNone = isSelectNone(selector);
+  const proxyCatalog: ModelCatalog = selectNone
+    ? { models: [] }
+    : await fetchUpstreamCatalog(
+      config.upstreamBaseUrl,
+      readApiKey(isLoopbackUrl(config.upstreamBaseUrl)),
+      configuredUpstreamType(config),
+      upstreamClientVersion(paths, configuredUpstreamType(config)),
+      newapiCatalogOptions(configuredUpstreamType(config), rules),
+    );
+  let selectedModels: string[];
+  if (selectNone) {
+    selectedModels = [];
+    console.log(`${upstreamLabel(config)} model catalog fetch skipped by --select none.`);
+  } else {
+    console.log(`${upstreamLabel(config)} authentication verified; ${proxyCatalog.models.length} models found.`);
+    selectedModels = await chooseModels({
+      availableModels: proxyCatalog.models,
+      currentSelection,
+      selector,
+      requireNonEmpty: upstreamOnly,
+    });
+  }
+  const { patchedToml, previousCatalog } = applyModelCatalogToml(
+    source,
+    upstreamOnly && selectedModels.length > 0,
+    paths,
+    config.catalogPath,
   );
-  const availableModels = proxyCatalog.models;
-  console.log(`${upstreamLabel(config)} authentication verified; ${availableModels.length} models found.`);
-  const selectedModels = await chooseModels({
-    availableModels,
-    currentSelection,
-    selector,
-    requireNonEmpty: upstreamOnly,
-  });
 
   const selectedProxyModels = proxyCatalog.models.filter((model) => selectedModels.includes(model.slug));
   const result = await rebuildCatalog(
@@ -971,7 +1006,7 @@ async function models(options: CliOptions): Promise<void> {
   recordConfigAudit("models --sync", config, auditBefore, paths, patchedToml === source ? [] : [{
     field: "model_catalog_json (config.toml)",
     before: previousCatalog,
-    after: upstreamOnly ? config.catalogPath : null,
+    after: upstreamOnly && selectedModels.length > 0 ? config.catalogPath : null,
   }]);
   if (!upstreamOnly) invalidateModelsCache(paths.modelsCacheFile);
 
