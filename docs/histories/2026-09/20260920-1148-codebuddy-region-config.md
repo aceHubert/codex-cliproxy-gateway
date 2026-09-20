@@ -17,7 +17,7 @@
 - **[模型路由]**: 模型 slug 强制携带地域：`codebuddy-cn/`、`codebuddy-intl/`、`workbuddy-cn/`、`workbuddy-intl/`；旧无地域前缀本地返回 400。
 - **[凭据选择]**: 请求按 slug 地域硬性选择凭据；对应地域没有 `.info` 直接返回 503，不回退另一地域。
 - **[目录刷新]**: `codebuddyRegion` 控制 16 分钟目录刷新的地域偏好；配置地域缺失时目录刷新回退最近登录的 auto 规则。
-- **[CLI 配置]**: `config --codebuddy-region auto|cn|intl` 写入配置、输出状态并纳入审计。
+- **[CLI 配置]**: `config --codebuddy-region auto|cn|intl` 写入配置、输出状态并纳入审计，README 说明目录刷新与请求路由的边界。
 - **[配置校验]**: 同步 GatewayConfig 类型、JSON Schema 与非法值校验。
 - **[回归测试]**: 覆盖固定地域、缺失回退、配置写入与审计。
 
@@ -27,12 +27,13 @@
 ### 📊 Change Stats
 > 数据来自本次任务相关工作区变更。
 
-- **Files changed:** 10
-- **Insertions:** +283
+- **Files changed:** 11
+- **Insertions:** +292
 - **Deletions:** -119
 
 | File | +Added | -Removed |
 | --- | ---: | ---: |
+| `README.md` | +9 | -0 |
 | `schemas/gateway-config.schema.json` | +6 | -0 |
 | `src/cli.ts` | +17 | -3 |
 | `src/codebuddy/catalog.ts` | +37 | -12 |
@@ -45,6 +46,7 @@
 | `test/codebuddy-response.test.ts` | +8 | -8 |
 
 ### 📁 Files Modified
+- `README.md`
 - `schemas/gateway-config.schema.json`
 - `src/cli.ts`
 - `src/codebuddy/catalog.ts`

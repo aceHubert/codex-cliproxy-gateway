@@ -6,11 +6,13 @@ import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createZcodeConfigCache, ZcodeConfigError } from "../src/zcode/config.ts";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "../src/zcode/config.ts";
 
 const URL_A = "https://api.z.ai/api/anthropic";
 const URL_B = "https://open.bigmodel.cn/api/anthropic/v1";
 const ID = "builtin:zai-coding-plan";
+const IDS_FIRST = "GLM-5.3";
+const IDS_FLASH = "GLM-5.3-Flash";
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 function json(file: string, value: unknown): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -21,6 +23,15 @@ function settings(extra: Record<string, unknown> = {}) {
 }
 function config(key = "test-business-key", url = URL_A, extra: Record<string, unknown> = {}) {
   return { provider: { [ID]: { options: { apiKey: key, baseURL: url }, models: { "glm-5": {} }, ...extra }, other: { options: { apiKey: "test-other-key" }, models: { "other-model": {} } } } };
+}
+function apiProviderConfig(rules: unknown[]) {
+  return { schemaVersion: 1, config: { providerConfigRules: { providerRules: rules } } };
+}
+function apiProviderRule(id: string, key: string, url = URL_A, models: string[] = ["GLM-5.3"]) {
+  return { providerId: id, config: { access: { type: "api-key", apiKey: key }, api: { type: "anthropic-messages", baseUrl: url }, modelOrder: models } };
+}
+function officialAPIProviderRule(family: "zai" | "bigmodel", key: string, models = ["GLM-5.3", "GLM-5.3-Flash"]) {
+  return { providerId: `${family}-api`, templateId: `${family}-api`, config: { access: { type: "api-key", apiKey: key }, modelOrder: models } };
 }
 function jwt(exp: number): string {
   return `${Buffer.from('{"alg":"HS256"}').toString("base64url")}.${Buffer.from(JSON.stringify({ exp })).toString("base64url")}.test`;
@@ -333,7 +344,9 @@ test("ZCode API Key 模式只选当前 family，保留完整 ID 且不推测 TTL
     const id = "custom:account:provider";
     json(path.join(home, "setting.json"), settings({ providerFamilyDomain: "bigmodel",
       modelProviderFamilySelectedKeys: { zai: "bad", bigmodel: `apikey:${id}` } }));
-    json(path.join(home, "config.json"), { provider: { [id]: { options: { apiKey: "test-key", baseURL: URL_B }, models: { "glm-5": {} } } } });
+    json(path.join(home, "provider_config.json"), apiProviderConfig([
+      apiProviderRule(id, "test-key", URL_B),
+    ]));
     let reads = 0;
     const cache = createZcodeConfigCache(home, { watch: mock.watch, onConfigRead() { reads++; } });
     try {
@@ -849,7 +862,9 @@ test("ZCode connectionSelections 条目缺失或形状非法时回退 legacy 解
     ];
     for (const [index, broken] of cases.entries()) {
       json(path.join(home, "setting.json"), broken);
-      json(path.join(home, "config.json"), { provider: { [id]: { options: { apiKey: `test-legacy-key-${index}`, baseURL: URL_A }, models: { "glm-5": {} } } } });
+      json(path.join(home, "provider_config.json"), apiProviderConfig([
+        apiProviderRule(id, `test-legacy-key-${index}`),
+      ]));
       const cache = createZcodeConfigCache(home, { watch: mock.watch });
       try {
         const snapshot = await cache.get();
@@ -925,14 +940,158 @@ test("ZCode 套餐槽位汇总两个渠道的连接，plan 缓存固定解析各
       assert.equal((await startPlan.get()).providerID, "builtin:zai-start-plan");
       assert.equal((await startPlan.get()).apiKey, "test-zcode-jwt");
       assert.equal((await startPlan.get()).plan, "start-plan");
-      // api-key 槽位只跟随当前渠道：zai 连的是个人，没有自定义 provider 选择。
-      await assert.rejects(() => apiKey.get(), /未选择自定义 provider/);
+      // api-key 槽位只在当前渠道存在可用官方 API Key provider 时暴露。
+      await assert.rejects(() => apiKey.get(), /未找到可用的官方 API Key provider/);
     } finally {
       individual.close();
       team.close();
       startPlan.close();
       apiKey.close();
     }
+  });
+});
+
+test("ZCode API Key 槽位只读 provider_config 且不回退 builtin", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
+    });
+    json(path.join(home, "v2", "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "test-coding-key", baseURL: URL_A }, models: { "glm-5": {} } },
+      "builtin:zai": { options: { apiKey: "stale-manual-key", baseURL: URL_A }, models: ["GLM-5.3"] },
+    } });
+    json(path.join(home, "provider_config.json"), apiProviderConfig([
+      officialAPIProviderRule("zai", "test-api-key"),
+      apiProviderRule("custom-third-party", "third-party-key", "https://example.com/v1"),
+    ]));
+    json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-access" });
+    const individual = createZcodeConfigCache(home, { watch: mock.watch, plan: "individual-coding-plan" });
+    const apiKey = createZcodeConfigCache(home, { watch: mock.watch, plan: "api-key" });
+    try {
+      assert.equal((await individual.get()).providerID, "builtin:zai-coding-plan");
+      const snapshot = await apiKey.get();
+      assert.equal(snapshot.family, "zai");
+      assert.equal(snapshot.providerID, "zai-api");
+      assert.equal(snapshot.plan, "api-key");
+      assert.equal(snapshot.apiKey, "test-api-key");
+      assert.equal(snapshot.baseURL, URL_A);
+      assert.deepEqual(snapshot.modelIds, ["GLM-5.3", "GLM-5.3-Flash"]);
+
+      json(path.join(home, "provider_config.json"), apiProviderConfig([
+        officialAPIProviderRule("zai", "test-updated-key", ["GLM-5.3"]),
+      ]));
+      mock.change(home, "provider_config.json");
+      await eventually(async () => {
+        const updated = await apiKey.get();
+        assert.equal(updated.apiKey, "test-updated-key");
+        assert.deepEqual(updated.modelIds, ["GLM-5.3"]);
+      });
+
+      json(path.join(home, "provider_config.json"), apiProviderConfig([
+        apiProviderRule("custom-third-party", "third-party-key", "https://example.com/v1"),
+      ]));
+      mock.change(home, "provider_config.json");
+      await eventually(async () => {
+        await assert.rejects(() => apiKey.get(), /未找到可用的官方 API Key provider/);
+      });
+    } finally { individual.close(); apiKey.close(); }
+  });
+});
+
+test("ZCode 多个官方 API Key provider 可独立解析", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: { zai: { kind: "individual-coding-plan" } },
+    });
+    json(path.join(home, "provider_config.json"), apiProviderConfig([
+      { ...officialAPIProviderRule("zai", "test-template-key", [IDS_FIRST]), providerName: "主 Key" },
+      { ...apiProviderRule("custom-official", "test-custom-key", URL_A, [IDS_FLASH]), providerName: "备用 Key" },
+    ]));
+    json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "test-access" });
+    assert.deepEqual(readZcodeAPIKeyProviders(home).map((provider) => ({
+      providerID: provider.providerID,
+      providerName: provider.providerName,
+    })), [
+      { providerID: "custom-official", providerName: "备用 Key" },
+      { providerID: "zai-api", providerName: "主 Key" },
+    ]);
+    const template = createZcodeConfigCache(home, { watch: mock.watch, plan: "api-key", apiProviderID: "zai-api" });
+    const custom = createZcodeConfigCache(home, { watch: mock.watch, plan: "api-key", apiProviderID: "custom-official" });
+    try {
+      const templateSnapshot = await template.get();
+      const customSnapshot = await custom.get();
+      assert.equal(templateSnapshot.providerID, "zai-api");
+      assert.equal(templateSnapshot.providerName, "主 Key");
+      assert.equal(templateSnapshot.apiKey, "test-template-key");
+      assert.deepEqual(templateSnapshot.modelIds, [IDS_FIRST]);
+      assert.equal(customSnapshot.providerID, "custom-official");
+      assert.equal(customSnapshot.providerName, "备用 Key");
+      assert.equal(customSnapshot.apiKey, "test-custom-key");
+      assert.deepEqual(customSnapshot.modelIds, [IDS_FLASH]);
+
+      json(path.join(home, "provider_config.json"), apiProviderConfig([
+        { ...officialAPIProviderRule("zai", "test-template-key", [IDS_FIRST]), providerName: "主 Key" },
+        { ...apiProviderRule("custom-official", "test-updated-key", URL_A, [IDS_FLASH]), providerName: "备用 Key" },
+      ]));
+      mock.change(home, "provider_config.json");
+      await eventually(async () => {
+        assert.equal((await custom.get()).apiKey, "test-updated-key");
+        assert.equal((await template.get()).apiKey, "test-template-key");
+      });
+    } finally { template.close(); custom.close(); }
+  });
+});
+
+test("ZCode connectionSelections 的 api-key 形态支持 provider_config", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      providerFamilyConnectionSelections: { zai: { kind: "api-key" } },
+    });
+    json(path.join(home, "provider_config.json"), apiProviderConfig([
+      officialAPIProviderRule("zai", "test-api-key", ["GLM-5.3"]),
+    ]));
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.providerID, "zai-api");
+      assert.equal(snapshot.plan, "api-key");
+      assert.equal(snapshot.modelIds[0], "GLM-5.3");
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode legacy builtin API Key 选择被忽略且不阻塞 Key 更新", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    json(path.join(home, "setting.json"), {
+      providerFamilyDomain: "zai",
+      modelProviderFamilySelectedKeys: { zai: "apikey:builtin:zai" },
+    });
+    json(path.join(home, "provider_config.json"), apiProviderConfig([
+      officialAPIProviderRule("zai", "test-api-key"),
+    ]));
+    fs.unlinkSync(path.join(home, "v2/config.json"));
+    const cache = createZcodeConfigCache(home, { watch: mock.watch });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.providerID, "zai-api");
+      assert.equal(snapshot.plan, "api-key");
+      assert.equal(snapshot.apiKey, "test-api-key");
+
+      json(path.join(home, "provider_config.json"), apiProviderConfig([
+        officialAPIProviderRule("zai", "test-updated-key"),
+      ]));
+      mock.change(home, "provider_config.json");
+      await eventually(async () => {
+        assert.equal((await cache.get()).apiKey, "test-updated-key");
+      });
+    } finally { cache.close(); }
   });
 });
 

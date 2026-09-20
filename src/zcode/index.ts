@@ -1,10 +1,18 @@
 import os from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
-import { createZcodeConfigCache, ZcodeConfigError } from "./config.ts";
-import type { ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "./config.ts";
+import type { ZcodeAPIKeyProvider, ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
 import { clearModelsCacheEntries, invalidateModelsCache } from "../catalog.ts";
-import { buildZcodeVendorCatalog, createZcodeCatalog, isZcodeModel, writeZcodeServedCatalog, zcodeModelPlan, zcodeUpstreamModel } from "./catalog.ts";
+import {
+  buildZcodeVendorCatalog,
+  createZcodeCatalog,
+  isZcodeModel,
+  writeZcodeServedCatalog,
+  zcodeAPIProviderIDFromModel,
+  zcodeModelPlan,
+  zcodeUpstreamModel,
+} from "./catalog.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
 import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
 import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
@@ -23,6 +31,8 @@ export interface ZcodeDependencies {
   configCache?: ZcodeConfigCache;
   /** 按套餐注入的缓存（测试用）；注入模式下未覆盖的套餐不创建真实缓存。 */
   planCaches?: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>>;
+  /** 按 API Key provider 注入的多个缓存（测试用）。 */
+  apiKeyCaches?: Record<string, ZcodeConfigCache>;
   identity?: ZcodeIdentity;
   /** Codex 自己的目录缓存；zcode-catalog.json 重建时过期它，让 Codex 重新拉取 /models。 */
   codexModelsCacheFile?: string;
@@ -96,13 +106,23 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     invalidateModelsCache(dependencies.codexModelsCacheFile);
   };
   /**
-   * 会话级套餐路由：模型 slug 的套餐段（zcode-<kind>/ 或裸 zcode/）决定快照、目录
-   * 与凭据来自哪条路由；每条路由一个独立配置缓存，key 的解析与上游调用本身不变。
+   * 会话级套餐路由：模型 slug 的套餐段（zcode-<kind>/）或 API provider 段
+   * （zcode-<providerId>/）决定快照、目录与凭据来自哪条路由；每条路由一个
+   * 独立配置缓存，key 的解析与上游调用本身不变。
    * start-plan 暂不暴露：zcode-plan 中继在鉴权之外还要求阿里云 captcha（code 3007），
    * 网关无法 headless 通过，暴露了也无法调用（见 docs/exec-plans/tech-debt-tracker.md）。
    */
-  const planRoutes: { plan: ZcodeSelection["kind"]; cache?: ZcodeConfigCache; snapshot?: ZcodeProviderSnapshot }[] =
-    (["individual-coding-plan", "team-coding-plan", "api-key"] as const).map((plan) => ({ plan }));
+  type ZcodeRoute = {
+    plan: ZcodeSelection["kind"];
+    apiProviderID?: string;
+    cache?: ZcodeConfigCache;
+    snapshot?: ZcodeProviderSnapshot;
+  };
+  const planRoutes: ZcodeRoute[] = [
+    { plan: "individual-coding-plan" },
+    { plan: "team-coding-plan" },
+  ];
+  let synchronizeAPIKeyRoutes: () => void = () => {};
   const republishFromPlans = () => {
     if (!vendorCatalog) return;
     const current = planRoutes.map((route) => route.snapshot);
@@ -128,7 +148,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     const home = dependencies.zcodeHome ?? path.join(os.homedir(), ".zcode");
     // 注入模式（测试）只为显式给出的套餐建缓存，避免读到真实的 ~/.zcode。
     const injected: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>> | undefined = dependencies.planCaches
-      ?? (dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
+      ?? (dependencies.apiKeyCaches ? {} : dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
     for (const route of planRoutes) {
       route.cache = injected?.[route.plan]
         ?? (injected ? undefined : createZcodeConfigCache(home, {
@@ -143,6 +163,57 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
             republishFromPlans();
           },
         }));
+    }
+    if (injected) {
+      const apiCaches = dependencies.apiKeyCaches
+        ?? (dependencies.planCaches?.["api-key"] || dependencies.configCache
+          ? { current: dependencies.planCaches?.["api-key"] ?? dependencies.configCache! }
+          : {});
+      for (const [apiProviderID, cache] of Object.entries(apiCaches)) {
+        planRoutes.push({ plan: "api-key", ...(apiProviderID === "current" ? {} : { apiProviderID }), cache });
+      }
+    } else {
+      const createAPIRoute = (provider: ZcodeAPIKeyProvider): ZcodeRoute => {
+        const route: ZcodeRoute = { plan: "api-key", apiProviderID: provider.providerID };
+        route.cache = createZcodeConfigCache(home, {
+          plan: "api-key",
+          apiProviderID: provider.providerID,
+          onSelectionChange: () => {
+            route.snapshot = undefined;
+            republishFromPlans();
+          },
+          onSnapshotChange: (snapshot) => {
+            route.snapshot = snapshot;
+            republishFromPlans();
+          },
+        });
+        return route;
+      };
+      const synchronize = (republish = true): void => {
+        let providers: ZcodeAPIKeyProvider[] = [];
+        try { providers = readZcodeAPIKeyProviders(home); }
+        catch { /* 目录撤下无效 API Key；套餐路由不受影响。 */ }
+        const targetIDs = new Set(providers.map((provider) => provider.providerID));
+        let changed = false;
+        const removed = planRoutes.filter((route) => route.plan === "api-key" && route.apiProviderID && !targetIDs.has(route.apiProviderID));
+        for (const route of removed) route.cache?.close();
+        if (removed.length) {
+          for (let index = planRoutes.length - 1; index >= 0; index--) {
+            if (removed.includes(planRoutes[index]!)) planRoutes.splice(index, 1);
+          }
+          changed = true;
+        }
+        for (const provider of providers) {
+          if (planRoutes.some((route) => route.plan === "api-key" && route.apiProviderID === provider.providerID)) continue;
+          planRoutes.push(createAPIRoute(provider));
+          changed = true;
+        }
+        if (changed && republish) republishFromPlans();
+      };
+      synchronizeAPIKeyRoutes = () => synchronize(true);
+      synchronize(false);
+      // /models 与未知 API 前缀请求都会重新同步，支持新增/删除 provider；现有
+      // provider 的 Key 与模型变化由各自 cache 的 provider_config watcher 驱动。
     }
   }
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
@@ -175,6 +246,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
 
   return {
     async catalog(): Promise<ModelCatalog> {
+      synchronizeAPIKeyRoutes();
       if (closed || planRoutes.every((route) => !route.cache)) return { models: [] };
       const neverPublished = publishedSnapshots === undefined;
       // watch 是主驱动；注入的自定义缓存没有回调，这里按快照身份做一次廉价兜底。
@@ -272,7 +344,20 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         abort.signal.throwIfAborted();
         // 会话级套餐选择：模型 slug 的套餐段决定走哪条路由；key 的解析与上游调用链路不变。
         const requested = typeof input.model === "string" ? input.model : "";
-        const route = planRoutes.find((entry) => entry.plan === zcodeModelPlan(requested));
+        const requestedPlan = zcodeModelPlan(requested);
+        if (requestedPlan === "api-key") synchronizeAPIKeyRoutes();
+        const requestedProviderID = requestedPlan === "api-key" ? zcodeAPIProviderIDFromModel(requested) : undefined;
+        const route = planRoutes.find((entry) => {
+          if (entry.plan !== requestedPlan) return false;
+          if (requestedPlan !== "api-key") return true;
+          if (!requestedProviderID) return !entry.apiProviderID || planRoutes.find(
+            (candidate) => candidate.plan === "api-key" && candidate.apiProviderID,
+          ) === entry;
+          if (entry.apiProviderID === requestedProviderID) return true;
+          // 注入模式只有一个 legacy api-key 缓存时先命中，再由 zcodeUpstreamModel
+          // 按快照 providerID 精确拒绝不匹配的请求。
+          return !entry.apiProviderID;
+        });
         if (!route?.cache) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
         const snapshot = await route.cache.get();
         key = snapshot.apiKey;
