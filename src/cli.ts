@@ -108,7 +108,7 @@ Usage:
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--codebuddy-region auto|cn|intl] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy web
   codex-cliproxy status
 
@@ -150,6 +150,9 @@ Config:
   config --zcode on|off toggle ZCode Responses-to-Anthropic compatibility
   config --codebuddy on|off
                         toggle CodeBuddy/WorkBuddy Responses compatibility
+  config --codebuddy-region auto|cn|intl
+                        prefer CodeBuddy credentials from a region; auto uses
+                        the most recently refreshed login
   config --log on|off   toggle request logging
   config --max-request-logs N
                         max request log files kept across the directory; 0 (default) means unlimited
@@ -436,6 +439,7 @@ export function applyRoutingMode(
 const AUDITED_FIELDS = [
   "zcode",
   "codebuddy",
+  "codebuddyRegion",
   "upstreamOnly",
   "requestLogging",
   "logDir",
@@ -1249,6 +1253,7 @@ function onOffValue(options: CliOptions, key: string): boolean | undefined {
 async function configCommand(options: CliOptions): Promise<void> {
   const zcodeTarget = onOffValue(options, "zcode");
   const codebuddyTarget = onOffValue(options, "codebuddy");
+  const codebuddyRegionOption = stringOption(options, "codebuddy-region");
   const logTarget = onOffValue(options, "log");
   const maxLogsOption = stringOption(options, "max-request-logs");
   const maxLogSizeOption = stringOption(options, "max-log-size");
@@ -1257,7 +1262,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && codebuddyTarget === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && codebuddyRegionOption === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
     const codebuddyActive = codebuddyEnabled(config);
     console.log(JSON.stringify({
@@ -1267,6 +1272,7 @@ async function configCommand(options: CliOptions): Promise<void> {
       ...(config.zcode === true && !zcodeActive ? { zcodeConfigured: true } : {}),
       codebuddy: codebuddyActive,
       ...(config.codebuddy === true && !codebuddyActive ? { codebuddyConfigured: true } : {}),
+      codebuddyRegion: config.codebuddyRegion ?? "auto",
       requestLogging: config.requestLogging === true,
       logDir: config.logDir || paths.logDir,
       maxRequestLogs: config.maxRequestLogs ?? 0,
@@ -1292,6 +1298,14 @@ async function configCommand(options: CliOptions): Promise<void> {
     applied.push(codebuddyTarget && !codebuddyActive
       ? "CodeBuddy compatibility saved but inactive: upstream-only mode treats CodeBuddy as disabled."
       : `CodeBuddy compatibility ${codebuddyTarget ? "enabled" : "disabled"}.`);
+  }
+  if (codebuddyRegionOption !== undefined) {
+    const normalized = codebuddyRegionOption.trim().toLowerCase();
+    if (normalized !== "auto" && normalized !== "cn" && normalized !== "intl") {
+      throw new Error(`--codebuddy-region expects auto, cn, or intl, got "${codebuddyRegionOption}"`);
+    }
+    config.codebuddyRegion = normalized;
+    applied.push(`CodeBuddy region preference set to ${normalized}.`);
   }
   if (maxLogsOption !== undefined) {
     config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
@@ -1473,7 +1487,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["zcode", "codebuddy", "log", "max-request-logs", "max-log-size"],
+  config: ["zcode", "codebuddy", "codebuddy-region", "log", "max-request-logs", "max-log-size"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };
 

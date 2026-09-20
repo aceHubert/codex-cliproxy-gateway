@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import type { CodebuddyRegion } from "../types.ts";
 
 /**
  * CodeBuddy/WorkBuddy 桌面端登录凭据（.info 文件）的只读消费层。
@@ -69,6 +70,8 @@ export interface CodebuddyCredentialDependencies {
   now?: () => number;
   /** 每次实际解析 .info 成功的回调（测试统计读取次数）。 */
   onCredentialRead?: () => void;
+  /** 固定凭据地域；该地域没有任何凭据时回退最近登录的 auto 规则。 */
+  preferredRegion?: Exclude<CodebuddyRegion, "auto">;
 }
 
 function invalid(message: string): never {
@@ -201,12 +204,11 @@ const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 
 export interface CodebuddyCredentialCache {
   /**
-   * 按产品接口选取凭据。前缀（`codebuddy/`/`workbuddy/`）决定产品接口，凭据只贡献
-   * token 与地域：活动地域取最近刷新的登录，同产品凭据优先；缺失时回退同地域另一
-   * 产品的登录（同账号额度共享）——回退时接口（端点/身份头/目录平台）换成请求
-   * 前缀的产品，token 与账号沿用现有登录。
+   * 按产品接口选取凭据。模型 slug 中的地域是硬性路由：该地域没有任何凭据时直接
+   * 报错，不回退另一地域。目录刷新没有 slug 可依据，仍使用配置偏好；配置地域缺失
+   * 时回退最近登录的 auto 规则。同产品凭据优先，缺失时回退同地域另一产品登录。
    */
-  forProduct(product: "cli" | "work"): Promise<CodebuddyCredential>;
+  forProduct(product: "cli" | "work", region?: Exclude<CodebuddyRegion, "auto">): Promise<CodebuddyCredential>;
   close(): void;
 }
 
@@ -321,8 +323,29 @@ export function createCodebuddyCredentialCache(
     return profileRegion(freshest!.profile);
   }
 
-  function select(byProfile: Map<CodebuddyProfile, CodebuddyCredential>, product: "cli" | "work"): CodebuddyCredential {
-    const region = activeRegion(byProfile);
+  function regionFor(
+    byProfile: Map<CodebuddyProfile, CodebuddyCredential>,
+    requested?: Exclude<CodebuddyRegion, "auto">,
+  ): "cn" | "intl" {
+    if (requested !== undefined) {
+      if (![...byProfile.keys()].some((profile) => profileRegion(profile) === requested)) {
+        throw new CodebuddyCredentialError(`没有可用的 ${requested === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
+      }
+      return requested;
+    }
+    if (dependencies.preferredRegion !== undefined
+      && [...byProfile.keys()].some((profile) => profileRegion(profile) === dependencies.preferredRegion)) {
+      return dependencies.preferredRegion;
+    }
+    return activeRegion(byProfile);
+  }
+
+  function select(
+    byProfile: Map<CodebuddyProfile, CodebuddyCredential>,
+    product: "cli" | "work",
+    requestedRegion?: Exclude<CodebuddyRegion, "auto">,
+  ): CodebuddyCredential {
+    const region = regionFor(byProfile, requestedRegion);
     const wanted = `${region}-${product}` as CodebuddyProfile;
     const exact = byProfile.get(wanted);
     if (exact !== undefined) return exact;
@@ -332,12 +355,12 @@ export function createCodebuddyCredentialCache(
   }
 
   return {
-    async forProduct(product) {
+    async forProduct(product, region) {
       if (closed) throw new CodebuddyCredentialError("CodeBuddy 凭据监听已关闭，请重启网关");
       reconcileWatcher();
       // 每次选取前重扫：文件量小、读取廉价，正确性不依赖 fs.watch 事件到达时机。
       applyScan(state.byProfile);
-      let credential = state.failure || state.byProfile.size === 0 ? undefined : select(state.byProfile, product);
+      let credential = state.failure || state.byProfile.size === 0 ? undefined : select(state.byProfile, product, region);
 
       if (state.failure) throw state.failure;
       if (!credential) throw new CodebuddyCredentialError("CodeBuddy 凭据不可用");

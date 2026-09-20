@@ -18,21 +18,45 @@ import { buildCodebuddyCatalogHeaders, catalogRevision } from "./request-context
 export const CODEBUDDY_PREFIX = "codebuddy/";
 export const WORKBUDDY_PREFIX = "workbuddy/";
 
+export interface CodebuddyModelRoute {
+  product: "cli" | "work";
+  region: "cn" | "intl";
+}
+
+const MODEL_ROUTES: Array<{ prefix: string } & Required<CodebuddyModelRoute>> = [
+  { prefix: "workbuddy-intl/", product: "work", region: "intl" },
+  { prefix: "workbuddy-cn/", product: "work", region: "cn" },
+  { prefix: "codebuddy-intl/", product: "cli", region: "intl" },
+  { prefix: "codebuddy-cn/", product: "cli", region: "cn" },
+];
+
 export function isCodebuddyModel(model: unknown): boolean {
-  return typeof model === "string"
-    && (model.toLowerCase().startsWith(CODEBUDDY_PREFIX) || model.toLowerCase().startsWith(WORKBUDDY_PREFIX));
+  if (typeof model !== "string") return false;
+  const lower = model.toLowerCase();
+  // 旧前缀也要识别为 CodeBuddy 族，保证被本地 400 拦截而不是透传官方后端。
+  return codebuddyModelRoute(model) !== undefined
+    || lower.startsWith(CODEBUDDY_PREFIX)
+    || lower.startsWith(WORKBUDDY_PREFIX);
 }
 
 export function codebuddyFamilyPrefix(profile: CodebuddyProfile): string {
-  return profileProduct(profile) === "work" ? WORKBUDDY_PREFIX : CODEBUDDY_PREFIX;
+  const product = profileProduct(profile) === "work" ? "workbuddy" : "codebuddy";
+  return `${product}-${profileRegion(profile)}/`;
 }
 
-/** 模型前缀 → 产品接口：`codebuddy/` → cli，`workbuddy/` → work；非本族模型返回 undefined。 */
-export function codebuddyModelProduct(model: unknown): "cli" | "work" | undefined {
+/** 模型前缀 → 产品与地域路由；地域是 slug 的一部分，不接受旧的无地域前缀。 */
+export function codebuddyModelRoute(model: unknown): CodebuddyModelRoute | undefined {
   if (typeof model !== "string") return;
   const lower = model.toLowerCase();
-  if (lower.startsWith(WORKBUDDY_PREFIX)) return "work";
-  if (lower.startsWith(CODEBUDDY_PREFIX)) return "cli";
+  return MODEL_ROUTES.find(({ prefix }) => lower.startsWith(prefix));
+}
+
+export function codebuddyModelProduct(model: unknown): "cli" | "work" | undefined {
+  return codebuddyModelRoute(model)?.product;
+}
+
+export function codebuddyModelRegion(model: unknown): "cn" | "intl" | undefined {
+  return codebuddyModelRoute(model)?.region;
 }
 
 /** 目录缓存文件按产品×地域命名：`codebuddy-intl-catalog.json`、`workbuddy-cn-catalog.json` 等。 */
@@ -43,10 +67,11 @@ export function codebuddyCatalogFileName(profile: CodebuddyProfile): string {
 
 /** 前缀族 → 裸模型 ID；档位模型原样透传，不做本地展开。 */
 export function codebuddyUpstreamModel(model: string): string | undefined {
-  if (!isCodebuddyModel(model)) return;
-  const bare = model.toLowerCase().startsWith(CODEBUDDY_PREFIX)
-    ? model.slice(CODEBUDDY_PREFIX.length)
-    : model.slice(WORKBUDDY_PREFIX.length);
+  const route = codebuddyModelRoute(model);
+  if (!route) return;
+  const prefix = MODEL_ROUTES.find((candidate) => candidate.product === route.product
+    && candidate.region === route.region)!.prefix;
+  const bare = model.slice(prefix.length);
   return bare || undefined;
 }
 
@@ -92,10 +117,10 @@ const CATALOG_FAILURE_COOLDOWN_MS = 30 * 1000;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /**
- * 服务端档位模型（Auto/Fast/Balanced/Primary/Deep）：只做 Codex 模型选择框展示用，
+ * 服务端档位模型（Auto/auto/Fast/Balanced/Primary/Deep）：只做 Codex 模型选择框展示用，
  * 后端由服务端解析；从网关目录中过滤，避免与具体模型并列出现。
  */
-const TIER_MODEL_IDS = new Set(["default-model", "fast-model", "balanced-model", "primary-model", "deep-model"]);
+const TIER_MODEL_IDS = new Set(["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model"]);
 
 type ScopeModel = Record<string, unknown>;
 
@@ -256,7 +281,7 @@ export function buildCodebuddyCatalog(data: CodebuddyConfigData, profile: Codebu
   return { models: entries };
 }
 
-/** /models 按当前 profile 加统一前缀族（cli 产品 → codebuddy/，work 产品 → workbuddy/）。 */
+/** /models 按当前 profile 加带地域的前缀族（如 codebuddy-intl/、workbuddy-cn/）。 */
 export function projectCodebuddyCatalog(catalog: ModelCatalog, profile: CodebuddyProfile): ModelCatalog {
   const prefix = codebuddyFamilyPrefix(profile);
   return { models: catalog.models.map((entry) => ({ ...entry, slug: `${prefix}${entry.slug}` })) };
@@ -281,7 +306,7 @@ function preferCodebuddyEntry(candidate: ModelEntry, current: ModelEntry): boole
 }
 
 /**
- * 两个前缀族的同名模型去重：cli 族与 work 族经同地域回退共用一份登录时，两边会拉到
+ * 同地域两个前缀族的同名模型去重：cli 族与 work 族经同地域回退共用一份登录时，两边会拉到
  * 同一批上游模型（slug 前缀不同、裸 ID 相同），Codex 选择框将出现重名条目。此处按
  * 裸 ID 合并，保留「cli 优先 → 倍率低优先（免费即 x0 最前）」的那一条；只出现在单侧
  * 的模型（如 work 独有的 `hy4-preview-f`）原样保留，非本族条目不参与去重。
@@ -295,7 +320,7 @@ export function dedupeCodebuddyCatalog(catalog: ModelCatalog): ModelCatalog {
       models.push(model);
       continue;
     }
-    const key = bare.toLowerCase();
+    const key = `${codebuddyModelRegion(model.slug)}:${bare.toLowerCase()}`;
     const index = indexByKey.get(key);
     if (index === undefined) {
       indexByKey.set(key, models.length);

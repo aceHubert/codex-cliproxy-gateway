@@ -9,6 +9,7 @@ __pycache__/
 
 
 jshander/
+gui-test-screenshots/
 
 # local env files
 .env.local

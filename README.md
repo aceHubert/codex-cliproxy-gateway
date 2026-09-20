@@ -195,7 +195,6 @@ codex-cliproxy config --log off
 codex-cliproxy config --zcode on
 ```
 
-在 Codex 中选择 `zcode/` 开头的模型，例如 `zcode/glm-5.3`。
 可用型号取决于当前 ZCode 配置与网关支持范围；登录失效时请回到 ZCode 处理。
 
 关闭：

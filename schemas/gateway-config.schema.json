@@ -110,6 +110,12 @@
       "type": "boolean",
       "default": false
     },
+    "codebuddyRegion": {
+      "description": "CodeBuddy/WorkBuddy 凭据地域：auto 按最近刷新的登录选择；cn 或 intl 固定地域，指定地域没有凭据时回退 auto。",
+      "type": "string",
+      "enum": ["auto", "cn", "intl"],
+      "default": "auto"
+    },
     "cpaOnly": {
       "description": "已过时，由 upstreamOnly 取代；命令前置同步会自动迁移并移除该键。",
       "type": "boolean",

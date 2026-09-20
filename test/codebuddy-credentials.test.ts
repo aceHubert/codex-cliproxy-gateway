@@ -90,7 +90,7 @@ test("凭据缓存扫描目录并按前缀产品选取接口", async () => {
       assert.equal(cli.endpoint, "https://www.codebuddy.ai");
       assert.equal(cli.accountUid, "uid-1234");
       assert.equal(cli.domain, "www.codebuddy.ai");
-      // 只有 cli 登录时 workbuddy/ 前缀回退同一 token，但接口换成 IDE 端点与身份。
+      // 只有 cli 登录时 workbuddy-intl/ 前缀回退同一 token，但接口换成 IDE 端点与身份。
       const work = await cache.forProduct("work");
       assert.equal(work.profile, "intl-work");
       assert.equal(work.endpoint, "https://www.workbuddy.ai");
@@ -141,6 +141,35 @@ test("混合地域登录以最近刷新者决定活动地域", async () => {
       assert.equal(work.profile, "cn-work");
     } finally {
       cache.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("固定目录地域优先；模型显式地域缺失直接报错，配置地域缺失回退 auto", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-region-"));
+  try {
+    fs.writeFileSync(path.join(directory, "cn.info"),
+      JSON.stringify(infoFile("www.codebuddy.cn", "https://www.codebuddy.cn/auth/realms/copilot", { lastRefreshTime: 1_000 })));
+    fs.writeFileSync(path.join(directory, "intl.info"),
+      JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", { lastRefreshTime: 5_000 })));
+
+    const preferred = createCodebuddyCredentialCache(directory, { preferredRegion: "cn" });
+    try {
+      assert.equal((await preferred.forProduct("cli")).endpoint, "https://copilot.tencent.com");
+      assert.equal((await preferred.forProduct("cli", "intl")).endpoint, "https://www.codebuddy.ai");
+    } finally {
+      preferred.close();
+    }
+
+    fs.rmSync(path.join(directory, "cn.info"));
+    const fallback = createCodebuddyCredentialCache(directory, { preferredRegion: "cn" });
+    try {
+      assert.equal((await fallback.forProduct("cli")).endpoint, "https://www.codebuddy.ai");
+      await assert.rejects(fallback.forProduct("cli", "cn"), /国内.*登录凭据/);
+    } finally {
+      fallback.close();
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { readZcodeIndividualApiKey } from "./individual-credentials.ts";
+import { decryptZcodeCredential } from "./credential-cipher.ts";
+import { readZcodeIndividualCredential } from "./individual-credentials.ts";
 import {
   readZcodeTeamCredentialInputs,
   resolveZcodeTeamApiKey,
@@ -20,6 +21,8 @@ export interface ZcodeSelection {
 export interface ZcodeProviderSnapshot {
   family: ZcodeFamily;
   providerID: string;
+  /** 该快照所属的套餐连接形态；决定对外 slug 作用域、显示名与鉴权头差异。 */
+  plan: ZcodeSelection["kind"];
   apiKey: string;
   baseURL: string;
   modelIds: readonly string[];
@@ -36,10 +39,19 @@ export interface ZcodeCacheDependencies {
   now?: () => number;
   fetch?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  /**
+   * 固定解析某个套餐槽位（个人/团队/Start Plan/api-key），缺省跟随 ZCode 客户端
+   * 当前渠道的选择。套餐槽位从两个渠道的连接形态汇总而来，当前渠道优先。
+   */
+  plan?: ZcodeSelection["kind"];
   /** 只统计实际业务 Key 的构建，不接收或暴露密钥。 */
   onCredentialBuild?: () => void;
   /** 用于验证差分检查只在需要时读取 provider 配置。 */
   onConfigRead?: () => void;
+  /** 套餐选择变化或当前选择不可解析时通知调用方，用于立即撤下已失效的下游目录条目。 */
+  onSelectionChange?: () => void;
+  /** 内存快照（渠道/套餐/模型集合/凭据）变化后触发，用于重建对外目录。 */
+  onSnapshotChange?: (snapshot: ZcodeProviderSnapshot) => void;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -69,6 +81,14 @@ function readPreferred(home: string, name: string): Record<string, unknown> {
     invalid(`无法读取 ZCode ${name}`);
   }
 }
+/** 仅文件缺失时返回空对象；损坏、权限和符号链接仍由 readPreferred 明确报错。 */
+function readOptionalPreferred(home: string, name: string): Record<string, unknown> {
+  const present = [path.join(home, name), path.join(home, "v2", name)].some((file) => {
+    try { fs.lstatSync(file); return true; }
+    catch (error) { return (error as NodeJS.ErrnoException).code !== "ENOENT"; }
+  });
+  return present ? readPreferred(home, name) : {};
+}
 function baseURL(value: unknown): string {
   if (typeof value !== "string" || !value.trim()) invalid("当前 provider 缺少 Anthropic baseURL");
   let url: URL;
@@ -82,6 +102,20 @@ function baseURL(value: unknown): string {
 }
 function isPlan(selection: ZcodeSelection): boolean {
   return selection.kind !== "api-key";
+}
+/**
+ * Start Plan 的请求鉴权走套餐服务凭证：`/api/auth/z/login` 用 OAuth token 换出的
+ * biz JWT（credentials 的 zcodejwttoken）。实测 OAuth access token 会被 zcode-plan
+ * 中继与 billing 一并 401；镜像里的旧 JWT 仅作官方同款回退（readRoute 提供）。
+ */
+function startPlanApiKey(credentials: Record<string, unknown>, _family: ZcodeFamily, env: NodeJS.ProcessEnv = process.env): string {
+  const value = credentials.zcodejwttoken;
+  if (typeof value !== "string" || !value.trim()) return "";
+  try {
+    return decryptZcodeCredential(value, env).trim();
+  } catch {
+    invalid("Start Plan 凭据解密失败");
+  }
 }
 /**
  * ZCode 3.12.3 起切换套餐只写 `providerFamilyConnectionSelections[family].kind`，
@@ -115,10 +149,22 @@ function legacyKind(family: ZcodeFamily, providerID: string): ZcodeSelection["ki
 function selectionIdentity(selection: ZcodeSelection): string {
   return JSON.stringify([selection.family, selection.kind, selection.providerID, selection.team ?? null]);
 }
-function readSelection(home: string): ZcodeSelection {
-  const setting = readPreferred(home, "setting.json");
-  const family = setting.providerFamilyDomain;
-  if (family !== "zai" && family !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
+/**
+ * ZCode 3.14 起 `providerFamilyConnectionSelections[family].kind` 只表达当前渠道
+ * 的连接形态，切换渠道后另一渠道的旧连接可能继续留在磁盘里。只有该渠道仍持有
+ * OAuth access token 时才把槽位暴露给会话；否则个人/团队请求会命中已失效连接。
+ * 各渠道严格读取自己的 key，不能回退到另一渠道。
+ */
+function hasOAuthCredential(credentials: Record<string, unknown>, family: ZcodeFamily): boolean {
+  const token = credentials[`oauth:${family}:access_token`];
+  return typeof token === "string" && token.trim().length > 0;
+}
+/**
+ * 单个渠道的双源选择解析：3.12.3 的 `providerFamilyConnectionSelections[family].kind`
+ * 优先，条目缺失或形状非法时回退该渠道的 legacy `modelProviderFamilySelectedKeys`。
+ * `scope` 只用于报错文案：当前渠道沿用「当前渠道」，另一渠道写明渠道名。
+ */
+function familySelection(setting: Record<string, unknown>, family: ZcodeFamily, scope: string): ZcodeSelection {
   const entry = connectionSelection(setting, family);
   if (entry) {
     const kind = entry.kind;
@@ -128,13 +174,77 @@ function readSelection(home: string): ZcodeSelection {
     }
     if (kind === "start-plan") return { family, kind, providerID: `builtin:${family}-start-plan` };
     // 条目存在且 kind 已解析，说明用户做了真实的新选择；回退会静默跟随冻结的旧渠道。
-    invalid(`ZCode 当前渠道的选择类型 "${kind}" 暂不被网关支持，请在 ZCode 中切换到 Coding Plan 或 Start Plan`);
+    invalid(`ZCode ${scope}的选择类型 "${kind}" 暂不被网关支持，请在 ZCode 中切换到 Coding Plan 或 Start Plan`);
   }
   const selected = record(setting.modelProviderFamilySelectedKeys) ? setting.modelProviderFamilySelectedKeys[family] : undefined;
-  if (typeof selected !== "string" || selected.indexOf(":") < 1) invalid("ZCode 当前渠道缺少有效 provider 选择");
+  if (typeof selected !== "string" || selected.indexOf(":") < 1) invalid(`ZCode ${scope}缺少有效 provider 选择`);
   const providerID = selected.slice(selected.indexOf(":") + 1);
-  if (!providerID) invalid("ZCode 当前 provider ID 为空");
+  if (!providerID) invalid(`ZCode ${scope}的 provider ID 为空`);
   return { family, kind: legacyKind(family, providerID), providerID };
+}
+
+export interface ZcodePlanSelections {
+  /** 当前渠道（providerFamilyDomain）；失败根因优先取它的解析错误。 */
+  domain: ZcodeFamily;
+  /** 各套餐槽位当前可解析的选择；同一槽位两个渠道都有时取当前渠道。 */
+  plans: Partial<Record<ZcodeSelection["kind"], ZcodeSelection>>;
+  /** 渠道级解析失败（未知 kind、缺 provider 选择等）；该渠道的所有槽位都不可用。 */
+  failures: Partial<Record<ZcodeFamily, ZcodeConfigError>>;
+}
+
+const PLAN_UNAVAILABLE: Record<ZcodeSelection["kind"], string> = {
+  "individual-coding-plan": "没有可用的个人 Coding Plan 连接，请在 ZCode 中连接个人套餐",
+  "team-coding-plan": "没有可用的团队 Coding Plan 连接，请在 ZCode 中连接团队套餐",
+  "start-plan": "没有可用的 Start Plan 连接，请在 ZCode 中连接后重试",
+  "api-key": "ZCode 当前渠道未选择自定义 provider",
+};
+
+/**
+ * 按套餐槽位汇总两个渠道的连接形态（当前渠道优先），供网关把多个套餐同时暴露给
+ * 会话级路由。api-key 只跟随当前渠道的自定义 provider 选择；单个渠道解析失败只
+ * 影响该渠道能提供的槽位，不拖垮另一个渠道。
+ */
+function readZcodePlanSelections(home: string): ZcodePlanSelections {
+  const setting = readPreferred(home, "setting.json");
+  const domain = setting.providerFamilyDomain;
+  if (domain !== "zai" && domain !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
+  const plans: ZcodePlanSelections["plans"] = {};
+  const failures: ZcodePlanSelections["failures"] = {};
+  const other = domain === "zai" ? "bigmodel" : "zai";
+  // 文件缺失只撤销 OAuth 套餐槽位；损坏或权限问题仍需明确报错，不能静默降级。
+  const credentials = readOptionalPreferred(home, "credentials.json");
+  for (const family of [domain, other] as const) {
+    try {
+      const selection = familySelection(setting, family, family === domain ? "当前渠道" : `${family} 渠道`);
+      if (selection.kind === "api-key") {
+        if (family === domain) plans["api-key"] ??= selection;
+      } else if (hasOAuthCredential(credentials, family)) {
+        plans[selection.kind] ??= selection;
+      }
+    } catch (error) {
+      failures[family] = error instanceof ZcodeConfigError ? error : new ZcodeConfigError(`无法解析 ZCode ${family} 渠道选择`);
+    }
+  }
+  // Start Plan 不依赖连接形态：账号态 OAuth 即可鉴权，资格由 billing/balance 判定、
+  // 上游最终拒绝；槽位兜底指向当前渠道的 start-plan provider，让免费档始终可选。
+  plans["start-plan"] ??= { family: domain, kind: "start-plan", providerID: `builtin:${domain}-start-plan` };
+  return { domain, plans, failures };
+}
+
+function readSelection(home: string, plan?: ZcodeSelection["kind"]): ZcodeSelection {
+  if (plan === undefined) {
+    const setting = readPreferred(home, "setting.json");
+    const family = setting.providerFamilyDomain;
+    if (family !== "zai" && family !== "bigmodel") invalid("ZCode 未选择 zai 或 bigmodel 渠道");
+    return familySelection(setting, family, "当前渠道");
+  }
+  const { domain, plans, failures } = readZcodePlanSelections(home);
+  const selection = plans[plan];
+  if (selection) return selection;
+  // 槽位缺失时优先透出当前渠道的解析根因（如未知 kind），比笼统的缺连接提示更可
+  // 执行；另一渠道的失败与本套餐无关，不劫持提示。根因消息自带修复指引，不再叠
+  // 加 invalid 的后缀。
+  throw new ZcodeConfigError(failures[domain]?.message ?? PLAN_UNAVAILABLE[plan]);
 }
 /** models 的字典键才是上游 ID；显示名和其他元数据不参与路由投影。 */
 function modelIds(value: unknown): readonly string[] {
@@ -154,19 +264,29 @@ function modelIds(value: unknown): readonly string[] {
   }));
 }
 function readRoute(home: string, selection: ZcodeSelection): Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string } {
-  const { family, providerID } = selection;
+  const { family, providerID, kind: plan } = selection;
   const config = readPreferred(home, "config.json");
   const provider = record(config.provider) && Object.hasOwn(config.provider, providerID) ? config.provider[providerID] : undefined;
   if (!record(provider) || !record(provider.options)) invalid("找不到 ZCode 当前 provider 的 options");
+  if (selection.kind === "team-coding-plan") {
+    // team 的 enabled 镜像仍跟随个人 OAuth 状态；团队权益由官方项目接口校验。
+    return { family, providerID, plan, baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
+  }
+  if (selection.kind === "start-plan") {
+    // start-plan 的镜像状态与旧 JWT 都可能冻结在个人 Coding Plan 结果；鉴权首选
+    // credentials 的 zcodejwttoken（biz JWT），镜像 JWT 仅作官方同款回退，权益由
+    // ZCode 自己的 billing/balance 判定，上游仍会最终拒绝。
+    const mirror = provider.options.apiKey;
+    return { family, providerID, plan,
+      ...(typeof mirror === "string" && mirror && !/[^\x21-\x7e]/.test(mirror) ? { apiKey: mirror } : {}),
+      baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
+  }
   if (provider.enabled === false || (typeof provider.systemDisabledReason === "string" && provider.systemDisabledReason.length > 0)) {
     invalid("ZCode 当前 provider 已停用");
   }
-  if (selection.kind === "team-coding-plan") {
-    return { family, providerID, baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
-  }
   const apiKey = provider.options.apiKey;
   if (typeof apiKey !== "string" || !apiKey || /[^\x21-\x7e]/.test(apiKey)) invalid("当前 provider 缺少有效 options.apiKey");
-  return { family, providerID, apiKey, baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
+  return { family, providerID, plan, apiKey, baseURL: baseURL(provider.options.baseURL), modelIds: modelIds(provider.models) };
 }
 function expiresAt(apiKey: string): number | undefined {
   const parts = apiKey.split(".");
@@ -192,6 +312,7 @@ export function zcodeConfigPresent(homeDirectory: string): boolean {
 /** 文件检查同步完成，凭证仅按 Key 的实际变化构建；事件不废弃有效快照。 */
 export function createZcodeConfigCache(homeDirectory: string, dependencies: ZcodeCacheDependencies = {}): ZcodeConfigCache {
   const home = path.resolve(homeDirectory);
+  const plan = dependencies.plan;
   const now = dependencies.now ?? Date.now;
   const watch = dependencies.watch ?? fs.watch;
   const stat = dependencies.stat ?? fs.statSync;
@@ -229,6 +350,8 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let expiryTimer: ReturnType<typeof setTimeout> | undefined;
   let expiryCheckedKey: string | undefined;
   let waiting: { promise: Promise<void>; resolve(): void } | undefined;
+  /** 最近一次已通知调用方的快照；仅按对象身份比较，避免重复重建目录。 */
+  let notifiedSnapshot: ZcodeProviderSnapshot | undefined;
 
   function finish(): void { const previous = waiting; waiting = undefined; previous?.resolve(); }
   function stop(message: string): void {
@@ -266,7 +389,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     }
     if (file === "setting.json" && selection) {
       try {
-        const next = readSelection(home);
+        const next = readSelection(home, plan);
         if (selectionIdentity(next) !== selectionIdentity(selection)) {
           credentialGeneration++;
           resolving = undefined;
@@ -338,6 +461,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   }
   function check(): void {
     if (closed) return;
+    const beforeSnapshot = snapshot;
     clearTimeout(debounce);
     debounce = undefined;
     firstEventAt = undefined;
@@ -347,11 +471,19 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     catch { stop("无法持续监听 ZCode 配置，请检查权限并重启网关"); return; }
     try {
       let selectionChanged = false;
-      if (!selection || changed.has("setting.json")) {
+      if (!selection || changed.has("setting.json") || (isPlan(selection) && changed.has("credentials.json"))) {
         let next: ZcodeSelection;
-        try { next = readSelection(home); }
-        catch (error) { selection = undefined; throw error; }
+        try { next = readSelection(home, plan); }
+        catch (error) {
+          const hadSelection = selection !== undefined;
+          selection = undefined;
+          // 选择不可解析时旧套餐目录必须立即失效，不能继续留在客户端缓存里。
+          if (hadSelection) dependencies.onSelectionChange?.();
+          throw error;
+        }
+        const hadSelection = selection !== undefined;
         selectionChanged = !selection || selectionIdentity(next) !== selectionIdentity(selection);
+        if (hadSelection && selectionChanged) dependencies.onSelectionChange?.();
         if (selectionChanged) {
           credentialGeneration++;
           resolving = undefined;
@@ -374,7 +506,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           teamCredentialFingerprint = "";
         }
         try {
-          const credentials = readPreferred(home, "credentials.json");
+          const credentials = readOptionalPreferred(home, "credentials.json");
           if (selection.kind === "team-coding-plan") {
             teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
             const nextFingerprint = teamInputs.fingerprint;
@@ -384,14 +516,27 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
             }
           } else {
             // 只保存当前计划渠道的授权字段与个人账号 Key 投影；全局 active_provider 不能改变模型选择。
-            const key = selection.kind === "individual-coding-plan"
-              ? readZcodeIndividualApiKey(credentials, selection.family, dependencies.env)
-              : "";
+            const individual = selection.kind === "individual-coding-plan"
+              ? readZcodeIndividualCredential(credentials, selection.family, dependencies.env)
+              : undefined;
+            const key = individual?.state === "available"
+              ? individual.apiKey
+              : individual?.state === "unavailable"
+                ? ""
+                : selection.kind === "start-plan"
+                  ? startPlanApiKey(credentials, selection.family, dependencies.env)
+                  : "";
+            // 账号身份存在却拿不到该账号的 Key 时禁止镜像回退：切换账号后
+            // config.json 里的旧 Key 可能属于上一账号。
+            if (individual?.state === "unavailable") {
+              throw new ZcodeConfigError("ZCode 个人套餐凭据不可用；请在 ZCode 中重新连接当前账号");
+            }
             personalApiKey = key || undefined;
             const projection = JSON.stringify([
-              credentials[`oauth:${selection.family === "zai" ? "zai" : "zhipu"}:access_token`],
-              credentials[`oauth:${selection.family === "zai" ? "zai" : "zhipu"}:refresh_token`],
+              credentials[`oauth:${selection.family}:access_token`],
+              credentials[`oauth:${selection.family}:refresh_token`],
               credentials.zcodejwttoken,
+              individual?.state === "available" ? individual.identity : individual?.state ?? null,
               key,
             ]);
             oauthChanged = projection !== oauthProjection;
@@ -403,7 +548,17 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
             credential = undefined;
             throw error instanceof ZcodeConfigError ? error : new ZcodeConfigError("无法读取 ZCode 团队凭据");
           }
-          /* 个人缺失或损坏时不撤销 config 镜像里的独立业务 Key。 */
+          if (selection.kind === "start-plan") {
+            snapshot = undefined;
+            credential = undefined;
+            throw error instanceof ZcodeConfigError ? error : new ZcodeConfigError("无法读取 ZCode Start Plan 凭据");
+          }
+          if (error instanceof ZcodeConfigError) {
+            snapshot = undefined;
+            credential = undefined;
+            throw error;
+          }
+          /* 无账号身份（旧安装）仍保留 config 镜像里的独立业务 Key。 */
         }
       } else if (selectionChanged) oauthProjection = undefined;
       if (selectionChanged || changed.has("config.json") || oauthChanged || (!route && !routeFailure)) {
@@ -429,7 +584,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         }
         if (!teamInputs || !fingerprint || mustResolve) {
           if (!teamInputs || !fingerprint) {
-            const credentials = readPreferred(home, "credentials.json");
+            const credentials = readOptionalPreferred(home, "credentials.json");
             teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
             teamCredentialFingerprint = teamInputs.fingerprint;
           }
@@ -483,8 +638,11 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         armExpiry();
         return;
       }
-      const routeApiKey = personalApiKey ?? next.apiKey;
-      if (!routeApiKey) invalid("当前 provider 缺少有效 options.apiKey");
+      // start-plan：上次套餐凭据优先于镜像 JWT（镜像只是无 zcodejwttoken 时的引导回退），
+      // 否则不重读凭据的检查轮次会把 key 静默换成可能冻结的镜像值。
+      const routeApiKey = personalApiKey
+        ?? (selection.kind === "start-plan" ? credential?.apiKey ?? next.apiKey : next.apiKey);
+      if (!routeApiKey) invalid(selection.kind === "start-plan" ? "Start Plan 缺少可用的 zcode JWT 凭据" : "当前 provider 缺少有效 options.apiKey");
       const hadFailure = failure !== undefined;
       const keyChanged = !credential || credential.apiKey !== routeApiKey;
       if (keyChanged) {
@@ -499,10 +657,11 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         invalid("ZCode 当前业务 Key 已过期");
       }
       if (!snapshot || snapshot.family !== next.family || snapshot.providerID !== next.providerID
+        || snapshot.plan !== next.plan
         || snapshot.apiKey !== routeApiKey || snapshot.baseURL !== next.baseURL
         || snapshot.modelIds.length !== next.modelIds.length
         || snapshot.modelIds.some((id, index) => id !== next.modelIds[index])) {
-        snapshot = Object.freeze({ family: next.family, providerID: next.providerID, apiKey: routeApiKey,
+        snapshot = Object.freeze({ family: next.family, providerID: next.providerID, plan: next.plan, apiKey: routeApiKey,
           baseURL: next.baseURL, modelIds: next.modelIds,
           ...(currentCredential.expiresAt === undefined ? {} : { expiresAt: currentCredential.expiresAt }) });
       }
@@ -511,7 +670,14 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
     } catch (error) {
       failure = error instanceof ZcodeConfigError ? error : new ZcodeConfigError("无法检查 ZCode 当前配置，请修复配置");
       clearTimeout(expiryTimer);
-    } finally { finish(); }
+    } finally {
+      // 快照身份变化才通知：watch 驱动的账号/套餐/模型集合变化由此重建对外目录。
+      if (snapshot !== beforeSnapshot && snapshot !== notifiedSnapshot) {
+        notifiedSnapshot = snapshot;
+        if (snapshot) dependencies.onSnapshotChange?.(snapshot);
+      }
+      finish();
+    }
   }
   function expire(): void {
     if (!snapshot || snapshot.expiresAt === undefined || snapshot.expiresAt > now()) return;

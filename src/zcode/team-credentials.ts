@@ -39,8 +39,7 @@ export function readZcodeTeamCredentialInputs(
   family: ZcodeFamily,
   env: NodeJS.ProcessEnv = process.env,
 ): ZcodeTeamCredentialInputs {
-  const oauthProvider = family === "zai" ? "zai" : "zhipu";
-  const accessToken = credentialValue(credentials, `oauth:${oauthProvider}:access_token`, env);
+  const accessToken = credentialValue(credentials, `oauth:${family}:access_token`, env);
   if (!accessToken) invalid("团队套餐缺少 OAuth access token");
   const zcodeJwt = credentialValue(credentials, "zcodejwttoken", env);
   if (family === "bigmodel" && zcodeJwt && zcodeJwt === accessToken) {

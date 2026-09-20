@@ -41,10 +41,10 @@ test("文本流：message 条目生命周期与 usage 汇总", async () => {
     chunk({ content: "好" }),
     chunk({}, "stop", { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9, prompt_tokens_details: { cached_tokens: 3 } }),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy/gpt-5.6-luna", tools: toolsMap(), stream: true });
+  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/gpt-5.6-luna", tools: toolsMap(), stream: true });
   const result = await completed(response);
   assert.equal(result.status, "completed");
-  assert.equal(result.model, "codebuddy/gpt-5.6-luna");
+  assert.equal(result.model, "codebuddy-intl/gpt-5.6-luna");
   const message = result.output[0];
   assert.equal(message.type, "message");
   assert.equal(message.status, "completed");
@@ -59,13 +59,13 @@ test("非流式客户端：SSE 聚合为完整 Responses JSON", async () => {
     chunk({ content: "答案" }),
     chunk({}, "stop", { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9, completion_tokens_details: { reasoning_tokens: 2 } }),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy/deepseek-m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/deepseek-m", tools: toolsMap(), stream: false });
   assert.ok(response.headers.get("content-type")?.includes("application/json"));
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");
   assert.equal(result.output[0].type, "reasoning");
   assert.equal(result.output[0].summary[0].text, "想一想");
-  assert.equal(decodeCodebuddyReasoning(result.output[0].encrypted_content, "codebuddy/deepseek-m"), "想一想");
+  assert.equal(decodeCodebuddyReasoning(result.output[0].encrypted_content, "codebuddy-intl/deepseek-m"), "想一想");
   assert.equal(result.output[1].content[0].text, "答案");
   assert.deepEqual(result.usage.output_tokens_details, { reasoning_tokens: 2 });
 });
@@ -96,14 +96,14 @@ test("空 reasoning_content 仍保留可回放的字段存在性", async () => {
     chunk({}, "tool_calls"),
   ]);
   const response = await createCodebuddyResponse(upstream, {
-    model: "codebuddy/deepseek-v4.1-flash",
+    model: "codebuddy-intl/deepseek-v4.1-flash",
     tools: toolsMap([["read_file", { name: "read_file", custom: false }]]),
     stream: false,
   });
   const result = await response.json() as Json;
   assert.equal(result.output[0].type, "reasoning");
   assert.deepEqual(result.output[0].summary, []);
-  assert.equal(decodeCodebuddyReasoning(result.output[0].encrypted_content, "codebuddy/deepseek-v4.1-flash"), "");
+  assert.equal(decodeCodebuddyReasoning(result.output[0].encrypted_content, "codebuddy-intl/deepseek-v4.1-flash"), "");
   assert.equal(result.output[1].type, "function_call");
 });
 
@@ -187,7 +187,7 @@ test("整包 JSON 上游重放为同一事件序列", async () => {
     }],
     usage: { prompt_tokens: 3, completion_tokens: 3, total_tokens: 6 },
   });
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy/m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/m", tools: toolsMap(), stream: false });
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");
   assert.equal(result.output[0].type, "reasoning");
@@ -218,7 +218,7 @@ test("整包 JSON 保留空 reasoning_content 并为并行工具补 index", asyn
     ["read_b", { name: "read_b", custom: false }],
   ]);
   const response = await createCodebuddyResponse(upstream, {
-    model: "codebuddy/deepseek-v4.1-flash", tools, stream: false,
+    model: "codebuddy-intl/deepseek-v4.1-flash", tools, stream: false,
   });
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");

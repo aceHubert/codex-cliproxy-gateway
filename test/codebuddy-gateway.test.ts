@@ -84,6 +84,7 @@ interface ChatCall {
 interface FixtureOptions {
   config?: Partial<GatewayConfig>;
   profile?: CodebuddyCredential["profile"];
+  missingRegion?: "cn" | "intl";
   chatResponse?: () => Response;
   catalogResponse?: () => Response;
 }
@@ -117,7 +118,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
     // 无 client_version 的请求返回 OpenAI list 形状。
-    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy/gpt-5.6-luna"), "/v1/models 必须合并 codebuddy 目录");
+    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy-intl/gpt-5.6-luna"), "/v1/models 必须合并 codebuddy 目录");
   };
   try {
     await run({
@@ -133,10 +134,14 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
           undefined,
           {
             credentialCache: {
-              // 按前缀产品返回对应接口的凭据；活动地域跟随 options.profile。
-              forProduct: async (product) => {
-                const region = (options.profile ?? "intl-cli").startsWith("cn-") ? "cn" : "intl";
-                return credential(`${region}-${product}` as CodebuddyCredential["profile"]);
+              // 带地域 slug 硬性路由；目录刷新没有地域参数时跟随 options.profile。
+              forProduct: async (product, region) => {
+                if (region !== undefined && region === options.missingRegion) {
+                  throw new CodebuddyCredentialError(`没有可用的 ${region === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
+                }
+                const resolvedRegion = region
+                  ?? ((options.profile ?? "intl-cli").startsWith("cn-") ? "cn" : "intl");
+                return credential(`${resolvedRegion}-${product}` as CodebuddyCredential["profile"]);
               },
               close: () => {},
             },
@@ -166,16 +171,16 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
   }
 }
 
-test("codebuddy/ 前缀在 /v1/responses 被拦截并转发官方 chat/completions", async () => {
+test("codebuddy-intl/ 前缀在 /v1/responses 被拦截并转发官方 chat/completions", async () => {
   await fixture(async ({ create, primeCatalog }) => {
     const handler = create({});
     await primeCatalog(handler);
     for (const stream of [false, true]) {
-      const response = await handler(request("codebuddy/gpt-5.6-luna", { stream }));
+      const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream }));
       assert.equal(response.status, 200);
       const result = await decoded(response);
       assert.equal(result.status, "completed");
-      assert.equal(result.model, "codebuddy/gpt-5.6-luna");
+      assert.equal(result.model, "codebuddy-intl/gpt-5.6-luna");
       assert.equal(result.output[0].type, "message");
       assert.equal(result.output[0].content[0].text, "测试答案");
       assert.deepEqual(result.usage, { input_tokens: 3, output_tokens: 2, total_tokens: 5 });
@@ -202,7 +207,7 @@ test("DeepSeek 两腿工具调用完整回放 reasoning_content", async () => {
       },
     });
     const tools = [{ type: "function", name: "read_file", parameters: { type: "object" } }];
-    const first = await handler(request("codebuddy/deepseek-v4.1-flash", { input: "读取文件", tools, stream: false }));
+    const first = await handler(request("codebuddy-intl/deepseek-v4.1-flash", { input: "读取文件", tools, stream: false }));
     assert.equal(first.status, 200);
     const firstPayload = await first.json() as Json;
     const call = firstPayload.output.find((item: Json) => item.type === "function_call");
@@ -213,7 +218,7 @@ test("DeepSeek 两腿工具调用完整回放 reasoning_content", async () => {
       { type: "function_call_output", call_id: call.call_id, output: "文件内容" },
       { type: "message", role: "user", content: "继续" },
     ];
-    const second = await handler(request("codebuddy/deepseek-v4.1-flash", { input: secondInput, tools, stream: false }));
+    const second = await handler(request("codebuddy-intl/deepseek-v4.1-flash", { input: secondInput, tools, stream: false }));
     assert.equal(second.status, 200);
     assert.equal(chats.length, 2);
     const replayed = (chats[1]!.body.messages as Json[]).find((message) => Array.isArray(message.tool_calls));
@@ -228,7 +233,7 @@ test("转发内容：上游 URL、model 前缀剥离与身份头；入站 OAuth 
   await fixture(async ({ create, primeCatalog, chats }) => {
     const handler = create({});
     await primeCatalog(handler);
-    const response = await handler(request("codebuddy/gpt-5.6-luna", { stream: true }, "/v1/responses", { "thread-id": "thread-1" }));
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: true }, "/v1/responses", { "thread-id": "thread-1" }));
     await decoded(response);
     assert.equal(chats.length, 1);
     const chat = chats[0]!;
@@ -247,19 +252,19 @@ test("转发内容：上游 URL、model 前缀剥离与身份头；入站 OAuth 
   });
 });
 
-test("workbuddy/ 前缀路由到 WorkBuddy 端点", async () => {
+test("workbuddy-intl/ 前缀路由到 WorkBuddy 端点", async () => {
   await fixture(async ({ create, chats }) => {
     const handler = create({ profile: "intl-work" });
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
     // 两族同裸 ID 时展示层只保留 cli 条目（去重规则），work 族重名条目不重复展示。
-    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy/gpt-5.6-luna"), "同裸 ID 保留 cli 族条目");
-    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy/gpt-5.6-luna"), "work 族重名条目被去重");
-    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy/default-model"), "档位模型被目录过滤");
-    // 去重只影响展示：workbuddy/ 前缀仍按产品路由到 WorkBuddy 端点。
-    const response = await handler(request("workbuddy/gpt-5.6-luna", { stream: false }));
+    assert.ok(catalog.data.some((model: Json) => model.id === "codebuddy-intl/gpt-5.6-luna"), "同裸 ID 保留 cli 族条目");
+    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy-intl/gpt-5.6-luna"), "work 族重名条目被去重");
+    assert.ok(!catalog.data.some((model: Json) => model.id === "workbuddy-intl/default-model"), "档位模型被目录过滤");
+    // 去重只影响展示：workbuddy-intl/ 前缀仍按产品路由到 WorkBuddy 端点。
+    const response = await handler(request("workbuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 200);
-    assert.equal((await response.json() as Json).model, "workbuddy/gpt-5.6-luna");
+    assert.equal((await response.json() as Json).model, "workbuddy-intl/gpt-5.6-luna");
     assert.equal(chats[0]!.url, "https://www.workbuddy.ai/v2/chat/completions");
     assert.ok(chats[0]!.headers.get("user-agent")?.startsWith("WorkBuddy/"));
   });
@@ -281,13 +286,13 @@ test("错误码：未知模型 404、凭据失败 503、非法正文 400", async
   await fixture(async ({ create, primeCatalog }) => {
     const handler = create({});
     await primeCatalog(handler);
-    const missing = await handler(request("codebuddy/not-in-catalog", { stream: false }));
+    const missing = await handler(request("codebuddy-intl/not-in-catalog", { stream: false }));
     assert.equal(missing.status, 404);
     assert.match(JSON.stringify(await missing.json()), /可服务目录/);
 
     const invalid = new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
-      headers: { "content-type": "application/json", "x-codex-routing-hint": "model=codebuddy/gpt-5.6-luna" },
+      headers: { "content-type": "application/json", "x-codex-routing-hint": "model=codebuddy-intl/gpt-5.6-luna" },
       body: "{broken json",
     });
     assert.equal((await handler(invalid)).status, 400);
@@ -297,8 +302,24 @@ test("错误码：未知模型 404、凭据失败 503、非法正文 400", async
       config: {},
     });
     // 目录拉取失败 + 无缓存 → 目录为空，knownModels 为空集合时透传（不再 404）。
-    const fallback = await broken(request("codebuddy/anything", { stream: false }));
+    const fallback = await broken(request("codebuddy-intl/anything", { stream: false }));
     assert.equal(fallback.status, 200, "空目录时透传由上游判定");
+  });
+});
+
+test("旧无地域前缀本地拒绝；显式地域缺凭据不回退", async () => {
+  await fixture(async ({ create }) => {
+    const handler = create({});
+    const legacy = await handler(request("codebuddy/gpt-5.6-luna", { stream: false }));
+    assert.equal(legacy.status, 400);
+    const legacyPayload = await legacy.json() as Json;
+    assert.match(legacyPayload.error.message, /codebuddy-cn/);
+
+    const missing = await create({ missingRegion: "cn" })(request("codebuddy-cn/gpt-5.6-luna", { stream: false }));
+    assert.equal(missing.status, 503);
+    const payload = await missing.json() as Json;
+    assert.match(payload.error.message, /国内.*登录凭据/);
+    assert.equal(payload.error.type, "configuration_error");
   });
 });
 
@@ -322,7 +343,7 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
         fetch: async () => { throw new Error("不得发起上游请求"); },
       },
     );
-    const response = await handler(request("codebuddy/gpt-5.6-luna", { stream: false }));
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 503);
     const payload = await response.json() as Json;
     assert.match(payload.error.message, /重新登录/);
@@ -340,7 +361,7 @@ test("上游错误正文回显 token 时被彻底遮蔽（含转义形式）", a
     });
     const handler = create({ chatResponse: () => new Response(echo, { status: 401, headers: { "content-type": "application/json" } }) });
     await primeCatalog(handler);
-    const response = await handler(request("codebuddy/gpt-5.6-luna", { stream: false }));
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 401);
     const body = await response.text();
     assert.ok(!body.includes(ACCESS_TOKEN), "accessToken 明文不得回显");
@@ -354,7 +375,7 @@ test("请求日志不落 token 明文", async () => {
   await fixture(async ({ create, directory }) => {
     const handler = create({ config: { requestLogging: true } });
     await handler(new Request("http://127.0.0.1:8320/v1/models"));
-    const response = await handler(request("codebuddy/gpt-5.6-luna", { stream: false }));
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     await response.json();
     await new Promise((resolve) => setTimeout(resolve, 100));
     const files = fs.existsSync(path.join(directory, "logs")) ? fs.readdirSync(path.join(directory, "logs")) : [];
@@ -379,9 +400,9 @@ test("upstream-only 模式下 CodeBuddy 整体禁用：不拦截、不拉目录"
     });
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
-    assert.ok(!JSON.stringify(catalog).includes("codebuddy/"), "upstream-only 不合并 codebuddy 目录");
+    assert.ok(!JSON.stringify(catalog).includes("codebuddy-intl/"), "upstream-only 不合并 codebuddy 目录");
     // 请求也不拦截：走纯转发路径（cpa.invalid 不可达）。
-    const response = await handler(request("codebuddy/gpt-5.6-luna", { stream: false }));
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 502, "未拦截的请求走纯转发路径");
     assert.equal(fetched, 0, "未启用时绝不发起目录请求");
   });
@@ -392,7 +413,7 @@ test("WebSocket 升级按 codebuddy 前缀本地拒绝，不桥接上游", async
     const handler = create({});
     const wsRequest = new Request("http://127.0.0.1:8320/v1/responses", {
       method: "GET",
-      headers: { upgrade: "websocket", "x-codex-routing-hint": "model=codebuddy/gpt-5.6-luna" },
+      headers: { upgrade: "websocket", "x-codex-routing-hint": "model=codebuddy-intl/gpt-5.6-luna" },
     });
     assert.ok(isCodebuddyResponsesWebSocket(wsRequest, config));
     const response = await handler(wsRequest);
@@ -405,7 +426,7 @@ test("compaction 触发时走压缩请求路径并返回摘要", async () => {
   await fixture(async ({ create, primeCatalog }) => {
     const handler = create({ chatResponse: () => chatUpstream("这是压缩摘要") });
     await primeCatalog(handler);
-    const response = await handler(request("codebuddy/gpt-5.6-luna", {
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", {
       input: [{ type: "compaction_trigger" }, { type: "message", role: "user", content: "旧上下文" }],
       stream: false,
     }));
@@ -425,11 +446,14 @@ test("validateCodebuddyConfig：环回与保留前缀约束", () => {
   };
   validateCodebuddyConfig({ ...base, codebuddy: true });
   validateCodebuddyConfig({ ...base, codebuddy: false, host: "0.0.0.0" });
+  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
+  validateCodebuddyConfig({ ...base, codebuddy: false, codebuddyRegion: "auto" });
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0" }), /环回/);
-  for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy", "workbuddy/gpt"]) {
+  for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy-cn/", "workbuddy-cn/", "codebuddy-intl/", "workbuddy-intl/"]) {
     assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), /前缀保留/, prefix);
   }
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyRegion: "us" } as unknown as GatewayConfig), /codebuddyRegion/);
   // upstream-only 下不加约束。
   validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true });
 });
@@ -450,7 +474,7 @@ test("适配器目录投影与未启用时的空目录", async () => {  const di
       },
     });
     const catalog = await enabled.catalog();
-    assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy/gpt-5.6-luna"]);
+    assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/gpt-5.6-luna"]);
     enabled.close();
     const disabled = createCodebuddyAdapter({ ...base, codebuddy: false }, {});
     assert.deepEqual((await disabled.catalog()).models, []);
@@ -536,6 +560,15 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
     assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddy, true);
     assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddy: false -> true/);
 
+    await runCli(["config", "--codebuddy-region", "cn"]);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyRegion, "cn");
+    assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddyRegion: null -> "cn"/);
+
+    printed.length = 0;
+    await runCli(["config"]);
+    const regionStatus = JSON.parse(printed.join("\n")) as Json;
+    assert.equal(regionStatus.codebuddyRegion, "cn");
+
     printed.length = 0;
     await runCli(["config"]);
     let status = JSON.parse(printed.join("\n")) as Json;
@@ -552,6 +585,7 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
     assert.equal(status.codebuddyConfigured, true, "原始开关与生效值不一致时单独报出");
 
     await assert.rejects(runCli(["config", "--codebuddy", "maybe"]), /on or off/);
+    await assert.rejects(runCli(["config", "--codebuddy-region", "us"]), /auto, cn, or intl/);
   } finally {
     console.log = oldLog;
     if (oldHome === undefined) delete process.env.HOME;

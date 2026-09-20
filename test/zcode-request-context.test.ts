@@ -4,23 +4,24 @@ import {
   buildZcodeModelHeaders, buildZcodeSourceHeaders, createZcodeContexts,
   decorateZcodeBody, zcodePlan, type ZcodeIdentity,
 } from "../src/zcode/request-context.ts";
-import type { ZcodeProviderSnapshot } from "../src/zcode/config.ts";
+import type { ZcodeProviderSnapshot, ZcodeSelection } from "../src/zcode/config.ts";
 
 const identity: ZcodeIdentity = {
   appVersion: "3.11.2", language: "zh-CN", timezone: "Asia/Shanghai",
   platform: "darwin", arch: "arm64", osVersion: "24.0.0",
 };
-function snapshot(providerID = "builtin:zai-coding-plan", apiKey = "key-a"): ZcodeProviderSnapshot {
-  return { family: "zai", providerID, apiKey, baseURL: "https://api.z.ai/api/anthropic", modelIds: ["glm-5.3"] };
+function snapshot(plan: ZcodeSelection["kind"] = "individual-coding-plan", apiKey = "key-a"): ZcodeProviderSnapshot {
+  return { family: "zai", providerID: "builtin:zai-coding-plan", plan, apiKey, baseURL: "https://api.z.ai/api/anthropic", modelIds: ["glm-5.3"] };
 }
 function request(headers: Record<string, string> = {}): Request {
   return new Request("http://localhost/v1/responses", { headers });
 }
 
-test("套餐依据精确 builtin provider ID，模型请求按套餐使用正确鉴权", () => {
+test("套餐依据快照的连接形态，模型请求按套餐使用正确鉴权", () => {
   assert.equal(zcodePlan(snapshot()), "coding-plan");
-  assert.equal(zcodePlan(snapshot("builtin:zai-start-plan")), "start-plan");
-  assert.equal(zcodePlan(snapshot("custom:zai-coding-plan")), "api-key");
+  assert.equal(zcodePlan(snapshot("team-coding-plan")), "coding-plan");
+  assert.equal(zcodePlan(snapshot("start-plan")), "start-plan");
+  assert.equal(zcodePlan(snapshot("api-key")), "api-key");
   const context = { requestId: "req", traceId: "trace", queryId: "query", sessionId: "session", sessionType: "main" as const };
   for (const [plan, apiKey, hasKey] of [["coding-plan", "business", true], ["api-key", "custom", true], ["start-plan", "jwt", false]] as const) {
     const headers = buildZcodeModelHeaders(identity, context, plan, apiKey);
@@ -59,8 +60,8 @@ test("会话仅按受控 thread/session 与当前 provider/key 作用域稳定�
   assert.equal(first.sessionType, "main");
   assert.equal(contexts.resolve(request({ "thread-id": "thread-a", "x-codex-parent-thread-id": "parent" }), snapshot()).sessionType, "subagent");
   assert.equal(contexts.resolve(request(), snapshot()).sessionType, "other");
-  assert.notEqual(first.sessionId, contexts.resolve(request({ "thread-id": "thread-a" }), snapshot("builtin:zai-coding-plan", "key-b")).sessionId);
-  assert.notEqual(first.sessionId, contexts.resolve(request({ "thread-id": "thread-a" }), snapshot("custom:zai", "key-a")).sessionId);
+  assert.notEqual(first.sessionId, contexts.resolve(request({ "thread-id": "thread-a" }), snapshot("team-coding-plan", "key-b")).sessionId);
+  assert.notEqual(first.sessionId, contexts.resolve(request({ "thread-id": "thread-a" }), snapshot("api-key", "key-c")).sessionId);
   time = 901;
   assert.notEqual(first.sessionId, contexts.resolve(request({ "thread-id": "thread-a" }), snapshot()).sessionId);
   contexts.close();

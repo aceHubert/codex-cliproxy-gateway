@@ -10,6 +10,7 @@ import {
   codebuddyCatalogFileName,
   codebuddyFamilyPrefix,
   codebuddyModelProduct,
+  codebuddyModelRegion,
   codebuddyUpstreamModel,
   createCodebuddyCatalogStore,
   creditsMultiplier,
@@ -207,15 +208,17 @@ test("推理档位：列表与默认值均无效时保持空列表，空白默�
 });
 
 test("前缀族识别与裸模型透传（档位不做本地展开）", () => {
-  assert.ok(isCodebuddyModel("codebuddy/gpt-5.6-luna"));
-  assert.ok(isCodebuddyModel("WorkBuddy/default-model"));
+  assert.ok(isCodebuddyModel("codebuddy-intl/gpt-5.6-luna"));
+  assert.ok(isCodebuddyModel("WorkBuddy/default-model"), "旧前缀必须被识别并本地拒绝");
   assert.ok(!isCodebuddyModel("gpt-5.6-luna"));
-  assert.equal(codebuddyUpstreamModel("codebuddy/gpt-5.6-luna"), "gpt-5.6-luna");
-  assert.equal(codebuddyUpstreamModel("workbuddy/default-model"), "default-model");
-  assert.equal(codebuddyUpstreamModel("codebuddy/"), undefined);
-  assert.equal(codebuddyFamilyPrefix("intl-cli"), "codebuddy/");
-  assert.equal(codebuddyFamilyPrefix("intl-work"), "workbuddy/");
-  assert.equal(codebuddyFamilyPrefix("cn-cli"), "codebuddy/");
+  assert.equal(codebuddyUpstreamModel("codebuddy-intl/gpt-5.6-luna"), "gpt-5.6-luna");
+  assert.equal(codebuddyUpstreamModel("workbuddy-intl/default-model"), "default-model");
+  assert.equal(codebuddyUpstreamModel("codebuddy-intl/"), undefined);
+  assert.equal(codebuddyFamilyPrefix("intl-cli"), "codebuddy-intl/");
+  assert.equal(codebuddyFamilyPrefix("intl-work"), "workbuddy-intl/");
+  assert.equal(codebuddyFamilyPrefix("cn-cli"), "codebuddy-cn/");
+  assert.equal(codebuddyModelProduct("WorkBuddy/w1"), undefined, "旧前缀没有强制地域，不参与路由");
+  assert.equal(codebuddyModelRegion("codebuddy-cn/w1"), "cn");
 });
 
 test("buildCodebuddyCatalog 取 serves 交集；project 按产品前缀投影", () => {
@@ -226,20 +229,21 @@ test("buildCodebuddyCatalog 取 serves 交集；project 按产品前缀投影", 
   const catalog = buildCodebuddyCatalog(data, "intl-cli");
   assert.deepEqual(catalog.models.map((entry) => entry.slug), ["a", "c"]);
   const projected = projectCodebuddyCatalog(catalog, "intl-work");
-  assert.deepEqual(projected.models.map((entry) => entry.slug), ["workbuddy/a", "workbuddy/c"]);
+  assert.deepEqual(projected.models.map((entry) => entry.slug), ["workbuddy-intl/a", "workbuddy-intl/c"]);
 });
 
 test("服务端档位模型（Auto/Fast/Balanced/Primary/Deep）被目录过滤", () => {
   const data = parseCodebuddyConfigData(cliConfig(
     [
       fixtureModel("default-model", { name: "Auto" }),
+      fixtureModel("auto", { name: "Auto" }),
       fixtureModel("fast-model", { name: "Fast" }),
       fixtureModel("balanced-model", { name: "Balanced" }),
       fixtureModel("primary-model", { name: "Primary" }),
       fixtureModel("deep-model", { name: "Deep" }),
       fixtureModel("gpt-5.6-luna"),
     ],
-    ["default-model", "fast-model", "balanced-model", "primary-model", "deep-model", "gpt-5.6-luna"],
+    ["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model", "gpt-5.6-luna"],
   ), "cli");
   const catalog = buildCodebuddyCatalog(data, "intl-cli");
   assert.deepEqual(catalog.models.map((entry) => entry.slug), ["gpt-5.6-luna"]);
@@ -247,10 +251,10 @@ test("服务端档位模型（Auto/Fast/Balanced/Primary/Deep）被目录过滤"
 
 test("mergeCodebuddyCatalog 剥离上游同名前缀并按优先级追加", () => {
   const merged = mergeCodebuddyCatalog(
-    { models: [{ slug: "native", priority: 3 }, { slug: "codebuddy/evil", priority: 4 }] },
-    { models: [{ slug: "codebuddy/a", priority: 0 }, { slug: "workbuddy/b", priority: 1 }] },
+    { models: [{ slug: "native", priority: 3 }, { slug: "codebuddy-intl/evil", priority: 4 }] },
+    { models: [{ slug: "codebuddy-intl/a", priority: 0 }, { slug: "workbuddy-intl/b", priority: 1 }] },
   );
-  assert.deepEqual(merged.models.map((model) => model.slug), ["native", "codebuddy/a", "workbuddy/b"]);
+  assert.deepEqual(merged.models.map((model) => model.slug), ["native", "codebuddy-intl/a", "workbuddy-intl/b"]);
   assert.deepEqual(merged.models.slice(1).map((model) => model.priority), [103, 104]);
 });
 
@@ -259,42 +263,42 @@ test("dedupeCodebuddyCatalog 按裸 ID 合并两族：cli 优先，其次免费�
   const deduped = dedupeCodebuddyCatalog({
     models: [
       // 同裸 ID：work 更便宜也应让位给 cli（产品优先于倍率）。
-      entry("workbuddy/luna", "x0.1 credits"),
-      entry("codebuddy/luna", "x0.14 credits"),
+      entry("workbuddy-intl/luna", "x0.1 credits"),
+      entry("codebuddy-intl/luna", "x0.14 credits"),
       // cli 内部：倍率低者胜出，x0（free）天然排最前。
-      entry("codebuddy/flash", "x0.79 credits"),
-      entry("workbuddy/flash", "x0.52 credits"),
+      entry("codebuddy-intl/flash", "x0.79 credits"),
+      entry("workbuddy-intl/flash", "x0.52 credits"),
       // 倍率缺失视为最贵，让位于已知倍率的同族条目。
-      entry("codebuddy/sol", undefined),
-      entry("workbuddy/sol", "x3.47 credits"),
+      entry("codebuddy-intl/sol", undefined),
+      entry("workbuddy-intl/sol", "x3.47 credits"),
       // 仅单侧存在的模型原样保留；非本族条目不参与去重。
-      entry("workbuddy/hy4-preview-f"),
+      entry("workbuddy-intl/hy4-preview-f"),
       entry("native-model"),
     ],
   });
   assert.deepEqual(
     deduped.models.map((model) => model.slug),
-    ["codebuddy/luna", "codebuddy/flash", "codebuddy/sol", "workbuddy/hy4-preview-f", "native-model"],
+    ["codebuddy-intl/luna", "codebuddy-intl/flash", "codebuddy-intl/sol", "workbuddy-intl/hy4-preview-f", "native-model"],
   );
 });
 
 test("dedupeCodebuddyCatalog 同名免费条目胜过付费条目", () => {
   const deduped = dedupeCodebuddyCatalog({
     models: [
-      { slug: "codebuddy/hy3", credits: "x0.5 credits" },
-      { slug: "workbuddy/hy3", credits: "x0 credits" },
+      { slug: "codebuddy-intl/hy3", credits: "x0.5 credits" },
+      { slug: "workbuddy-intl/hy3", credits: "x0 credits" },
     ],
   });
   // 免费属 work 族，但 cli 优先于 work——产品优先规则下 cli 仍胜出。
-  assert.deepEqual(deduped.models.map((model) => model.slug), ["codebuddy/hy3"]);
+  assert.deepEqual(deduped.models.map((model) => model.slug), ["codebuddy-intl/hy3"]);
   const freeCli = dedupeCodebuddyCatalog({
     models: [
-      { slug: "codebuddy/hy3", credits: "x0.5 credits" },
-      { slug: "codebuddy/hy4", credits: "x0 credits" },
-      { slug: "workbuddy/hy4", credits: "x0.2 credits" },
+      { slug: "codebuddy-intl/hy3", credits: "x0.5 credits" },
+      { slug: "codebuddy-intl/hy4", credits: "x0 credits" },
+      { slug: "workbuddy-intl/hy4", credits: "x0.2 credits" },
     ],
   });
-  assert.deepEqual(freeCli.models.map((model) => model.slug), ["codebuddy/hy3", "codebuddy/hy4"]);
+  assert.deepEqual(freeCli.models.map((model) => model.slug), ["codebuddy-intl/hy3", "codebuddy-intl/hy4"]);
 });
 
 test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改即重建", async () => {
@@ -313,7 +317,7 @@ test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改�
   try {
     let catalog = await store.catalog();
     assert.equal(fetched, 1);
-    assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy/a", "codebuddy/b"]);
+    assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy-intl/a", "codebuddy-intl/b"]);
     assert.ok(fs.existsSync(cacheFile), "缓存按产品×地域命名落盘");
     // 重建目录改变了 Codex 可见模型：它自己的缓存必须被过期。
     assert.equal(JSON.parse(fs.readFileSync(codexCache, "utf8")).client_version, "0.0.0");
@@ -331,7 +335,7 @@ test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改�
     });
     catalog = await reopen.catalog();
     assert.equal(fetched, 2);
-    assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy/a", "codebuddy/b"]);
+    assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy-intl/a", "codebuddy-intl/b"]);
     // 账号身份变化（key 变化）→ 重建。
     const second = createCodebuddyCatalogStore({
       cacheDirectory: directory,
@@ -361,21 +365,21 @@ test("目录存储：双产品接口各拉各的目录并合并两个前缀族",
       },
     });
     const catalog = await store.catalog();
-    assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy/a", "workbuddy/w1"]);
+    assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/a", "workbuddy-intl/w1"]);
     assert.deepEqual([...fetched].sort(), ["https://www.codebuddy.ai/v3/config", "https://www.workbuddy.ai/v3/config"]);
     assert.ok(fs.existsSync(path.join(directory, "codebuddy-intl-catalog.json")));
     assert.ok(fs.existsSync(path.join(directory, "workbuddy-intl-catalog.json")));
     // display_name 带产品×地域标签：cli 族 INTL-C、work 族 INTL-W，同名模型据此区分。
-    assert.match(catalog.models.find((model) => model.slug === "codebuddy/a")!.display_name!, /^INTL-C\//);
-    assert.match(catalog.models.find((model) => model.slug === "workbuddy/w1")!.display_name!, /^INTL-W\//);
+    assert.match(catalog.models.find((model) => model.slug === "codebuddy-intl/a")!.display_name!, /^INTL-C\//);
+    assert.match(catalog.models.find((model) => model.slug === "workbuddy-intl/w1")!.display_name!, /^INTL-W\//);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("codebuddyModelProduct 按前缀映射产品；缓存文件按产品×地域命名", () => {
-  assert.equal(codebuddyModelProduct("codebuddy/gpt-5.6-luna"), "cli");
-  assert.equal(codebuddyModelProduct("WorkBuddy/w1"), "work");
+  assert.equal(codebuddyModelProduct("codebuddy-intl/gpt-5.6-luna"), "cli");
+  assert.equal(codebuddyModelProduct("workbuddy-cn/w1"), "work");
   assert.equal(codebuddyModelProduct("gpt-5.6-luna"), undefined);
   assert.equal(codebuddyCatalogFileName("intl-cli"), "codebuddy-intl-catalog.json");
   assert.equal(codebuddyCatalogFileName("cn-cli"), "codebuddy-cn-catalog.json");
@@ -416,7 +420,7 @@ test("目录存储：旧缓存键（含已移除的结构版本字段）不再�
   try {
     const catalog = await store.catalog();
     assert.equal(fetched, 1, "旧缓存键不能因 TTL 尚未过期而复用");
-    assert.equal(catalog.models[0]?.slug, "codebuddy/deepseek-v4.1-flash");
+    assert.equal(catalog.models[0]?.slug, "codebuddy-intl/deepseek-v4.1-flash");
     assert.deepEqual(catalog.models[0]?.supported_reasoning_levels, [{ effort: "high", description: "" }]);
     const refreshed = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
     assert.notEqual(refreshed.cache_key, oldKey);
@@ -440,7 +444,7 @@ test("目录存储：拉取失败回退 last-good，完全无缓存才报错", a
         return new Response("boom", { status: 500 });
       },
     });
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     ok = false;
     // 缓存未过期仍新鲜；直接清内存态的方式是重建 store（读同一磁盘缓存）。
     const reopened = createCodebuddyCatalogStore({
@@ -448,7 +452,7 @@ test("目录存储：拉取失败回退 last-good，完全无缓存才报错", a
       credentials: async () => [credential("intl-cli")],
       fetch: async () => new Response("boom", { status: 500 }),
     });
-    assert.deepEqual((await reopened.catalog()).models.map((model) => model.slug), ["codebuddy/a"], "拉取失败回退 last-good");
+    assert.deepEqual((await reopened.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"], "拉取失败回退 last-good");
     const empty = createCodebuddyCatalogStore({
       cacheDirectory: path.join(directory, "missing-dir"),
       credentials: async () => [credential("intl-cli")],
@@ -482,7 +486,7 @@ test("目录存储：非成功 code 与 TTL 过期触发重建", async () => {
       now: () => time,
       ttlMs: 60_000,
     });
-    assert.deepEqual((await store2.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store2.catalog()).models.map((model) => model.slug), ["codebuddy-cn/a"]);
     // TTL 过期：重建；code != 0 时仍回退 last-good（陈旧目录可用时不向客户端报错）。
     time += 60_000;
     code = 1001;
@@ -493,7 +497,7 @@ test("目录存储：非成功 code 与 TTL 过期触发重建", async () => {
       now: () => time,
       ttlMs: 60_000,
     });
-    assert.deepEqual((await store3.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store3.catalog()).models.map((model) => model.slug), ["codebuddy-cn/a"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -515,17 +519,17 @@ test("目录存储：强制刷新绕过 TTL，普通读取仍复用缓存", asyn
       now: () => time,
       ttlMs: 60 * 60 * 1000,
     });
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 1);
     // TTL 未到期：普通读取直接复用。
     time += 1_000;
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 1);
     // 强制刷新无视 TTL，并让后续读取看到新目录。
     version = "b";
     await store.refresh();
     assert.equal(fetched, 2);
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/b"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/b"]);
     assert.equal(fetched, 2, "强制刷新后的新目录在 TTL 内复用");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -568,10 +572,10 @@ test("目录存储：强制刷新失败时保留 last-good", async () => {
         ? Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) })
         : new Response("boom", { status: 500 }),
     });
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     ok = false;
     await store.refresh();
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -595,21 +599,21 @@ test("目录存储：拉取失败进入 30 秒冷却，冷却结束后恢复重�
       now: () => time,
       ttlMs: 60_000,
     });
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 1);
     // TTL 过期后第一次失败进入冷却，仍服务 last-good。
     ok = false;
     time += 61_000;
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 2);
     // 冷却窗口内即使 TTL 已过期也不重打上游。
     time += 10_000;
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 2, "30 秒冷却内不重试");
     // 冷却结束、上游恢复后重新拉取成功。
     ok = true;
     time += 30_000;
-    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy/a"]);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
     assert.equal(fetched, 3, "冷却结束后恢复重试");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

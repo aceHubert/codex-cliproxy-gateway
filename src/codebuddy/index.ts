@@ -9,7 +9,9 @@ import type { CodebuddyCredentialCache } from "./credentials.ts";
 import {
   CODEBUDDY_PREFIX,
   WORKBUDDY_PREFIX,
+  codebuddyFamilyPrefix,
   codebuddyModelProduct,
+  codebuddyModelRegion,
   codebuddyUpstreamModel,
   createCodebuddyCatalogStore,
   isCodebuddyModel,
@@ -61,12 +63,23 @@ export function codebuddyEnabled(config: GatewayConfig): boolean {
 
 export function validateCodebuddyConfig(config: GatewayConfig): void {
   if (config.codebuddy !== undefined && typeof config.codebuddy !== "boolean") throw new Error("codebuddy 必须为 boolean");
+  if (config.codebuddyRegion !== undefined && !["auto", "cn", "intl"].includes(config.codebuddyRegion)) {
+    throw new Error("codebuddyRegion 必须是 auto、cn 或 intl");
+  }
   if (!codebuddyEnabled(config)) return;
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 CodeBuddy 时网关只能监听环回地址");
   }
-  for (const reserved of [CODEBUDDY_PREFIX, WORKBUDDY_PREFIX]) {
+  const reservedPrefixes = [
+    CODEBUDDY_PREFIX,
+    WORKBUDDY_PREFIX,
+    codebuddyFamilyPrefix("cn-cli"),
+    codebuddyFamilyPrefix("cn-work"),
+    codebuddyFamilyPrefix("intl-cli"),
+    codebuddyFamilyPrefix("intl-work"),
+  ];
+  for (const reserved of reservedPrefixes) {
     if (config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved))) {
       throw new Error(`启用 CodeBuddy 时 ${reserved} 前缀保留给 CodeBuddy/WorkBuddy，请调整第三方 prefix`);
     }
@@ -81,17 +94,22 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   validateCodebuddyConfig(config);
   const enabled = codebuddyEnabled(config);
   const credentialCache = enabled
-    ? dependencies.credentialCache ?? createCodebuddyCredentialCache(dependencies.authDirectory ?? defaultAuthDirectory())
+    ? dependencies.credentialCache ?? createCodebuddyCredentialCache(
+      dependencies.authDirectory ?? defaultAuthDirectory(),
+      config.codebuddyRegion === "cn" || config.codebuddyRegion === "intl"
+        ? { preferredRegion: config.codebuddyRegion }
+        : {},
+    )
     : undefined;
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const catalogStore = enabled
     ? createCodebuddyCatalogStore({
       cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
-      // 每个前缀产品各选一个接口凭据（含同地域回退）；某产品完全没有登录时跳过其目录族。
+      // 目录刷新按 codebuddyRegion/auto 选择地域；请求路由则始终以带地域 slug 为准。
       credentials: async () => {
         const list = [];
         for (const product of ["cli", "work"] as const) {
-          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 未登录该地域即无凭据。 */ }
+          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 配置地域缺失时由另一产品/auto 兜底。 */ }
         }
         return list;
       },
@@ -126,6 +144,7 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   let closed = false;
   /** 已知模型集合（serves scope 投影后的裸 ID）；空目录视为不可校验，透传由上游判定。 */
   let knownModels: Set<string> | undefined;
+  let knownRegions = new Set<"cn" | "intl">();
 
   return {
     async catalog(): Promise<ModelCatalog> {
@@ -133,6 +152,10 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
       try {
         const catalog = await catalogStore.catalog();
         knownModels = new Set(catalog.models.map((entry) => entry.slug));
+        knownRegions = new Set(catalog.models.flatMap((entry) => {
+          const region = codebuddyModelRegion(entry.slug);
+          return region ? [region] : [];
+        }));
         return catalog;
       } catch { return { models: [] }; }
     },
@@ -220,19 +243,22 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
       try {
         if (request.signal.aborted) onAbort();
         abort.signal.throwIfAborted();
-        // 前缀决定产品接口（codebuddy/ → cli 端点+身份头，workbuddy/ → IDE 端点+身份头）；
-        // 凭据按产品选取（同产品优先、同地域另一产品回退），只贡献 token 与账号。
+        // 前缀同时决定产品接口与地域；旧的无地域前缀直接拒绝。
         const product = codebuddyModelProduct(input.model);
+        const region = codebuddyModelRegion(input.model);
         if (product) family = product === "work" ? "workbuddy" : "codebuddy";
-        if (!product) { cleanup(); return fail(400, "CodeBuddy 模型名缺少前缀后的模型 ID"); }
-        const credential = await credentialCache.forProduct(product);
+        if (!product || !region) {
+          cleanup();
+          return fail(400, "CodeBuddy 模型名必须使用 codebuddy-cn/、codebuddy-intl/、workbuddy-cn/ 或 workbuddy-intl/ 前缀");
+        }
+        const credential = await credentialCache.forProduct(product, region);
         accessToken = credential.accessToken;
         refreshToken = credential.refreshToken;
         abort.signal.throwIfAborted();
         const model = typeof input.model === "string" ? codebuddyUpstreamModel(input.model) : undefined;
         if (!model) { cleanup(); return fail(400, "CodeBuddy 模型名缺少前缀后的模型 ID"); }
         // 目录可用时校验 belongs-to-serves；空目录（拉取失败）透传，由上游判定。
-        if (knownModels !== undefined && knownModels.size > 0 && !knownModels.has(String(input.model))) {
+        if (knownModels !== undefined && knownModels.size > 0 && knownRegions.has(region) && !knownModels.has(String(input.model))) {
           cleanup();
           return fail(404, "此模型不在 CodeBuddy/WorkBuddy 当前账号的可服务目录内");
         }

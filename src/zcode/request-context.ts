@@ -63,9 +63,9 @@ export function readZcodeIdentity(): ZcodeIdentity {
 }
 
 export function zcodePlan(snapshot: ZcodeProviderSnapshot): ZcodePlan {
-  if (snapshot.providerID === `builtin:${snapshot.family}-coding-plan`) return "coding-plan";
-  if (snapshot.providerID === `builtin:${snapshot.family}-start-plan`) return "start-plan";
-  return "api-key";
+  if (snapshot.plan === "start-plan") return "start-plan";
+  if (snapshot.plan === "api-key") return "api-key";
+  return "coding-plan";
 }
 
 function osCategory(platform: string): string {
