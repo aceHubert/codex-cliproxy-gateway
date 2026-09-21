@@ -26,7 +26,7 @@
   "changelog": {
     "repo": "aceHubert/codex-cliproxy-gateway",
     "labels": {
-      "feat": ":rocket: New Feature",
+      "feature": ":rocket: New Feature",
       "bug": ":bug: Bug Fix",
       "breaking": ":boom: Breaking Change"
     },

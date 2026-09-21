@@ -47,6 +47,18 @@ export function prependChangelog(current: string, release: string): string {
   return `${CHANGELOG_HEADER}\n\n${entry}${body ? `\n\n${body}` : ""}\n`;
 }
 
+// lerna 只提交它自己记录的变更文件，CHANGELOG.md 不在其中，需在写回后显式暂存。
+export function stageChangelog(cwd = globalThis.process.cwd()): void {
+  const result = Bun.spawnSync(["git", "add", "CHANGELOG.md"], {
+    cwd,
+    stderr: "pipe",
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(decoder.decode(result.stderr).trim());
+  }
+}
+
 async function main(): Promise<void> {
   const firstCommit = hasReachableTag()
     ? undefined
@@ -78,6 +90,8 @@ async function main(): Promise<void> {
   } finally {
     await rm(temporaryPath, { force: true });
   }
+
+  stageChangelog();
 }
 
 if (import.meta.main) {
