@@ -84,6 +84,9 @@ test("ZCode 对外目录按当前套餐落盘，内容不变时不重复写盘",
     assert.equal(writeZcodeServedCatalog(file, coding), true);
     assert.deepEqual(read(file).models.map((model) => model.slug), [`zcode-zai-test/${IDS[0]}`]);
     assert.ok(read(file).content_hash);
+    // 对外投影层必须复述 HTTP-only 语义：ZCode 上游只有 HTTP 适配器，
+    // 一旦这里漏出 true，Codex 会先试探 WS 再被 426 打回降级。
+    assert.equal(coding.models[0]!.prefer_websockets, false);
 
     // 固定旧时间，避免依赖文件系统时间分辨率或测试 sleep。
     fs.utimesSync(file, new Date("2001-01-01T00:00:00Z"), new Date("2001-01-01T00:00:00Z"));
