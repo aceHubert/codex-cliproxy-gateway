@@ -137,6 +137,9 @@ test("synthesizeCodebuddyEntry 按①~④映射合成 Codex 条目", () => {
   assert.equal(entry.priority, 7);
   // ③ Codex 行为字段从快照基底继承，且必须解除最低客户端版本限制。
   assert.equal(entry.minimal_client_version, undefined);
+  // CodeBuddy 上游只有 HTTP 接口：不能从 gpt-5.5 基底继承 prefer_websockets=true，
+  // 否则 Codex 每次会话都要先被 426 打回再降级到 SSE。
+  assert.equal(entry.prefer_websockets, false);
   assert.ok(typeof entry.tool_mode === "string" || Array.isArray(entry.model_messages) || JSON.stringify(entry).includes("truncation_policy"));
   // ④ CB 特有字段保留，vendor/tags 丢弃。
   assert.equal(entry.credits, "x0.14 credits");

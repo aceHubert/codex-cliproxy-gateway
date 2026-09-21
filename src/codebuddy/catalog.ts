@@ -217,6 +217,9 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
   model.description = `CodeBuddy model "${id}" served by the local credential.`;
   // 对齐 synthesizeModelEntry 的兜底行为：解除基底条目的最低客户端版本限制。
   delete model.minimal_client_version;
+  // CodeBuddy 上游只有 HTTP 接口，网关对它的 Responses WebSocket 升级一律回 426；
+  // 基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
+  model.prefer_websockets = false;
   model.priority = priority;
   return model;
 }
