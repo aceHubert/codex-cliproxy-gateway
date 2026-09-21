@@ -235,6 +235,56 @@ test("config writes every requested update while a query stays read-only", {
   }
 });
 
+test("config invalidates the Codex models cache only for catalog-affecting options", {
+  skip: process.platform !== "darwin",
+}, async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-invalidate-cache-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    $schema: GATEWAY_CONFIG_SCHEMA_URL,
+    configVersion: GATEWAY_CONFIG_VERSION,
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    selectedModels: [],
+    requestLogging: false,
+    maxRequestLogs: 0,
+    upstreamOnly: false,
+    logDir: paths.logDir,
+  }));
+  const originalLog = console.log;
+  console.log = () => {};
+
+  try {
+    // 纯日志选项不改目录：不得产生失效写入。
+    await runCli(["config", "--log", "on", "--max-log-size", "1MB"]);
+    assert.equal(fs.existsSync(paths.modelsCacheFile), false, "log-only options must not touch the models cache");
+
+    // 目录相关选项（zcode/codebuddy/region 任一）命中即统一失效一次。
+    await runCli(["config", "--codebuddy-region", "cn"]);
+    assert.equal(fs.existsSync(paths.modelsCacheFile), true, "catalog-affecting options must invalidate the models cache");
+    const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as Record<string, unknown>;
+    assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
+    assert.equal(cache.client_version, "0.0.0");
+  } finally {
+    console.log = originalLog;
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("websocket and bare select flags no longer exist", async () => {
   await assert.rejects(runCli(["models", "--sync", "--websocket"]), /--websocket requires a value/);
   await assert.rejects(runCli(["models", "--sync", "--select"]), /--select requires a value/);

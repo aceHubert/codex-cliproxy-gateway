@@ -127,9 +127,10 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo
 - 混合模式下修改模型选择：等待自动刷新；列表仍未更新时再重启。
 - `codex-cliproxy restart` 默认只重启网关。
 
-`install`、`uninstall`、`restart` 和 `models --sync` 都支持
-`--restart-codex`。它会停止当前 Codex app-server，**可能中断正在执行的任务**，
-不会主动启动替代进程；必要时重新打开 Codex。
+`install`、`uninstall`、`restart`、`models --sync` 支持 `--restart-codex`。它会停止
+当前 Codex app-server，**可能中断正在执行的任务**，不会主动启动替代进程；必要时
+重新打开 Codex。`config` 只写网关侧配置，停止 app-server 无法刷新模型选择器，
+因此不提供该参数。
 
 ## Web 配置界面
 
@@ -180,6 +181,8 @@ codex-cliproxy config --log off
 参数可以组合使用。CLI 配置写入仅支持 macOS：已安装后台服务时自动重启网关，
 没有后台服务时仅保存配置，需自行重启前台进程。
 如提示配置已保存但重启失败，执行 `codex-cliproxy restart`。
+修改 `--zcode`、`--codebuddy` 或 `--codebuddy-region` 时会同时失效 Codex 的
+模型目录缓存，Codex 启动或下一次校验时会立即重新拉取列表；纯日志参数不影响目录。
 
 常用文件位置：
 
@@ -222,6 +225,11 @@ W 表示 WorkBuddy。选择对应条目后，网关会按该条目路由到对�
 `--codebuddy-region` 只控制模型目录刷新使用哪个地域的登录：`cn` 和 `intl`
 固定对应地域，指定地域暂无凭据时回退 `auto`；`auto` 使用最近刷新的登录。
 切换该配置并重启网关后，Codex 中的模型列表会随目录刷新更新。
+
+切换地域后，Codex 的模型选择器可能短暂保留已下架的旧地域条目。此时即使请求
+落在官方或第三方的 WebSocket 连接上，网关也会在本地断开该连接，让 Codex 重新
+协商并降级 HTTPS/SSE，不会把这类已确认不支持的模型帧发给任何上游；ZCode 模型
+同样受该逐帧保护。
 
 实际列表取决于当前登录的产品和账号权限。网关不会代为登录或刷新登录凭据；
 提示凭据过期或即将过期时，请回到对应客户端重新登录。

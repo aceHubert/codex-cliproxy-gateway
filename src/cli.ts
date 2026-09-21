@@ -545,7 +545,7 @@ async function refreshCodexAppServer(): Promise<void> {
   console.log("Stopping Codex app-server may interrupt active turns. This command does not start a replacement process.");
   const stopResult = await stopCodexAppServers();
   for (const result of stopResult.results) console.log(`Codex app-server PID ${result.pid}: ${result.status}`);
-  console.log("The Codex App may relaunch app-server; reopen the model picker or start a new session if the UI stays stale.");
+  console.log("The Codex App may relaunch app-server and re-fetch the catalog, but an open model picker can still render a stale snapshot; fully quit and reopen the Codex App to refresh it.");
   if (stopResult.scan === "unknown") throw new Error(`Codex app-server state is unknown: ${stopResult.error}`);
   if (stopResult.results.length === 0) console.log("No matching current-user Codex app-server process was found.");
   if (stopResult.results.some(({ status }) => status !== "stopped")) {
@@ -1371,14 +1371,25 @@ async function configCommand(options: CliOptions): Promise<void> {
   }
   recordConfigAudit("config", config, auditBefore, paths);
 
+  // zcode/codebuddy 开关与地域偏好会改变 /models 的目录内容：写盘时同步失效
+  // Codex 的 models_cache.json（对齐 install / models --sync），让重拉起的
+  // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
+  // 纯日志选项不影响目录，不触发失效。
+  if (zcodeTarget !== undefined || codebuddyTarget !== undefined || codebuddyRegionOption !== undefined) {
+    invalidateModelsCache(paths.modelsCacheFile);
+  }
+
+  // 先报「改了什么」再执行重启：配置在上方已写盘，重启只是让新值生效；
+  // 摘要落在重启输出之后会被误读成「重启后才应用配置」。
+  for (const line of applied) console.log(line);
+  if (logTarget) console.log(`Request logs will be written to: ${config.logDir}`);
+
   if (fs.existsSync(paths.launchAgent)) {
     await restartGatewayOnce(paths, config);
     console.log("Gateway restarted to apply the new configuration.");
   } else {
     console.log("Gateway LaunchAgent is not installed; configuration saved without restart.");
   }
-  for (const line of applied) console.log(line);
-  if (logTarget) console.log(`Request logs will be written to: ${config.logDir}`);
 }
 
 async function controlGateway(

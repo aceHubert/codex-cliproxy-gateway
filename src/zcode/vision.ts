@@ -140,7 +140,8 @@ export interface ZcodeExecutorOptions {
   model: string;
   image: ZcodeRequestImage;
   prompt: string;
-  headers: () => Headers;
+  /** 每次执行现场构建（含可能的客户端签名）；签名头不可跨请求复用。 */
+  headers: () => Headers | Promise<Headers>;
   fetchImpl: (url: string, init: RequestInit) => Promise<Response>;
   signal?: AbortSignal;
   /** 总尝试次数（含首次）；未出现 server_tool_use(analyze_image) 视为未命中。 */
@@ -154,7 +155,7 @@ export interface ZcodeExecutorOptions {
 }
 
 async function attemptOnce(options: ZcodeExecutorOptions): Promise<string> {
-  const headers = options.headers();
+  const headers = await options.headers();
   const timeout = AbortSignal.timeout(options.attemptTimeoutMs ?? 120_000);
   const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const instruction = `使用 analyze_image 工具识别这张图片，按以下要求输出：${options.prompt}`;

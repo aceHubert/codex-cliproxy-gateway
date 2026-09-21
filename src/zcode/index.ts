@@ -17,6 +17,7 @@ import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
 import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
 import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
+import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
 import { isZcodeRecord } from "./wire.ts";
 import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
@@ -39,6 +40,8 @@ export interface ZcodeDependencies {
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** 端点动态重映射；传 null 禁用（测试用），默认按官方客户端行为启用。 */
   endpointRouting?: ZcodeEndpointRouting | null;
+  /** 客户端签名；传 null 禁用（测试用），默认按官方客户端行为启用。 */
+  clientSigning?: ZcodeClientSigning | null;
   /** 进程日志目标（gateway.log）；未注入时 ZCode 请求不写请求摘要。 */
   processLog?: ProcessLogTarget;
 }
@@ -225,6 +228,10 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       fetch: (url, init) => fetchUpstream(url, init),
     })
     : undefined;
+  // coding plan 官方客户端签名：逐请求补 X-Client-* 签名头；fail-open，失败按未签名继续。
+  const clientSigning = enabled && dependencies.clientSigning !== null
+    ? dependencies.clientSigning ?? new ZcodeClientSigning({ fetch: (url, init) => fetchUpstream(url, init) })
+    : undefined;
   const contexts = createZcodeContexts();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
     dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
@@ -377,7 +384,15 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         const headers = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
         const beta = request.headers.get("anthropic-beta")?.trim();
         if (beta && beta.length <= 1024 && /^[\x20-\x7e]+$/.test(beta)) headers.set("anthropic-beta", beta);
-        upstreamRequestHeaders = headers;
+        // 客户端签名作用域绑定 base origin 与当前会话；端点重映射发生在签名之后（先签后路由）。
+        const signingScope = {
+          apiKey: key,
+          baseUrl: snapshot.baseURL,
+          clientVersion: identity!.appVersion,
+          sessionId: context.sessionId,
+        };
+        // 版本未知（本机未装 ZCode）时无法声明可信客户端版本，跳过签名。
+        const signable = clientSigning !== undefined && signingScope.clientVersion !== "unknown";
         const body = decorateZcodeBody(translated.body, context);
         // 图片识别适配：请求含图片时把被吸收的 analyze_image 调用落到网关执行并续跑上游。
         let gatewayTools: ZcodeGatewayToolsHook | undefined;
@@ -398,7 +413,11 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
                   model,
                   image,
                   prompt,
-                  headers: () => buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key),
+                  headers: async () => {
+                    const requestHeaders = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
+                    if (signable) await clientSigning!.decorate(requestHeaders, signingScope);
+                    return requestHeaders;
+                  },
                   fetchImpl: fetchUpstream,
                   signal: abort.signal,
                   // 错误正文脱敏必须在截断之前发生（见 ZcodeExecutorOptions.redact）。
@@ -420,8 +439,11 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
               }));
               (body.messages as unknown[]).push({ role: "assistant", content: toolUses }, { role: "user", content: toolResults });
               continuationLegs++;
+              // 续跑腿逐次重新签名（ts/nonce/PoW 不可复用）；签名失败按未签名继续。
+              const legHeaders = new Headers(headers);
+              if (signable) await clientSigning!.decorate(legHeaders, signingScope);
               const response = await fetchUpstream(routedUrl, {
-                method: "POST", headers, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
+                method: "POST", headers: legHeaders, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
               });
               if (!response.ok) {
                 // 与执行信封同规则：先对完整正文脱敏、后截断，避免跨边界 key 前缀泄漏。
@@ -434,11 +456,36 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
         }
         // 记录转换后真正发往上游的正文；未开启请求日志时不付出遍历脱敏的开销。
         upstreamRequestBody = sink ? redactValue(body) : undefined;
-        const upstream = await fetchUpstream(upstreamUrl, {
-          method: "POST", headers, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
-        });
+        const serializedBody = JSON.stringify(body);
+        const postUpstream = async (): Promise<{ response: Response; signed: boolean }> => {
+          // 每次发送都克隆基础头并现场签名；签名值（ts/nonce/PoW）不可跨请求复用。
+          const requestHeaders = new Headers(headers);
+          const signed = signable ? await clientSigning!.decorate(requestHeaders, signingScope) : false;
+          upstreamRequestHeaders = requestHeaders;
+          return {
+            response: await fetchUpstream(routedUrl, {
+              method: "POST", headers: requestHeaders, body: serializedBody, redirect: "manual", signal: abort.signal,
+            }),
+            signed,
+          };
+        };
+        let sent = await postUpstream();
+        let upstream = sent.response;
+        let upstreamErrorText: string | undefined;
         if (!upstream.ok) {
-          const text = redact(await upstream.text());
+          let rawText = await upstream.text();
+          // 服务端密钥轮换会拒绝缓存的签名身份：作废重握手、重签一次；仍失败按原错误返回。
+          if (sent.signed && upstream.status === 401 && clientSigningVerifyRejection(rawText)) {
+            clientSigning!.invalidate(key, snapshot.baseURL);
+            sent = await postUpstream();
+            upstream = sent.response;
+            // 只有重试仍失败才读错误正文；成功响应的流必须留给后续 SSE 解析。
+            if (!upstream.ok) rawText = await upstream.text();
+          }
+          if (!upstream.ok) upstreamErrorText = rawText;
+        }
+        if (upstreamErrorText !== undefined) {
+          const text = redact(upstreamErrorText);
           cleanup();
           let message = text || `ZCode 上游返回 HTTP ${upstream.status}`;
           try {

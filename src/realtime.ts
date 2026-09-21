@@ -1,8 +1,10 @@
 import fs from "node:fs";
-import { logRequestSummary } from "./process-log.ts";
+import { logGatewayError, logRequestSummary } from "./process-log.ts";
 import { httpLogFile, localTime, logGroupFromPath, logRealtimeEvent } from "./request-log.ts";
 import type { LogFileRef, RequestLogSink } from "./request-log.ts";
 import type { GatewayConfig } from "./types.ts";
+import { isZcodeModel } from "./zcode/catalog.ts";
+import { isCodebuddyModel } from "./codebuddy/catalog.ts";
 
 const MAX_REALTIME_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_WEBSOCKET_BYTES = 1024 * 1024;
@@ -74,30 +76,61 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   requestTime?: string;
 }
 
+/** 帧路由判定结果：照常转发（可改写）/ 需断开重连 / 已确认 HTTP-only 需触发降级。 */
+export type FrameRouting =
+  | { kind: "forward"; frame: string }
+  | { kind: "reconnect" }
+  | { kind: "reject"; model: string; family: string };
+
+/**
+ * 只走 HTTP 适配器的模型族：zcode 与 codebuddy/workbuddy 的上游不是 Responses
+ * WebSocket 端点，这些前缀的帧无论落在哪条桥上都不能转发。判定用纯前缀匹配，
+ * 刻意不依赖 zcodeEnabled/codebuddyEnabled——族被禁用时模型名同样不该漏到上游。
+ */
+export function httpOnlyModelFamily(model: string): "zcode" | "codebuddy" | "workbuddy" | undefined {
+  if (isZcodeModel(model)) return "zcode";
+  if (!isCodebuddyModel(model)) return undefined;
+  return model.toLowerCase().startsWith("workbuddy") ? "workbuddy" : "codebuddy";
+}
+
 /**
  * 校验帧的模型与连接路由是否一致。
- * official 只拒绝明确的 cliproxy/*；CPA thread 已固定路由，无前缀标题/系统帧继续走 CPA。
- * 返回改写后的帧；返回 null 表示 official 收到 CPA 帧，调用方需固定 thread 后重连。
+ * HTTP-only 族（zcode/codebuddy/workbuddy，含旧无地域前缀）已确认没有 Responses
+ * WebSocket 上游，直接触发断开重连进入握手 426；official 只拒绝明确的 cliproxy/*；
+ * CPA thread 已固定路由，无前缀标题/系统帧继续走 CPA。返回 forward（可改写后的帧）、
+ * reject（调用方断开客户端并关闭上游）或 reconnect（official 收到 CPA 帧，调用方固定
+ * thread 后断开重连）。
  */
 export function checkFrameRouting(
   frame: string,
   routeKind: "cliproxy" | "official",
   prefix: string,
-): string | null {
-  if (!prefix) return frame;
+): FrameRouting {
   let payload: unknown;
   try {
     payload = JSON.parse(frame);
   } catch {
-    return frame; // 非 JSON 帧原样透传
+    if (!prefix) return { kind: "forward", frame }; // 非 JSON 帧原样透传
   }
-  if (!isRecord(payload) || typeof payload.model !== "string") return frame;
-  const prefixed = payload.model.startsWith(prefix);
-  if (routeKind === "official") return prefixed ? null : frame;
-  if (!prefixed) return frame;
+  if (!isRecord(payload)) {
+    // 非 JSON 帧无法读取 model；纯管道仍透传，普通桥按原有行为处理。
+    if (!prefix || payload === undefined) return { kind: "forward", frame };
+  }
+  const record = isRecord(payload) ? payload : undefined;
+  const model = record?.model;
+  const family = typeof model === "string" ? httpOnlyModelFamily(model) : undefined;
+  if (typeof model === "string" && family) {
+    // 纯转发模式也明确拦截：这些前缀是网关保留命名空间，不可能由上游服务。
+    return { kind: "reject", model, family };
+  }
+  if (!prefix) return { kind: "forward", frame };
+  if (!record || typeof model !== "string") return { kind: "forward", frame };
+  const prefixed = model.startsWith(prefix);
+  if (routeKind === "official") return prefixed ? { kind: "reconnect" } : { kind: "forward", frame };
+  if (!prefixed) return { kind: "forward", frame };
   // 前缀是网关加的，上游模型表里没有，必须与 HTTP 路径一样剥掉再转发。
-  payload.model = payload.model.slice(prefix.length);
-  return JSON.stringify(payload);
+  record.model = model.slice(prefix.length);
+  return { kind: "forward", frame: JSON.stringify(payload) };
 }
 
 export type RealtimeProviderMode = "builtin" | "configured" | "invalid";
@@ -562,7 +595,7 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
     // Codex 复用连接跨模型发送，握手时选定的上游可能已不适用于当前帧。
     if (ws.data.routeKind && typeof frame === "string") {
       const routed = checkFrameRouting(frame, ws.data.routeKind, ws.data.prefix ?? "cliproxy/");
-      if (routed === null) {
+      if (routed.kind === "reconnect") {
         if (ws.data.routeKind === "official") ws.data.pinCpaThread?.();
         logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
           event: "ws-route-mismatch",
@@ -574,7 +607,26 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
         upstream?.close(1000, "Model routing changed");
         return;
       }
-      frame = routed;
+      if (routed.kind === "reject") {
+        // HTTP-only 族不经任何桥转发。断开让 Codex 重新协商：新握手由 gateway 侧
+        // 现有闸门直接回 426，客户端随后降级 HTTPS/SSE；上游关闭避免半开连接。
+        logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
+          event: "ws-route-mismatch",
+          url: ws.data.url,
+          detail: { routeKind: ws.data.routeKind, family: routed.family, model: routed.model },
+        });
+        logGatewayError(ws.data.log?.processLog, {
+          requestTime: ws.data.requestTime ?? localTime(),
+          method: "WS",
+          url: ws.data.clientUrl ?? ws.data.url,
+          status: 400,
+          message: `Refused ${routed.family} model '${routed.model}' on ${ws.data.routeKind} WebSocket bridge; closed for HTTPS/SSE negotiation`,
+        });
+        upstream?.close(1000, "HTTP-only model requires HTTPS/SSE");
+        ws.close(1012, "Model requires HTTPS/SSE; reconnect to negotiate");
+        return;
+      }
+      frame = routed.frame;
     }
     // cliproxy Responses 连接：逐 turn 记录 turn_id，供图片请求（x-codex-image-turn-id）继承路由。
     if (ws.data.noteTurnId && typeof frame === "string") {
