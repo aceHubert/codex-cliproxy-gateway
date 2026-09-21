@@ -433,19 +433,19 @@ test("WebSocket bridge forwards client close code and reason to the upstream soc
 
 test("frame routing guards against Codex reusing one socket across upstreams", () => {
   // 实测 Codex 会复用同一条连接达 88 秒并在其上切换模型，握手时选定的上游会失配。
-  assert.equal(
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "official", "cliproxy/"),
-    '{"type":"response.create","model":"gpt-5.6-luna"}',
+    { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-luna"}' },
     "official frame on an official socket passes through untouched",
   );
-  assert.equal(
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"cliproxy/gpt-5.6-luna"}', "official", "cliproxy/"),
-    null,
-    "cliproxy frame on an official socket must be rejected, not sent to ChatGPT backend",
+    { kind: "reconnect" },
+    "cliproxy frame on an official socket must trigger a reconnect, not reach the ChatGPT backend",
   );
-  assert.equal(
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "cliproxy", "cliproxy/"),
-    '{"type":"response.create","model":"gpt-5.6-luna"}',
+    { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-luna"}' },
     "an unprefixed title model stays on the established CPA route",
   );
 
@@ -455,24 +455,119 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
     "cliproxy",
     "cliproxy/",
   );
-  assert.ok(stripped);
-  assert.deepEqual(JSON.parse(stripped), {
+  assert.ok(stripped.kind === "forward");
+  assert.deepEqual(JSON.parse(stripped.frame), {
     type: "response.create",
     model: "gpt-5.6-luna",
     input: [],
   });
 
   // 无 model 字段的控制帧与非 JSON 帧原样透传。
-  assert.equal(
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.cancel"}', "cliproxy", "cliproxy/"),
-    '{"type":"response.cancel"}',
+    { kind: "forward", frame: '{"type":"response.cancel"}' },
   );
-  assert.equal(checkFrameRouting("not json at all", "official", "cliproxy/"), "not json at all");
-  assert.equal(
+  assert.deepEqual(
+    checkFrameRouting("not json at all", "official", "cliproxy/"),
+    { kind: "forward", frame: "not json at all" },
+  );
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-sol"}', "cliproxy", ""),
-    '{"type":"response.create","model":"gpt-5.6-sol"}',
+    { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-sol"}' },
     "upstream-only sockets forward every model without route switching",
   );
+});
+
+test("HTTP-only model families are refused locally on every bridged socket", () => {
+  // 2026-09-21 事故：official 预热桥上发 codebuddy-cn/* 帧被原样透传到 ChatGPT 后端，
+  // 由后端回 400 "model is not supported when using Codex with a ChatGPT account"。
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "official", "cliproxy/"),
+    { kind: "reject", model: "codebuddy-cn/hy4-preview-f", family: "codebuddy" },
+    "codebuddy frame on an official socket must never reach the ChatGPT backend",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-intl/gpt-5.6-sol"}', "official", "cliproxy/"),
+    { kind: "reject", model: "codebuddy-intl/gpt-5.6-sol", family: "codebuddy" },
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"workbuddy-intl/auto"}', "cliproxy", "cliproxy/"),
+    { kind: "reject", model: "workbuddy-intl/auto", family: "workbuddy" },
+    "HTTP-only frames must not leak to the CLIProxy upstream either",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/"),
+    { kind: "reject", model: "codebuddy/deepseek-v4.1-flash", family: "codebuddy" },
+    "legacy region-less codebuddy/ slugs are refused as well",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"zcode/glm-5.3"}', "official", "cliproxy/"),
+    { kind: "reject", model: "zcode/glm-5.3", family: "zcode" },
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"CODEBUDDY-CN/hy4-preview-f"}', "official", "cliproxy/"),
+    { kind: "reject", model: "CODEBUDDY-CN/hy4-preview-f", family: "codebuddy" },
+    "family detection is case-insensitive like the adapters",
+  );
+  // upstream-only 纯转发是纯管道，不做帧路由（既有设计）：空 prefix 整体跳过。
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "cliproxy", ""),
+    { kind: "reject", model: "codebuddy-cn/hy4-preview-f", family: "codebuddy" },
+    "reserved HTTP-only namespaces are intercepted even in upstream-only mode",
+  );
+});
+
+test("HTTP-only frames close the bridge for HTTPS/SSE negotiation and never reach upstream", () => {
+  const sentToUpstream: unknown[] = [];
+  const sentToClient: string[] = [];
+  const clientClosed: Array<{ code: number; reason: string }> = [];
+  const upstreamClosed: Array<{ code: number; reason: string }> = [];
+  const upstream = {
+    readyState: WebSocket.OPEN,
+    send(frame: unknown) { sentToUpstream.push(frame); },
+    close(code: number, reason: string) { upstreamClosed.push({ code, reason }); },
+  } as unknown as WebSocket;
+  const processDir = fs.mkdtempSync(path.join(os.tmpdir(), "ws-frame-guard-"));
+  const processLog = path.join(processDir, "gateway.log");
+  const socket = {
+    readyState: WebSocket.OPEN,
+    send(frame: string) { sentToClient.push(frame); },
+    close(code: number, reason: string) { clientClosed.push({ code, reason }); },
+    data: {
+      url: "wss://chatgpt.com/backend-api/codex/responses",
+      clientUrl: "/v1/responses",
+      requestTime: "2026-09-21 11:51:25.551",
+      headers: {},
+      upstream,
+      queue: [],
+      queuedBytes: 0,
+      routeKind: "official",
+      prefix: "cliproxy/",
+      log: { processLog: { file: processLog, maxBytes: 0 } },
+    },
+  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  try {
+    realtimeWebSocketHandler.message?.(
+      socket,
+      '{"type":"response.create","model":"codebuddy-cn/hy4-preview-f","input":[]}',
+    );
+    assert.equal(sentToUpstream.length, 0, "the frame must not be forwarded to the pinned upstream");
+    assert.deepEqual(clientClosed, [{
+      code: 1012,
+      reason: "Model requires HTTPS/SSE; reconnect to negotiate",
+    }]);
+    assert.deepEqual(upstreamClosed, [{
+      code: 1000,
+      reason: "HTTP-only model requires HTTPS/SSE",
+    }]);
+    assert.equal(sentToClient.length, 0, "the bridge must close instead of forwarding a synthetic error");
+    // 拒绝必须 surfaced 到 gateway.log：事故当时只能翻 ws 会话日志才能发现。
+    const logged = fs.readFileSync(processLog, "utf8");
+    assert.match(logged, /Refused codebuddy model 'codebuddy-cn\/hy4-preview-f' on official WebSocket bridge/);
+    assert.match(logged, /closed for HTTPS\/SSE negotiation/);
+  } finally {
+    fs.rmSync(processDir, { recursive: true, force: true });
+  }
 });
 
 test("turn id extraction reads every metadata location Codex Desktop writes", () => {

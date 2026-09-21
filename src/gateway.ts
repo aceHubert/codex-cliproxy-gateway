@@ -593,16 +593,19 @@ function writeModelsCache(
   models?: ModelCatalog["models"],
 ): void {
   if (!file || !clientVersion) return;
-  let preserved: { models?: ModelCatalog["models"] } = {};
+  let preserved: { models?: ModelCatalog["models"] } & Record<string, unknown> = {};
   try {
     const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      preserved = parsed as { models?: ModelCatalog["models"] };
+      preserved = parsed as { models?: ModelCatalog["models"] } & Record<string, unknown>;
     }
   } catch {}
   try {
     const cached = Array.isArray(models) ? models : preserved.models;
+    // Codex 会在缓存里附加自有字段（如 identity）；只更新本工具管理的三个键，
+    // 其余原样保留，避免每次 /models 请求都抹掉 Codex 的字段。
     atomicWrite(file, `${JSON.stringify({
+      ...preserved,
       fetched_at: new Date().toISOString(),
       client_version: clientVersion,
       ...(Array.isArray(cached) ? { models: cached } : {}),

@@ -2382,6 +2382,41 @@ test("incomplete non-GPT compaction never emits a replacement item", async () =>
 });
 
 
+test("gateway models cache writes preserve Codex-owned fields like identity", async () => {
+  const originalFetch = globalThis.fetch;
+  const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-models-cache-"));
+  const cacheFile = path.join(cacheDir, "models_cache.json");
+  // 预置 Codex 写入的 identity 字段：网关重写缓存时只应更新自己管理的键。
+  fs.writeFileSync(cacheFile, JSON.stringify({
+    fetched_at: "2000-01-01T00:00:00Z",
+    client_version: "0.0.0",
+    identity: "codex-identity-hash",
+    models: [{ slug: "old-model" }],
+  }));
+  globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-new" }] })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key", undefined, undefined, undefined, cacheFile);
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.155.0"));
+    assert.equal(response.status, 200);
+    const cache = JSON.parse(fs.readFileSync(cacheFile, "utf8")) as Record<string, unknown>;
+    assert.equal(cache.identity, "codex-identity-hash");
+    assert.equal(cache.client_version, "0.155.0");
+    assert.notEqual(cache.fetched_at, "2000-01-01T00:00:00Z");
+    assert.deepEqual(cache.models, [{ slug: "gpt-new" }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+  }
+});
+
 test("CLIProxy catalog uses the supplied client version", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
