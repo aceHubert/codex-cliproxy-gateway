@@ -39,7 +39,6 @@ export interface UiConfig {
   editable: {
     zcode: boolean;
     codebuddy: boolean;
-    codebuddyRegion: "auto" | "cn" | "intl";
     qoder: boolean;
     agy: boolean;
     requestLogging: boolean;
@@ -52,6 +51,12 @@ export interface UiConfig {
   detected: {
     zcode: boolean;
     codebuddy: boolean;
+    /**
+     * 当前实际命中的 CodeBuddy 账号标签（`昵称 <邮箱> / 地域`，只含非敏感的账号标识），
+     * 由后端按网关同一选取规则实时解析；null 表示无可用登录。只读字段，切换只在 CLI
+     * （codebuddy --switch）。
+     */
+    codebuddyAccountLabel: string | null;
     qoder: boolean;
     /** Qoder 当前生效登录来源；每地域按 CLI 优先、桌面回退计算，只含标签不含凭据。 */
     qoderSources: Array<"CLI-INTL" | "CLI-CN" | "DESKTOP-INTL" | "DESKTOP-CN">;
@@ -78,11 +83,11 @@ export interface UiConfig {
   configVersion: string;
 }
 
-/** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。 */
+/** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。
+ * CodeBuddy 账号不在此列：UI 只读展示，切换走 CLI 的 codebuddy --switch。 */
 export interface UiConfigChanges {
   zcode?: boolean;
   codebuddy?: boolean;
-  codebuddyRegion?: "auto" | "cn" | "intl";
   qoder?: boolean;
   agy?: boolean;
   requestLogging?: boolean;

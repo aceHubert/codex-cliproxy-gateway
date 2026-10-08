@@ -269,8 +269,8 @@ test("config invalidates the Codex models cache only for catalog-affecting optio
     await runCli(["config", "--log", "on", "--max-log-size", "1MB"]);
     assert.equal(fs.existsSync(paths.modelsCacheFile), false, "log-only options must not touch the models cache");
 
-    // 目录相关选项（zcode/codebuddy/region 任一）命中即统一失效一次。
-    await runCli(["config", "--codebuddy-region", "cn"]);
+    // 目录相关选项（zcode/codebuddy/qoder/agy 开关任一）命中即统一失效一次。
+    await runCli(["config", "--codebuddy", "off"]);
     assert.equal(fs.existsSync(paths.modelsCacheFile), true, "catalog-affecting options must invalidate the models cache");
     const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as Record<string, unknown>;
     assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");

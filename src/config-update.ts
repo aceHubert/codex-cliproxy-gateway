@@ -7,7 +7,7 @@ import { validateZcodeConfig } from "./zcode/index.ts";
 import { validateCodebuddyConfig } from "./codebuddy/index.ts";
 import { validateQoderConfig } from "./qoder/index.ts";
 import { validateAgyConfig } from "./agy/index.ts";
-import type { CodebuddyRegion, GatewayConfig, ResolvedPaths } from "./types.ts";
+import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
  * 配置写入的共享路径：CLI `config` 命令与 Web UI `POST /ui/api/config` 共用的
@@ -69,11 +69,11 @@ function writeGatewayConfigFile(file: string, value: GatewayConfig): void {
   atomicWrite(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
-/** Web UI 表单可提交的字段；数值/大小字段按字符串提交，与服务端 CLI 解析规则一致。 */
+/** Web UI 表单可提交的字段；数值/大小字段按字符串提交，与服务端 CLI 解析规则一致。
+ * 注意：CodeBuddy 账号选择只在 CLI（codebuddy --switch / config --codebuddy），UI 只读。 */
 export interface WebUiConfigPatch {
   zcode?: unknown;
   codebuddy?: unknown;
-  codebuddyRegion?: unknown;
   qoder?: unknown;
   agy?: unknown;
   requestLogging?: unknown;
@@ -84,7 +84,6 @@ export interface WebUiConfigPatch {
 const SUPPORTED_PATCH_FIELDS = new Set([
   "zcode",
   "codebuddy",
-  "codebuddyRegion",
   "qoder",
   "agy",
   "requestLogging",
@@ -171,15 +170,6 @@ export function applyWebUiConfigPatch(
     if (typeof patch.codebuddy !== "boolean") throw new Error("codebuddy expects a boolean");
     if (config.codebuddy !== patch.codebuddy) change("codebuddy", patch.codebuddy);
     config.codebuddy = patch.codebuddy;
-  }
-  if (patch.codebuddyRegion !== undefined) {
-    if (typeof patch.codebuddyRegion !== "string"
-      || !["auto", "cn", "intl"].includes(patch.codebuddyRegion)) {
-      throw new Error("codebuddyRegion expects auto, cn, or intl");
-    }
-    const region = patch.codebuddyRegion as CodebuddyRegion;
-    if ((config.codebuddyRegion ?? "auto") !== region) change("codebuddyRegion", region);
-    config.codebuddyRegion = region;
   }
   if (patch.qoder !== undefined) {
     if (typeof patch.qoder !== "boolean") throw new Error("qoder expects a boolean");

@@ -180,15 +180,14 @@ codex-cliproxy config --log off
 | `--max-request-logs N` | 请求日志目录最多保留的文件数，`0` 表示不限。 |
 | `--max-log-size SIZE` | 主日志大小上限，支持 `512KB`、`10MB`、`1M`；`0` 表示不限。 |
 | `--zcode on\|off` | 开关 ZCode 模型，默认关闭。 |
-| `--codebuddy on\|off` | 开关 CodeBuddy/WorkBuddy 模型，默认关闭。 |
+| `--codebuddy on\|off` | 开关 CodeBuddy/WorkBuddy 模型，默认关闭；账号使用 `codebuddy --switch`。 |
 | `--qoder on\|off` | 开关本机 Qoder 模型，默认关闭；支持国际版与国内版。 |
 | `--agy on\|off` | 开关本机 Antigravity（`agy/`）模型，默认关闭。 |
-| `--codebuddy-region auto\|cn\|intl` | 选择 CodeBuddy/WorkBuddy 模型目录的刷新地域，默认 `auto`。 |
 
 参数可以组合使用。CLI 配置写入仅支持 macOS：已安装后台服务时自动重启网关，
 没有后台服务时仅保存配置，需自行重启前台进程。
 如提示配置已保存但重启失败，执行 `codex-cliproxy restart`。
-修改 `--zcode`、`--codebuddy`、`--qoder`、`--agy` 或 `--codebuddy-region` 时会同时失效 Codex 的
+修改 `--zcode`、`--codebuddy`、`--qoder`、`--agy` 或运行 `codebuddy --switch` 时会同时失效 Codex 的
 模型目录缓存，Codex 启动或下一次校验时会立即重新拉取列表；纯日志参数不影响目录。
 
 常用文件位置：
@@ -222,18 +221,34 @@ codex-cliproxy config --zcode off
 
 ```bash
 codex-cliproxy config --codebuddy on
-codex-cliproxy config --codebuddy-region cn
 ```
+
+本机有多份登录（不同账号或产品各落一个 `.info` 文件）时，可用上下箭头选择
+网关使用的账号：
+
+```bash
+codex-cliproxy codebuddy --switch
+```
+
+菜单第一项是 `auto` 此刻命中的登录，标注 `(auto, follows the most recently
+refreshed login)`：选它即跟随最近刷新的登录，并随 CodeBuddy 客户端切换账号自动
+跟随；该登录不再单独列出，其余登录按 `昵称 <邮箱> / 地域` 显示。↑/↓ 移动、
+Enter 确认、Esc 取消。不做选择时即为 `auto`；`config --codebuddy on|off` 只管
+开关，不负责账号选择。
+
+配置保存的是 `.info` 文件名（`codebuddyAccount`）。锁定后网关只读该文件；
+文件被删除时不改写配置，运行期自动回退 `auto` 并在 `gateway.log` 记一条
+warning，Web UI 的「当前账号」标签也会实时显示实际命中的账号。账号选择只在
+CLI；Web UI 对该标签只读展示（仅含昵称、邮箱与地域等非敏感账号标识，凭据
+token 绝不进入 UI）。历史配置里的 `codebuddyRegion` 已过时，读取时自动按
+`auto` 处理并在下次写盘时移除；早期写入的 `codebuddyAccount: "default"` 同样
+自动改写为 `auto`。
 
 模型列表的显示名会带 CN/INTL 地域标识和 C/W 产品标识；C 表示 CodeBuddy CLI，
 W 表示 WorkBuddy。选择对应条目后，网关会按该条目路由到对应地域登录；
-缺少该地域凭据时直接报错，不会回退到另一个地域。
+缺少该地域凭据（或锁定账号属于另一地域）时直接报错，不会回退到另一个地域。
 
-`--codebuddy-region` 只控制模型目录刷新使用哪个地域的登录：`cn` 和 `intl`
-固定对应地域，指定地域暂无凭据时回退 `auto`；`auto` 使用最近刷新的登录。
-切换该配置并重启网关后，Codex 中的模型列表会随目录刷新更新。
-
-切换地域后，Codex 的模型选择器可能短暂保留已下架的旧地域条目。此时即使请求
+切换账号后，Codex 的模型选择器可能短暂保留已下架的旧条目。此时即使请求
 落在官方或第三方的 WebSocket 连接上，网关也会在本地断开该连接，让 Codex 重新
 协商并降级 HTTPS/SSE，不会把这类已确认不支持的模型帧发给任何上游；ZCode 模型
 同样受该逐帧保护。
@@ -322,7 +337,7 @@ codex-cliproxy config --agy on
 access_token 有效期 1 小时，由 agy 进程负责刷新（常驻可执行
 `agy remote-control start`）；网关过期即快速失败并提示刷新，绝不自行刷新或写回凭据。
 
-模型显示名为 `AGN/<名称>`，调用 ID 为 `agy/<上游模型 id>`。同一模型的多档位变体
+模型显示名为 `AGY/<名称>`，调用 ID 为 `agy/<上游模型 id>`。同一模型的多档位变体
 （high/medium/low）在目录中合并为一个 ID（如 `agy/gemini-3.8-flash`），由请求的
 `reasoning.effort` 选择档位（缺省 medium，缺档就近回退）；显式档位 ID
 （如 `agy/gemini-3.8-flash-high`）仍可直接调用。目录按官方推荐位与档位动态生成，
@@ -395,6 +410,8 @@ CODEX_CLIPROXY_UI_SERVICE=1 codex-cliproxy web
   必要时用 `CODEX_CLIPROXY_CLIENT_VERSION` 指定实际使用的客户端版本。
 - **ZCode 或 CodeBuddy/WorkBuddy 模型不可用**：
   确认对应客户端已登录、开关已开启，且网关未处于仅上游模式。
+  CodeBuddy 提示地域无凭据时，运行 `codex-cliproxy codebuddy --switch`
+  确认当前锁定的账号及其地域，或切回 `auto`。
 - **无法打开 Web 界面**：重新运行 `codex-cliproxy web`；
   若提示后台界面占用端口，先运行 `web --stop`。
 - **手动改了配置但未生效**：修改网关配置后重启网关，

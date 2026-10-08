@@ -30,7 +30,21 @@ function credential(profile: CodebuddyCredential["profile"] = "intl-cli"): Codeb
     domain: "www.codebuddy.ai",
     accountUid: "uid-1",
     enterpriseId: "",
+    accountNickname: "",
+    accountUsername: "",
+    accountEmail: "",
     expiresAt: Date.now() + 3_600_000,
+  };
+}
+
+type SelectKey = "up" | "down" | "enter" | "cancel" | "other";
+
+/** 脚本化按键源（codebuddy --switch 的箭头菜单）：按序回放，耗尽后一直返回最后一个键。 */
+function scriptedKeys(keys: SelectKey[]) {
+  let index = 0;
+  return {
+    read: async (): Promise<SelectKey> => keys[Math.min(index++, keys.length - 1)] ?? "cancel",
+    close: () => {},
   };
 }
 
@@ -446,14 +460,18 @@ test("validateCodebuddyConfig：环回与保留前缀约束", () => {
   };
   validateCodebuddyConfig({ ...base, codebuddy: true });
   validateCodebuddyConfig({ ...base, codebuddy: false, host: "0.0.0.0" });
-  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
-  validateCodebuddyConfig({ ...base, codebuddy: false, codebuddyRegion: "auto" });
+  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "auto" });
+  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "Tencent-Cloud.coding-copilot.info" });
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0" }), /环回/);
   for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy-cn/", "workbuddy-cn/", "codebuddy-intl/", "workbuddy-intl/"]) {
     assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), /前缀保留/, prefix);
   }
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
-  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyRegion: "us" } as unknown as GatewayConfig), /codebuddyRegion/);
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: "us" } as unknown as GatewayConfig), /codebuddyAccount/);
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: "../escape.info" } as unknown as GatewayConfig), /codebuddyAccount/);
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: 42 } as unknown as GatewayConfig), /codebuddyAccount/);
+  // 旧 codebuddyRegion 已过时：不再是校验或分派依据（读取路径会迁移为 codebuddyAccount）。
+  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
   // upstream-only 下不加约束。
   validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true });
 });
@@ -528,8 +546,8 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
   }
 });
 
-test("config --codebuddy 写入状态与审计；upstream-only 报告生效值", { skip: process.platform !== "darwin" }, async () => {
-  const { runCli } = await import("../src/cli.ts");
+test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账号选择的唯一入口", { skip: process.platform !== "darwin" }, async () => {
+  const { runCli, codebuddyCommand } = await import("../src/cli.ts");
   const { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } = await import("../src/config.ts");
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cli-"));
   const oldHome = process.env.HOME;
@@ -539,6 +557,8 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
   delete process.env.CODEX_HOME;
   const printed: string[] = [];
   console.log = (value?: unknown) => { printed.push(String(value)); };
+  const oldWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((text: string | Uint8Array) => { printed.push(String(text)); return true; }) as typeof process.stdout.write;
   try {
     const runtimeHome = path.join(home, ".codex-cliproxy-gateway");
     fs.mkdirSync(runtimeHome, { recursive: true });
@@ -560,14 +580,37 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
     assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddy, true);
     assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddy: false -> true/);
 
-    await runCli(["config", "--codebuddy-region", "cn"]);
-    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyRegion, "cn");
-    assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddyRegion: null -> "cn"/);
+    // 账号选择只在 codebuddy --switch：注入脚本化按键源走完整写盘管线（校验→写盘→state→审计）。
+    const authDir = path.join(home, "auth");
+    fs.mkdirSync(authDir, { recursive: true });
+    const writeLogin = (file: string, nickname: string, lastRefreshTime: number) => {
+      fs.writeFileSync(path.join(authDir, file), JSON.stringify({
+        account: { uid: `uid-${nickname}`, nickname, enterpriseId: "" },
+        auth: { accessToken: ACCESS_TOKEN, refreshToken: REFRESH_TOKEN, domain: "www.codebuddy.ai", expiresAt: Date.now() + 90 * 24 * 3600 * 1000, lastRefreshTime },
+      }));
+    };
+    writeLogin("alpha.info", "Alpha", 1_000);
+    writeLogin("beta.info", "Beta", 5_000);
+    const pick = (keys: SelectKey[]) =>
+      codebuddyCommand({ interactive: true, keySource: scriptedKeys(keys), authDirectory: authDir });
+    // auto 命中 beta → 菜单 = auto, alpha；↓ + Enter 锁定 alpha。
+    await pick(["down", "enter"]);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "alpha.info");
+    assert.equal((JSON.parse(fs.readFileSync(stateFile, "utf8")) as Json).config.codebuddyAccount, "alpha.info", "state.config 同步");
+    assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddyAccount: null -> "alpha\.info"/);
 
     printed.length = 0;
     await runCli(["config"]);
-    const regionStatus = JSON.parse(printed.join("\n")) as Json;
-    assert.equal(regionStatus.codebuddyRegion, "cn");
+    const accountStatus = JSON.parse(printed.join("\n")) as Json;
+    assert.equal(accountStatus.codebuddyAccount, "alpha.info");
+
+    // 首项 Enter 切回 auto；取消不改配置。
+    await pick(["enter"]);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "auto");
+    printed.length = 0;
+    await pick(["cancel"]);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "auto");
+    assert.ok(printed.some((line) => /switch cancelled/.test(line)), "取消要有明确提示");
 
     printed.length = 0;
     await runCli(["config"]);
@@ -585,13 +628,90 @@ test("config --codebuddy 写入状态与审计；upstream-only 报告生效值",
     assert.equal(status.codebuddyConfigured, true, "原始开关与生效值不一致时单独报出");
 
     await assert.rejects(runCli(["config", "--codebuddy", "maybe"]), /on or off/);
-    await assert.rejects(runCli(["config", "--codebuddy-region", "us"]), /auto, cn, or intl/);
+    // config 只管开关：账号直选与 --codebuddy-switch 都不再是 config 的选项。
+    await assert.rejects(runCli(["config", "--codebuddy", "auto"]), /on or off/);
+    await assert.rejects(runCli(["config", "--codebuddy", "alpha.info"]), /on or off/);
+    await assert.rejects(runCli(["config", "--codebuddy-switch"]), /--codebuddy-switch requires a value/);
+    await assert.rejects(runCli(["config", "--codebuddy-switch", "on"]), /Unknown option --codebuddy-switch/);
+    // 顶层 codebuddy --switch 在非交互终端报错且不写配置（不选即 auto）；必须带 --switch。
+    await assert.rejects(runCli(["codebuddy", "--switch"]), /interactive terminal.*auto/s);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "auto");
+    await assert.rejects(runCli(["codebuddy"]), /requires --switch/);
   } finally {
     console.log = oldLog;
+    process.stdout.write = oldWrite;
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;
     if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = oldCodexHome;
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("promptCodebuddyAccountSelection：箭头选择/取消；auto 置顶且不重复列出它命中的登录", async () => {
+  const { promptCodebuddyAccountSelection } = await import("../src/cli.ts");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-switch-"));
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  const token = `header.${encode({ iss: "https://www.codebuddy.ai/auth/realms/copilot" })}.sig`;
+  const writeLogin = (file: string, uid: string, lastRefreshTime: number) => {
+    fs.writeFileSync(path.join(directory, file), JSON.stringify({
+      account: { uid, enterpriseId: "" },
+      auth: { accessToken: token, refreshToken: token, domain: "www.codebuddy.ai", expiresAt: Date.now() + 90 * 24 * 3600 * 1000, lastRefreshTime },
+    }));
+  };
+  const pick = (keys: SelectKey[], authDirectory = directory) =>
+    promptCodebuddyAccountSelection({ interactive: true, keySource: scriptedKeys(keys), authDirectory });
+  const oldLog = console.log;
+  const oldWrite = process.stdout.write.bind(process.stdout);
+  const lines: string[] = [];
+  console.log = (value?: unknown) => { lines.push(String(value)); };
+  process.stdout.write = ((text: string | Uint8Array) => { lines.push(String(text)); return true; }) as typeof process.stdout.write;
+  try {
+    // 同 profile 两份登录，beta 更近刷新 → auto 命中 beta，它不再单独列出；列表 = auto, alpha, broken。
+    writeLogin("alpha.info", "uid-alpha", 1_000);
+    writeLogin("beta.info", "uid-beta", 5_000);
+    fs.writeFileSync(path.join(directory, "broken.info"), "{ not json");
+
+    assert.equal(await pick(["enter"]), "auto", "首项是 auto");
+    assert.equal(await pick(["down", "enter"]), "alpha.info");
+    // broken 不可选且到底不环绕：第二次 down 仍停在 alpha。
+    assert.equal(await pick(["down", "down", "enter"]), "alpha.info");
+    assert.equal(await pick(["up", "enter"]), "auto", "到顶不环绕");
+    assert.equal(await pick(["other", "enter"]), "auto", "无关按键忽略");
+    assert.equal(await pick(["down", "cancel"]), undefined, "取消不返回任何选择");
+
+    // 去掉 ANSI 后收集出现过的菜单项：auto 置顶并标出当前命中账号，beta 不单独出现，损坏项带 unusable。
+    const menuItems = new Set(
+      lines.join("").split("\n")
+        .map((line) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ""))
+        .filter((line) => /^[> ] \S/.test(line))
+        .map((line) => line.slice(2)),
+    );
+    const items = [...menuItems];
+    assert.ok(items.includes("uid-beta / intl (auto, follows the most recently refreshed login)"), items.join(" | "));
+    assert.ok(items.includes("uid-alpha / intl"), items.join(" | "));
+    assert.ok(items.some((item) => item.startsWith("broken.info（") && item.endsWith(" (unusable)")), items.join(" | "));
+    assert.ok(!items.includes("uid-beta / intl"), "auto 命中的登录不再单独列出");
+    assert.match(lines.join("\n"), /↑\/↓ move · Enter select · Esc cancel/);
+    // 菜单期间隐藏光标，结束后恢复。
+    assert.ok(lines.includes("\x1b[?25l") && lines.includes("\x1b[?25h"));
+
+    // 非交互终端：报错且说明缺省即 auto；空目录按取消处理。
+    await assert.rejects(
+      promptCodebuddyAccountSelection({ interactive: false, authDirectory: directory }),
+      /interactive terminal.*auto/s,
+    );
+    lines.length = 0;
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "cb-switch-empty-"));
+    try {
+      assert.equal(await pick(["enter"], empty), undefined);
+      assert.match(lines.join("\n"), /No CodeBuddy\/WorkBuddy logins found/);
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  } finally {
+    console.log = oldLog;
+    process.stdout.write = oldWrite;
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });

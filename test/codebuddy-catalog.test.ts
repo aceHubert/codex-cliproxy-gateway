@@ -42,6 +42,9 @@ function credential(profile: CodebuddyCredential["profile"]): CodebuddyCredentia
     domain: "www.codebuddy.ai",
     accountUid: "uid-1",
     enterpriseId: "",
+    accountNickname: "",
+    accountUsername: "",
+    accountEmail: "",
     expiresAt: Date.now() + 3_600_000,
   };
 }

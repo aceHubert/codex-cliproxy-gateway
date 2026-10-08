@@ -171,7 +171,7 @@ test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async (
     const models = (await codex.json() as Json).models as Json[];
     const flash = models.find((item) => item.slug === MODEL);
     assert.ok(flash);
-    assert.equal(flash.display_name, "AGN/Gemini 3.8 Flash");
+    assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
     assert.equal(flash.prefer_websockets, false);
     assert.equal(flash.context_window, 1_000_000);
   });
@@ -274,7 +274,7 @@ test("agy 合并条目按 reasoning effort 选择档位，显式档位 slug 兼�
     // 三档在目录中只暴露一个合并条目，不重复列出各档位变体。
     assert.deepEqual(agySlugs, ["agy/gemini-3.8-flash"]);
     const flashEntry = models.find((item) => item.slug === "agy/gemini-3.8-flash")!;
-    assert.equal(flashEntry.display_name, "AGN/Gemini 3.8 Flash");
+    assert.equal(flashEntry.display_name, "AGY/Gemini 3.8 Flash");
     // 客户端可见的档位只有实际上游变体：low/medium/high，不得暴露 xhigh/minimal。
     assert.deepEqual(
       (flashEntry.supported_reasoning_levels as Json[]).map((level) => level.effort),

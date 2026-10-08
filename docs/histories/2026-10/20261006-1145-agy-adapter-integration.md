@@ -58,7 +58,7 @@
 - 红线自查：凭据/令牌不入日志与响应（交换日志仅 model+stream+status+usage）；URL 不外发；入站授权不透传上游
 
 ### 📝 Post-completion Amendment（2026-10-06 12:10）
-- 显示名前缀改为大写 `AGN/`（`AGY_DISPLAY_PREFIX`），路由 slug 仍为 `agy/`——对齐 CodeBuddy 的 CB-/WB- 显示标签风格；目录、两处测试断言与执行计划措辞同步更新，`bun test test/agy-*` + webui 81 例全绿，UI 已重建。
+- 显示名前缀改为大写 `AGY/`（`AGY_DISPLAY_PREFIX`），路由 slug 仍为 `agy/`——对齐 CodeBuddy 的 CB-/WB- 显示标签风格；目录、两处测试断言与执行计划措辞同步更新，`bun test test/agy-*` + webui 81 例全绿，UI 已重建。
 
 ### 📝 Post-completion Amendment 2（2026-10-06 复核修复）
 外部复核确认 6 项接线缺陷，全部修复并补测试：

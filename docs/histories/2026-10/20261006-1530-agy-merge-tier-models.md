@@ -8,7 +8,7 @@
 * **Branch**: main
 
 ### 📥 User Query
-> （截图展示 /v1/models 中 AGN/Gemini 3.8/3.7/3.6 Flash 各列 -high/-medium/-low 三条）
+> （截图展示 /v1/models 中 AGY/Gemini 3.8/3.7/3.6 Flash 各列 -high/-medium/-low 三条）
 > 这些是不是应该合并成一个，使用 reasoning level 进行选择才对
 
 ### 🛠 Changes Overview
@@ -50,7 +50,7 @@
 
 ### ✅ Verification
 - `bun run check`：646 tests / 0 fail（较上一任务 +5 例）。
-- 生产网关 `restart` 后实测 `/v1/models`：agy 条目 14 → 8（flash 三族合并为 `agy/gemini-3.8|3.7|3.6-flash`，显示名 `AGN/Gemini 3.8 Flash` 等）；磁盘 `agy-catalog.json` 含三组完整档位家族。未发起真实推理调用（解析逻辑为纯本地映射，已由 mock 测试覆盖）。
+- 生产网关 `restart` 后实测 `/v1/models`：agy 条目 14 → 8（flash 三族合并为 `agy/gemini-3.8|3.7|3.6-flash`，显示名 `AGY/Gemini 3.8 Flash` 等）；磁盘 `agy-catalog.json` 含三组完整档位家族。未发起真实推理调用（解析逻辑为纯本地映射，已由 mock 测试覆盖）。
 
 ### Amendment [2026-10-06 18:43] supported_reasoning_levels 按实际档位重建（xhigh 泄漏修正）
 - **问题**（用户复核）：合并条目仍暴露 `xhigh`（及 `minimal`）档位——`buildAgyCatalog` 的 `structuredClone(BASE)` 原样保留了 gpt-5.5 快照的 OpenAI 风格 `supported_reasoning_levels`，而上游只有 high/medium/low 变体，客户端可能选出不存在的档位。

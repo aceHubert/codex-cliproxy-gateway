@@ -446,52 +446,22 @@ button {
   cursor: default;
 }
 
-.region-segmented {
+/* CodeBuddy 账号只读标签：实时解析的「昵称 <邮箱> / 地域」，无任何交互态；
+ * 切换账号只在 CLI（codebuddy --switch），UI 不提供写入口。 */
+.account-readonly {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  padding: 2px;
+  padding: 4px 8px;
   background: var(--bg-input-editable);
   border: 1px solid var(--border-card);
-  border-radius: var(--radius-md);
-}
-
-.region-btn {
-  min-width: 38px;
-  padding: 4px 8px;
-  border: none;
   border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--fg-muted);
+  color: var(--fg-secondary);
   font-family: var(--font-mono);
   font-size: 10.5px;
   font-weight: 600;
   line-height: 1;
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.region-btn:hover:not(.active) {
-  color: var(--fg-secondary);
-}
-
-.region-btn.active {
-  background: var(--accent-subtle);
-  color: var(--accent);
-}
-
-.region-btn:disabled {
-  color: var(--fg-dim);
-  cursor: not-allowed;
-}
-
-.region-btn.active:disabled {
-  background: transparent;
-}
-
-.region-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  white-space: nowrap;
+  cursor: default;
 }
 
 .error-text {
