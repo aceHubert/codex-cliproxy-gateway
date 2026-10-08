@@ -125,6 +125,42 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo
 
 也支持直接提供 HTTP(S) 的 `models.json` 文件地址；仓库地址使用最新 Release 的文件。
 
+### 排除模型（excludedModels）
+
+多个兼容入口（ZCode、CodeBuddy/WorkBuddy、Qoder、Antigravity、上游）全部开启时，
+合并目录可达上百条，Codex 的模型下拉菜单会非常臃肿。`excludedModels` 在网关
+**合并所有目录之后**统一过滤：命中的模型不再出现在 `/models`（含
+`?client_version=` 的 Codex 原始目录形态），对这些模型的推理请求也会被网关以
+404 拦截，不会转发到任何上游。规则以带厂商前缀的完整模型 ID 为核心键，
+彻底区分 `codebuddy-intl/` 与 `codebuddy-cn/` 等同名异地模型。
+
+```bash
+# 终端交互勾选：列出当前全部兼容模型（完整 ID + 显示名），
+# 空格切换排除、回车保存；已排除的精确 ID 会预勾选
+codex-cliproxy models --exclude
+
+# 直接追加排除规则（逗号或空格分隔，支持多条）
+codex-cliproxy models --exclude "codebuddy-cn/*, qoder-intl/"
+
+# 清空排除列表
+codex-cliproxy models --exclude none
+```
+
+每条规则支持三种写法（大小写不敏感）：
+
+| 规则形态 | 示例 | 命中范围 |
+| --- | --- | --- |
+| 精确模型 ID | `agy/gemini-2.5-flash` | 仅该模型 |
+| 前缀族（以 `/` 结尾） | `codebuddy-intl/` | 该前缀下全部模型 |
+| 通配符（含 `*`） | `qoder-cn/*`、`zcode*` | 按 glob 匹配 |
+
+裸 `*`（会排除全部模型）会被拒绝并提示改用厂商前缀。排除配置保存在
+`~/.codex-cliproxy-gateway/config.json` 的 `excludedModels` 数组中
+（[配置格式](schemas/gateway-config.schema.json)），也可在 Web 配置界面用
+多行文本框编辑（每行一条规则）。每次变更都会记录配置审计、失效 Codex 的
+`models_cache.json` 并热重启网关；`--exclude` 同样支持 `--restart-codex`。
+不带参数的 `codex-cliproxy models` 会在末尾打印当前生效的排除规则清单。
+
 ### 何时需要重启 Codex
 
 - 安装后、切换混合/仅上游模式后：重启 Codex。
@@ -132,7 +168,8 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo
 - 混合模式下修改模型选择：等待自动刷新；列表仍未更新时再重启。
 - `codex-cliproxy restart` 默认只重启网关。
 
-`install`、`uninstall`、`restart`、`models --sync` 支持 `--restart-codex`。它会停止
+`install`、`uninstall`、`restart`、`models --sync`、`models --exclude` 支持
+`--restart-codex`。它会停止
 当前 Codex app-server，**可能中断正在执行的任务**，不会主动启动替代进程；必要时
 重新打开 Codex。`config` 只写网关侧配置，停止 app-server 无法刷新模型选择器，
 因此不提供该参数。
@@ -147,7 +184,8 @@ codex-cliproxy web
 `http://127.0.0.1:8321/ui`；自定义网关端口时，界面端口为网关端口加 1。
 按 `Ctrl-C` 停止前台界面服务，网关继续运行。
 
-界面支持修改配置、选择上游模型、查看日志及中英文切换。
+界面支持修改配置、选择上游模型、编辑排除模型规则（`excludedModels`，每行一条）、
+查看日志及中英文切换。
 保存后按页面提示应用设置或重启 Codex。
 
 | 命令 | 用途 |

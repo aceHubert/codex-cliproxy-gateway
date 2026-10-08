@@ -64,3 +64,14 @@
 ### 🔗 References
 - 执行计划（已归档）：`docs/exec-plans/completed/excluded-models-filter.md`
 - 技术债（upstream-only 直通分支拦截边界）：`docs/exec-plans/tech-debt-tracker.md` 2026-10-08 行
+
+### 🔁 Review 修复（同日第二轮）
+
+用户 review 指出四个缺口，均已修复并补测试：
+
+1. **README 缺文档**：「选择与刷新模型」新增「排除模型（excludedModels）」小节（CLI 三种用法、三种规则形态表、生效链路），`--restart-codex` 支持列表与 Web 界面能力描述同步更新。
+2. **`config` 无参回显缺排除项**：JSON 摘要新增 `excludedModels`（直接回显规则数组；规则条数少且即观测对象，与 `selectedModels` 的计数语义区分）。
+3. **组合参数静默忽略**：`models --exclude` 显式拒绝 `--select`（`--sync`/`--upstream-only`/`--model-merge-json` 已有前置守卫），新增测试断言四种组合均在写盘前报错且配置保持原样。
+4. **主仓库残留**：删除主工作区 `docs/exec-plans/active/excluded-models-filter.md` 未跟踪副本（归档版已在分支 `completed/` 下）；`.omo/`、`.zcodeignore`、`active/openai-chat-completions-endpoint.md` 属其他在途工作，未触碰。
+
+新增测试后全量 `bun run check` 仍全绿（690 tests）。

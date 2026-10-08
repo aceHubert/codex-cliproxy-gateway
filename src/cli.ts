@@ -1377,6 +1377,9 @@ async function models(options: CliOptions): Promise<void> {
 
   if (options.exclude !== undefined) {
     if (options.sync === true) throw new Error("--exclude cannot be combined with --sync");
+    // --upstream-only 与 --model-merge-json 已被 runCli 的前置守卫拒绝（要求 --sync）；
+    // --select 语义属于上游模型选择，与排除规则无关，显式拒绝避免静默忽略。
+    if (options.select !== undefined) throw new Error("--select cannot be combined with --exclude");
     await excludeModels(paths, config, options.exclude as true | string, restartCodex);
     return;
   }
@@ -1921,6 +1924,8 @@ async function configCommand(options: CliOptions): Promise<void> {
       maxGatewayLogBytes: config.maxGatewayLogBytes ?? 0,
       catalogPath: config.catalogPath,
       selectedModels: Array.isArray(config.selectedModels) ? config.selectedModels.length : 0,
+      // 排除规则条数少且就是观测对象本身，直接回显规则（selectedModels 可能上百条才折成计数）。
+      excludedModels: Array.isArray(config.excludedModels) ? config.excludedModels : [],
     }, null, 2));
     return;
   }

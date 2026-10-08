@@ -7,7 +7,7 @@ import { EventEmitter } from "node:events";
 import { compileModelFilter, filterExcludedModels } from "../src/catalog.ts";
 import { applyWebUiConfigPatch, parseExcludedModels } from "../src/config-update.ts";
 import { joinExcludedLines, splitExcludedLines } from "../src/ui/excluded-models-field.ts";
-import { collectCompatibleModels, excludeModels, type ExcludeModelsDependencies } from "../src/cli.ts";
+import { collectCompatibleModels, excludeModels, runCli, type ExcludeModelsDependencies } from "../src/cli.ts";
 import { resolvePaths } from "../src/paths.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL } from "../src/config.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
@@ -286,6 +286,49 @@ test("interactive models --exclude pre-checks exact rules and preserves glob/pre
     const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
     // 精确规则由勾选结果替换；qoder-cn/* 无法用勾选表达，原样保留。
     assert.deepEqual(saved.excludedModels, ["qoder-cn/*", "cliproxy/beta"]);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("config 无参回显包含当前排除规则", async () => {
+  const fixture = makeCliFixture(["qoder-cn/*", "agy/gemini-2.5-flash"]);
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    await runCli(["config"]);
+  } finally {
+    console.log = originalLog;
+    fixture.cleanup();
+  }
+  const output = printed.join("\n");
+  const summary = JSON.parse(output.slice(output.indexOf("{"))) as { excludedModels: string[] };
+  assert.deepEqual(summary.excludedModels, ["qoder-cn/*", "agy/gemini-2.5-flash"]);
+});
+
+test("models --exclude 拒绝与选择类参数组合，不静默忽略", async () => {
+  const fixture = makeCliFixture();
+  try {
+    await assert.rejects(
+      runCli(["models", "--exclude", "agy/x", "--select", "all"]),
+      /--select cannot be combined with --exclude/,
+    );
+    await assert.rejects(
+      runCli(["models", "--exclude", "agy/x", "--sync"]),
+      /--exclude cannot be combined with --sync/,
+    );
+    await assert.rejects(
+      runCli(["models", "--exclude", "agy/x", "--upstream-only"]),
+      /--upstream-only.*only supported by install or models --sync/,
+    );
+    await assert.rejects(
+      runCli(["models", "--exclude", "agy/x", "--model-merge-json", "https://example.com/models.json"]),
+      /--model-merge-json requires models --sync/,
+    );
+    // 全部在写盘前被拒：配置保持原样。
+    const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
+    assert.equal(saved.excludedModels, undefined);
   } finally {
     fixture.cleanup();
   }
