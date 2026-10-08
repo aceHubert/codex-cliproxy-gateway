@@ -46,6 +46,8 @@ export interface UiConfig {
     maxRequestLogs: number;
     maxGatewayLogBytes: number;
     selectedModels: string[];
+    /** 排除模型规则（完整 ID、前缀族或通配符）；前端以多行文本编辑，按行拆分提交。 */
+    excludedModels: string[];
   };
   /** 本机 provider 配置的存在性探测结果：决定对应开关是否显示。 */
   detected: {
@@ -93,6 +95,8 @@ export interface UiConfigChanges {
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;
+  /** 排除模型规则：按文本框行拆分后的数组；空数组表示清空。 */
+  excludedModels?: string[];
 }
 
 export interface RequestLogFile {

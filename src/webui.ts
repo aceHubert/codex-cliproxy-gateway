@@ -417,6 +417,7 @@ function configResponse(
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
+      excludedModels: Array.isArray(live.excludedModels) ? live.excludedModels : [],
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
     // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是
@@ -590,6 +591,13 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
     try {
       const managesService = ctx.instanceOnly !== true;
       const { applied } = applyWebUiConfigPatch(ctx.paths, patch as Record<string, unknown>, managesService);
+      // 排除规则改变目录内容：与 selectedModels 同策略，动态路由下失效 Codex 目录缓存
+      // 让下一次 /models 立即反映（upstream-only 由 Codex 静态加载目录文件，靠重启生效）。
+      if (applied.some((change) => change.field === "excludedModels") && config.upstreamOnly !== true) {
+        try {
+          invalidateModelsCache(ctx.paths.modelsCacheFile);
+        } catch {}
+      }
       const restarting = managesService && fs.existsSync(ctx.paths.launchAgent);
       if (restarting) {
         markPendingRestart(ctx.paths.stateFile);

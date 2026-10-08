@@ -76,6 +76,7 @@ export interface WebUiConfigPatch {
   codebuddy?: unknown;
   qoder?: unknown;
   agy?: unknown;
+  excludedModels?: unknown;
   requestLogging?: unknown;
   maxRequestLogs?: unknown;
   maxGatewayLogBytes?: unknown;
@@ -86,6 +87,7 @@ const SUPPORTED_PATCH_FIELDS = new Set([
   "codebuddy",
   "qoder",
   "agy",
+  "excludedModels",
   "requestLogging",
   "maxRequestLogs",
   "maxGatewayLogBytes",
@@ -101,6 +103,33 @@ export function parseSelectedModels(value: unknown): string[] {
     throw new Error("selectedModels contains empty or duplicate model IDs");
   }
   return models;
+}
+
+/**
+ * excludedModels 提交校验：字符串数组，去首尾空白、丢弃空项并按小写去重（与
+ * compileModelFilter 的大小写不敏感匹配对齐）；裸 `*` 会排除全部模型，直接拒绝
+ * 并给出按厂商前缀收敛的修复方式。CLI 与 Web UI 共用这一份归一化。
+ */
+export function parseExcludedModels(value: unknown): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error("excludedModels expects an array of model ID or pattern strings");
+  }
+  const patterns: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const pattern = raw.trim();
+    if (!pattern) continue;
+    if (/^\*+$/.test(pattern)) {
+      throw new Error(
+        `excludedModels pattern "${raw}" would exclude every model; scope it to a vendor prefix such as codebuddy-cn/ or qoder-cn/*`,
+      );
+    }
+    const key = pattern.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    patterns.push(pattern);
+  }
+  return patterns;
 }
 
 /**
@@ -180,6 +209,12 @@ export function applyWebUiConfigPatch(
     if (typeof patch.agy !== "boolean") throw new Error("agy expects a boolean");
     if (config.agy !== patch.agy) change("agy", patch.agy);
     config.agy = patch.agy;
+  }
+  if (patch.excludedModels !== undefined) {
+    const models = parseExcludedModels(patch.excludedModels);
+    const before = Array.isArray(config.excludedModels) ? config.excludedModels : [];
+    if (JSON.stringify(before) !== JSON.stringify(models)) change("excludedModels", models);
+    config.excludedModels = models;
   }
   if (patch.requestLogging !== undefined) {
     if (typeof patch.requestLogging !== "boolean") throw new Error("requestLogging expects a boolean");

@@ -35,6 +35,13 @@ export interface GatewayConfig {
   catalogPath: string;
   model_merge_json?: string;
   selectedModels?: string[];
+  /**
+   * 排除模型规则（默认 []）：网关在所有适配器与上游目录合并后统一过滤，命中
+   * （精确 ID、以 / 结尾的前缀族、含 * 的轻量 glob，大小写不敏感，如
+   * codebuddy-intl/、qoder-cn/*、agy/gemini-2.5-flash）的模型不再出现在
+   * /models，对这些模型的推理请求也会被网关以 404 拦截。
+   */
+  excludedModels?: string[];
   requestLogging?: boolean;
   logDir?: string;
   /** 每类日志保留的最大文件数；0 表示不限制。 */

@@ -79,6 +79,16 @@
       },
       "uniqueItems": true
     },
+    "excludedModels": {
+      "description": "排除模型规则：网关在所有适配器与上游目录合并后统一过滤 /models，命中模型的推理请求返回 404。每项为完整模型 ID（如 agy/gemini-2.5-flash）、以 / 结尾的前缀族（如 codebuddy-cn/）或含 * 的通配符（如 qoder-cn/*），大小写不敏感；默认空数组。",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
     "requestLogging": {
       "type": "boolean"
     },

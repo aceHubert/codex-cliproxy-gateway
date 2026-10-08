@@ -13,6 +13,7 @@ import {
 import { Header } from "./Header.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
 import { useI18n } from "./i18n.tsx";
+import { joinExcludedLines, splitExcludedLines } from "./excluded-models-field.ts";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
 
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。
@@ -28,6 +29,8 @@ interface FormState {
   maxGatewayLogUnit: LogSizeUnit;
   /** 当前勾选的上游模型；与 config.editable.selectedModels 按集合比较。 */
   selectedModels: string[];
+  /** 排除模型规则的多行文本（每行一条）；提交时按行拆分为 excludedModels 数组。 */
+  excludedModelsText: string;
 }
 
 type SavePhase = "idle" | "confirm" | "saving" | "restarting" | "failed";
@@ -109,6 +112,7 @@ export function ConfigPage({
         maxGatewayLogBytes: logSize.value,
         maxGatewayLogUnit: logSize.unit,
         selectedModels: next.editable.selectedModels,
+        excludedModelsText: joinExcludedLines(next.editable.excludedModels),
       });
     }).catch((cause: unknown) => {
       if (cause instanceof ApiError && cause.status === 401) {
@@ -133,7 +137,8 @@ export function ConfigPage({
       || form.agy !== config.editable.agy
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
-      || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
+      || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0)
+      || splitExcludedLines(form.excludedModelsText).join("\n") !== (config.editable.excludedModels ?? []).join("\n");
   }, [config, form]);
   const dirty = modelsDirty || genericDirty;
   const upstreamOnly = config?.readonly.upstreamOnly === true;
@@ -208,6 +213,10 @@ export function ConfigPage({
       }
       if (logSize.bytes !== (config.editable.maxGatewayLogBytes ?? 0)) {
         changes.maxGatewayLogBytes = logSize.payload;
+      }
+      const excludedLines = splitExcludedLines(formSnapshot.excludedModelsText);
+      if (excludedLines.join("\n") !== (config.editable.excludedModels ?? []).join("\n")) {
+        changes.excludedModels = excludedLines;
       }
       if (Object.keys(changes).length === 0) return "done";
       const result = await postUiConfig(changes);
@@ -375,6 +384,25 @@ export function ConfigPage({
                       onAuthExpired={onAuthExpired}
                       disabled={phase === "saving" || phase === "restarting" || phase === "confirm"}
                     />
+                  </div>
+                </div>
+                <div className="field-row">
+                  <div className="field-label-group">
+                    <span className="field-label">{t("labelExcludedModels")}</span>
+                    <span className="field-keyname">excludedModels</span>
+                  </div>
+                  <div className="field-control-area">
+                    <textarea
+                      className="input-textarea"
+                      rows={4}
+                      spellCheck={false}
+                      aria-label={t("labelExcludedModels")}
+                      placeholder={"codebuddy-cn/*\nqoder-cn/*\nagy/gemini-2.5-flash"}
+                      value={form.excludedModelsText}
+                      disabled={phase === "saving" || phase === "restarting" || phase === "confirm"}
+                      onChange={(event) => setForm({ ...form, excludedModelsText: event.target.value })}
+                    />
+                    <p className="field-desc">{t("descExcludedModels")}</p>
                   </div>
                 </div>
                 {showZcode && (
