@@ -5,7 +5,9 @@ import { gatewayConfigWarnings, isJsonObject, migrateLegacyConfig } from "./conf
 import { logConfigChange, type ConfigChange } from "./process-log.ts";
 import { validateZcodeConfig } from "./zcode/index.ts";
 import { validateCodebuddyConfig } from "./codebuddy/index.ts";
-import type { GatewayConfig, ResolvedPaths } from "./types.ts";
+import { validateQoderConfig } from "./qoder/index.ts";
+import { validateAgyConfig } from "./agy/index.ts";
+import type { CodebuddyRegion, GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
  * 配置写入的共享路径：CLI `config` 命令与 Web UI `POST /ui/api/config` 共用的
@@ -71,12 +73,24 @@ function writeGatewayConfigFile(file: string, value: GatewayConfig): void {
 export interface WebUiConfigPatch {
   zcode?: unknown;
   codebuddy?: unknown;
+  codebuddyRegion?: unknown;
+  qoder?: unknown;
+  agy?: unknown;
   requestLogging?: unknown;
   maxRequestLogs?: unknown;
   maxGatewayLogBytes?: unknown;
 }
 
-const SUPPORTED_PATCH_FIELDS = new Set(["zcode", "codebuddy", "requestLogging", "maxRequestLogs", "maxGatewayLogBytes"]);
+const SUPPORTED_PATCH_FIELDS = new Set([
+  "zcode",
+  "codebuddy",
+  "codebuddyRegion",
+  "qoder",
+  "agy",
+  "requestLogging",
+  "maxRequestLogs",
+  "maxGatewayLogBytes",
+]);
 
 /** selectedModels 提交校验：字符串数组，去首尾空白，拒绝空项与重复项。 */
 export function parseSelectedModels(value: unknown): string[] {
@@ -110,6 +124,8 @@ export function applySelectedModelsPatch(
   config.selectedModels = selectedModels;
   validateZcodeConfig(config);
   validateCodebuddyConfig(config);
+  validateQoderConfig(config);
+  validateAgyConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
@@ -156,6 +172,25 @@ export function applyWebUiConfigPatch(
     if (config.codebuddy !== patch.codebuddy) change("codebuddy", patch.codebuddy);
     config.codebuddy = patch.codebuddy;
   }
+  if (patch.codebuddyRegion !== undefined) {
+    if (typeof patch.codebuddyRegion !== "string"
+      || !["auto", "cn", "intl"].includes(patch.codebuddyRegion)) {
+      throw new Error("codebuddyRegion expects auto, cn, or intl");
+    }
+    const region = patch.codebuddyRegion as CodebuddyRegion;
+    if ((config.codebuddyRegion ?? "auto") !== region) change("codebuddyRegion", region);
+    config.codebuddyRegion = region;
+  }
+  if (patch.qoder !== undefined) {
+    if (typeof patch.qoder !== "boolean") throw new Error("qoder expects a boolean");
+    if (config.qoder !== patch.qoder) change("qoder", patch.qoder);
+    config.qoder = patch.qoder;
+  }
+  if (patch.agy !== undefined) {
+    if (typeof patch.agy !== "boolean") throw new Error("agy expects a boolean");
+    if (config.agy !== patch.agy) change("agy", patch.agy);
+    config.agy = patch.agy;
+  }
   if (patch.requestLogging !== undefined) {
     if (typeof patch.requestLogging !== "boolean") throw new Error("requestLogging expects a boolean");
     if (config.requestLogging !== patch.requestLogging) change("requestLogging", patch.requestLogging);
@@ -189,6 +224,8 @@ export function applyWebUiConfigPatch(
   // 拒绝启动——在这里挡下并保留原配置，避免"保存成功但重启后网关与管理页一起死亡"。
   validateZcodeConfig(config);
   validateCodebuddyConfig(config);
+  validateQoderConfig(config);
+  validateAgyConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

@@ -53,6 +53,10 @@ export interface GatewayConfig {
   codebuddy?: boolean;
   /** CodeBuddy/WorkBuddy 凭据地域选择；缺省 auto。 */
   codebuddyRegion?: CodebuddyRegion;
+  /** 是否启用 Qoder Responses 入口；默认关闭，自动发现各地域登录。upstreamOnly 为 true 时按禁用处理。 */
+  qoder?: boolean;
+  /** 是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录。upstreamOnly 为 true 时按禁用处理。 */
+  agy?: boolean;
 }
 
 /**

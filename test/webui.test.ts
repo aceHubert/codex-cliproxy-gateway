@@ -5,14 +5,19 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
+import { mock } from "bun:test";
+import * as childProcess from "node:child_process";
 import { startGateway } from "../src/gateway.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL } from "../src/config.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
+import { runCli } from "../src/cli.ts";
 import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../src/webui.ts";
 import type { WebUiContext } from "../src/webui.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
 
 const TOKEN = "ccp_test_token_0123456789abcdef";
 const BASE = "http://127.0.0.1:8320";
+// mock.module 无法撤销，mock 前先捕获真实 execFileSync，供委托式 mock 转发。
+const realExecFileSync = childProcess.execFileSync;
 
 /** 挑一个当前空闲的端口：bind(0) 拿到后立即释放。真实 socket 用例不能写死端口——
  * 本机生产网关与 webui 服务就运行在 8320/8321 上。 */
@@ -244,11 +249,18 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
     const response = await handler(authedRequest("/ui/api/config"));
     assert.equal(response.status, 200);
     const payload = await response.json() as {
-      editable: { zcode: boolean; codebuddy: boolean; maxRequestLogs: number; selectedModels: string[] };
+      editable: {
+        zcode: boolean;
+        codebuddy: boolean;
+        codebuddyRegion: string;
+        maxRequestLogs: number;
+        selectedModels: string[];
+      };
       readonly: { upstreamBaseUrl: string; upstreamOnly: boolean; routerMode: string };
     };
     assert.equal(payload.editable.zcode, false);
     assert.equal(payload.editable.codebuddy, false);
+    assert.equal(payload.editable.codebuddyRegion, "auto");
     assert.equal(payload.editable.maxRequestLogs, 0);
     // 模型选择已迁入可编辑分组（保存走 /ui/api/upstream/models，同步重建目录文件）。
     assert.deepEqual(payload.editable.selectedModels, ["glm-5.3", "kimi-k2"]);
@@ -269,6 +281,148 @@ test("GET /ui/api/config 的 routerMode 随 upstreamOnly 取反", async () => {
     };
     assert.equal(payload.readonly.upstreamOnly, true);
     assert.equal(payload.readonly.routerMode, "upstream-only");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 默认按托管展示，不返回手动配置指引", async () => {
+  const { handler, paths, home } = await makeFixture();
+  try {
+    // 无 state 文件 / codexConfigManaged 缺省 / 显式 true 三种情况都等价于托管。
+    for (const state of [undefined, { version: 4 }, { version: 4, codexConfigManaged: true }]) {
+      if (state) fs.writeFileSync(paths.stateFile, JSON.stringify(state));
+      else fs.rmSync(paths.stateFile, { force: true });
+      const payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+        readonly: { codexConfigManaged: boolean; manualCodexConfig?: unknown };
+      };
+      assert.equal(payload.readonly.codexConfigManaged, true);
+      assert.equal(payload.readonly.manualCodexConfig, undefined, "托管模式不返回 manualCodexConfig");
+    }
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 手动模式返回逐键期望值与 config.toml 当前值比对", async () => {
+  const { handler, paths, home } = await makeFixture();
+  try {
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
+    const gatewayBaseUrl = "http://127.0.0.1:8320/v1";
+    fs.writeFileSync(paths.configToml, [
+      `openai_base_url = "${gatewayBaseUrl}"`,
+      'experimental_realtime_ws_base_url = "http://127.0.0.1:9999/v1?token=supersecret"',
+      "",
+      "[profiles.work]",
+      'model = "gpt-5"',
+      "",
+    ].join("\n"));
+    const payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      readonly: {
+        codexConfigManaged: boolean;
+        manualCodexConfig: {
+          gatewayBaseUrl: string;
+          staticCatalogActive: boolean;
+          removeModelCatalogJson: boolean;
+          keys: Array<{ key: string; expected: string; current: string | null; matches: boolean }>;
+        };
+      };
+    };
+    assert.equal(payload.readonly.codexConfigManaged, false);
+    assert.equal(payload.readonly.manualCodexConfig.gatewayBaseUrl, gatewayBaseUrl);
+    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, false);
+    assert.equal(payload.readonly.manualCodexConfig.removeModelCatalogJson, false);
+    const byKey = new Map(payload.readonly.manualCodexConfig.keys.map((row) => [row.key, row]));
+    // 匹配 / 不一致（URL 当前值过 sanitize，query 不外发）/ 未配置 三种状态齐全。
+    assert.deepEqual(byKey.get("openai_base_url"), {
+      key: "openai_base_url", expected: gatewayBaseUrl, current: gatewayBaseUrl, matches: true,
+    });
+    assert.deepEqual(byKey.get("experimental_realtime_ws_base_url"), {
+      key: "experimental_realtime_ws_base_url",
+      expected: gatewayBaseUrl,
+      current: "http://127.0.0.1:9999/v1?…",
+      matches: false,
+    });
+    assert.deepEqual(byKey.get("experimental_realtime_webrtc_call_base_url"), {
+      key: "experimental_realtime_webrtc_call_base_url",
+      expected: gatewayBaseUrl,
+      current: null,
+      matches: false,
+    });
+    // 静态目录未激活时不包含 model_catalog_json；toml 其他内容（profiles）不外发。
+    assert.equal(byKey.has("model_catalog_json"), false);
+    const text = JSON.stringify(payload);
+    assert.ok(!text.includes("supersecret"), "config.toml 当前值里的 query token 不得外发");
+    assert.ok(!text.includes("profiles.work"), "不得回显受管键之外的 config.toml 内容");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 手动模式 static 目录激活时追加 model_catalog_json 指引", async () => {
+  const { handler, paths, config, home } = await makeFixture({
+    config: { upstreamOnly: true, selectedModels: ["glm-5.3"] },
+  });
+  try {
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
+    type ManualPayload = {
+      readonly: { manualCodexConfig: {
+        staticCatalogActive: boolean;
+        removeModelCatalogJson: boolean;
+        keys: Array<{ key: string; expected: string }>;
+      } };
+    };
+    let payload = await (await handler(authedRequest("/ui/api/config"))).json() as ManualPayload;
+    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, true);
+    const catalogRow = payload.readonly.manualCodexConfig.keys.find((row) => row.key === "model_catalog_json");
+    assert.equal(catalogRow?.expected, config.catalogPath);
+
+    // 切回 split（upstreamOnly=false）但 config.toml 仍残留该键时提示删除。
+    const live = { ...config, upstreamOnly: false } as GatewayConfig;
+    fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(live, null, 2)}\n`);
+    fs.writeFileSync(paths.configToml, `model_catalog_json = "${config.catalogPath}"\n`);
+    const handlerLive = (request: Request) => handleWebUiRequest(request, live, { paths, uiHtmlPath: path.join(home, "ui-index.html") }, live.port);
+    payload = await (await handlerLive(authedRequest("/ui/api/config"))).json() as ManualPayload;
+    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, false);
+    assert.equal(payload.readonly.manualCodexConfig.removeModelCatalogJson, true);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 手动模式 static 目录当前值遮蔽 URL 查询且保留本地路径比对", async () => {
+  const { handler, paths, config, home } = await makeFixture({
+    config: { upstreamOnly: true, selectedModels: ["glm-5.3"] },
+  });
+  try {
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
+    const cases = [
+      {
+        current: "https://catalog.example/models.json?token=catalog-secret&session=query-secret#hash-secret",
+        displayed: "https://catalog.example/models.json?…",
+        matches: false,
+      },
+      { current: config.catalogPath, displayed: config.catalogPath, matches: true },
+      { current: "/tmp/other-catalog.json", displayed: "/tmp/other-catalog.json", matches: false },
+    ];
+    for (const { current, displayed, matches } of cases) {
+      fs.writeFileSync(paths.configToml, `model_catalog_json = "${current}"\n`);
+      const response = await handler(authedRequest("/ui/api/config"));
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      assert.ok(!text.includes("catalog-secret"), "目录 URL 的 token 不得进入响应");
+      assert.ok(!text.includes("query-secret"), "目录 URL 的查询参数不得进入响应");
+      assert.ok(!text.includes("hash-secret"), "目录 URL 的片段不得进入响应");
+      const payload = JSON.parse(text) as {
+        readonly: { manualCodexConfig: {
+          keys: Array<{ key: string; expected: string; current: string | null; matches: boolean }>;
+        } };
+      };
+      const row = payload.readonly.manualCodexConfig.keys.find((item) => item.key === "model_catalog_json");
+      assert.deepEqual(row, {
+        key: "model_catalog_json", expected: config.catalogPath, current: displayed, matches,
+      });
+    }
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -301,18 +455,28 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
   const authDir = path.join(home, "auth");
   fs.mkdirSync(authDir, { recursive: true });
   const infoFile = path.join(authDir, "Tencent-Cloud.coding-copilot.info");
+  const agyCredentialFile = path.join(home, "antigravity-oauth-token");
   const handler = (request: Request) =>
     handleWebUiRequest(request, config, {
       paths,
       uiHtmlPath,
-      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir },
+      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir, agyCredentialFile },
     }, config.port);
   try {
     const absent = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { zcode: boolean; codebuddy: boolean };
+      detected: { zcode: boolean; codebuddy: boolean; agy: boolean };
+      editable: { agy: boolean };
     };
     assert.equal(absent.detected.zcode, false, "无 ~/.zcode 时不显示 ZCode 开关");
     assert.equal(absent.detected.codebuddy, false, "无 .info 时不显示 CodeBuddy 开关");
+    assert.equal(absent.detected.agy, false, "无凭据文件时不显示 Antigravity 开关");
+    assert.equal(absent.editable.agy, false, "agy 开关缺省为关闭");
+
+    fs.writeFileSync(agyCredentialFile, JSON.stringify({ token: { access_token: "ya29.fake" } }));
+    const agyPresent = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { agy: boolean };
+    };
+    assert.equal(agyPresent.detected.agy, true, "凭据文件存在即显示 Antigravity 开关");
 
     fs.mkdirSync(path.join(home, ".zcode"), { recursive: true });
     fs.writeFileSync(path.join(home, ".zcode", "setting.json"), "{}");
@@ -340,17 +504,24 @@ test("POST /ui/api/config applies supported fields, syncs state, and writes an a
   try {
     fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, pendingRestart: false, config: null }, null, 2)}\n`);
     const response = await handler(authedRequest("/ui/api/config", {
-      json: { zcode: true, codebuddy: true, maxRequestLogs: "5", maxGatewayLogBytes: "10MB" },
+      json: {
+        zcode: true,
+        codebuddy: true,
+        codebuddyRegion: "intl",
+        maxRequestLogs: "5",
+        maxGatewayLogBytes: "10MB",
+      },
     }));
     assert.equal(response.status, 200);
     const payload = await response.json() as { restarting: boolean; applied: string[] };
     // 临时目录里没有 LaunchAgent，因此只写配置不触发重启调度。
     assert.equal(payload.restarting, false);
-    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "maxRequestLogs", "maxGatewayLogBytes"]);
+    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "codebuddyRegion", "maxRequestLogs", "maxGatewayLogBytes"]);
 
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, unknown>;
     assert.equal(saved.zcode, true);
     assert.equal(saved.codebuddy, true);
+    assert.equal(saved.codebuddyRegion, "intl");
     assert.equal(saved.maxRequestLogs, 5);
     assert.equal(saved.maxGatewayLogBytes, 10 * 1024 * 1024);
 
@@ -394,6 +565,7 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       { json: { maxGatewayLogBytes: "abc" }, message: /byte size/ },
       { json: { zcode: "yes" }, message: /boolean/ },
       { json: { codebuddy: "on" }, message: /boolean/ },
+      { json: { codebuddyRegion: "us" }, message: /codebuddyRegion expects auto, cn, or intl/ },
       { json: { upstreamBaseUrl: "http://evil" }, message: /Unsupported field/ },
       { json: {}, message: /no supported fields/ },
     ];
@@ -1185,6 +1357,91 @@ test("web service mode runs without installation state or a gateway and exits on
     await child.exited;
     clearTimeout(deadline);
     fs.rmSync(fixture.home, { recursive: true, force: true });
+  }
+});
+
+test("web opens the ui in the browser instead of failing when it is already running", { timeout: 15000, skip: process.platform !== "darwin" }, async () => {
+  // UI 端口固定为网关端口 + 1（webUiPort），先成对占用两个相邻空闲端口。
+  const gatewayHandler = (_req: http.IncomingMessage, res: http.ServerResponse) => {
+    res.writeHead(200, { "content-type": "text/plain" });
+    res.end("ok");
+  };
+  const uiHandler = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (req.url === "/ui" || req.url?.startsWith("/ui?")) {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("<!doctype html>");
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  };
+  const listenOn = (port: number, handler: (req: http.IncomingMessage, res: http.ServerResponse) => void) =>
+    new Promise<http.Server | undefined>((resolve) => {
+      const server = http.createServer(handler);
+      server.once("error", () => resolve(undefined));
+      server.listen(port, "127.0.0.1", () => resolve(server));
+    });
+  let gatewayPort = 0;
+  let gateway: http.Server | undefined;
+  let ui: http.Server | undefined;
+  for (let attempt = 0; attempt < 20 && gateway === undefined; attempt++) {
+    const candidate = await freePort();
+    const gw = await listenOn(candidate, gatewayHandler);
+    if (!gw) continue;
+    const uiServer = await listenOn(candidate + 1, uiHandler);
+    if (!uiServer) {
+      gw.close();
+      continue;
+    }
+    gateway = gw;
+    ui = uiServer;
+    gatewayPort = candidate;
+  }
+  assert.ok(gateway !== undefined && ui !== undefined, "应能找到一对相邻空闲端口");
+
+  const home = await fs.promises.mkdtemp(path.join(os.tmpdir(), "ccp-web-cli-"));
+  const previousHome = process.env.HOME;
+  const previousService = process.env.CODEX_CLIPROXY_UI_SERVICE;
+  const previousDev = process.env.CODEX_CLIPROXY_UI_DEV;
+  const closeServer = (server: http.Server | undefined) =>
+    new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+  try {
+    process.env.HOME = home;
+    delete process.env.CODEX_CLIPROXY_UI_SERVICE;
+    delete process.env.CODEX_CLIPROXY_UI_DEV;
+    const paths = makePaths(home);
+    fs.mkdirSync(paths.runtimeHome, { recursive: true });
+    fs.mkdirSync(paths.logDir, { recursive: true });
+    fs.writeFileSync(paths.uiTokenFile, `${TOKEN}\n`, { mode: 0o600 });
+    fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4 })}\n`);
+    const config = makeConfig(paths, { port: gatewayPort, configVersion: GATEWAY_CONFIG_VERSION, codebuddy: false });
+    fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(config, null, 2)}\n`);
+
+    // 委托式 mock：除记录 /usr/bin/open（不真弹浏览器）外全部转发真实实现，
+    // 即使泄漏到同进程的其他测试也没有行为差异。
+    const opened: string[] = [];
+    mock.module("node:child_process", () => ({
+      ...childProcess,
+      execFileSync: ((cmd: string, args: readonly string[], options?: unknown) => {
+        if (cmd === "/usr/bin/open") {
+          opened.push(String(args[0] ?? ""));
+          return "";
+        }
+        return realExecFileSync(cmd, args as string[], options as never);
+      }) as typeof childProcess.execFileSync,
+    }));
+
+    // UI 已在运行时 web 不应报错要求 --stop，而是直接带令牌打开浏览器。
+    await runCli(["web"]);
+    assert.deepEqual(opened, [`http://127.0.0.1:${gatewayPort + 1}/ui?token=${TOKEN}`]);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    if (previousService !== undefined) process.env.CODEX_CLIPROXY_UI_SERVICE = previousService;
+    if (previousDev !== undefined) process.env.CODEX_CLIPROXY_UI_DEV = previousDev;
+    await closeServer(gateway);
+    await closeServer(ui);
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 

@@ -314,7 +314,7 @@ test("ZCode 拒绝 WebSocket 并移除旧 zai 路径，均不访问上游", asyn
   });
 });
 
-test("ZCode HTTP 错误脱敏且两渠道日志独立并隐藏所有凭据", async () => {
+test("ZCode HTTP 错误脱敏且两渠道共用 zcode 日志命名", async () => {
   await fixture(async ({ config, create }) => {
     config.requestLogging = true;
     for (const family of ["zai", "bigmodel"] as const) {
@@ -324,8 +324,8 @@ test("ZCode HTTP 错误脱敏且两渠道日志独立并隐藏所有凭据", asy
       assert.ok(!(await response.text()).includes(FAKE_KEY));
     }
     const names = fs.readdirSync(config.logDir!);
-    assert.ok(names.some((name) => name.startsWith("zai-")));
-    assert.ok(names.some((name) => name.startsWith("bigmodel-")));
+    assert.ok(names.some((name) => name.startsWith("zcode-")));
+    assert.ok(!names.some((name) => name.startsWith("bigmodel-")));
     const logs = names.map((name) => fs.readFileSync(path.join(config.logDir!, name), "utf8")).join("\n");
     for (const value of [FAKE_KEY, FAKE_OAUTH, "incoming-key"]) assert.ok(!logs.includes(value));
     assert.ok(!names.some((name) => name.startsWith("codex-")));
@@ -605,7 +605,7 @@ test("ZCode 请求日志沿用缺省日志目录", async () => {
     const handler = create();
     await (await handler(request("zcode/glm-5.3"))).text();
     const files = fs.readdirSync(path.join(directory, "logs"));
-    assert.ok(files.some((name) => /^zai-v1-responses-http-\d{14}\.log$/.test(name)));
+    assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
   });
 });
 
@@ -937,8 +937,8 @@ test("多个官方 API Key 按 providerId 前缀独立路由与鉴权", async ()
     assert.deepEqual(await apiIds(), ["zcode-zai-api/glm-5.3", "zcode-custom-official/glm-5.3-flash"]);
     const served = JSON.parse(fs.readFileSync(path.join(path.dirname(config.catalogPath), "zcode-catalog.json"), "utf8")) as Json;
     assert.deepEqual(served.models.filter((item: Json) => item.slug.startsWith("zcode-") && !item.slug.startsWith("zcode-individual")).map((item: Json) => item.display_name), [
-      "GLM-5.3（ZCode 主 Key）",
-      "GLM-5.3-Flash（ZCode 备用 Key）",
+      "ZCode/GLM-5.3（主 Key）",
+      "ZCode/GLM-5.3-Flash（备用 Key）",
     ]);
 
     assert.equal((await handler(request("zcode-zai-api/glm-5.3"))).status, 200);

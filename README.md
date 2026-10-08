@@ -65,7 +65,7 @@ codex-cliproxy install --upstream-only --select all
 ```
 
 此模式使用上游原始模型名，不添加 `cliproxy/` 前缀，
-也不提供官方、ZCode 或 CodeBuddy/WorkBuddy 模型。
+也不提供官方、ZCode、CodeBuddy/WorkBuddy、Qoder 或 Antigravity 模型。
 
 ### 常用安装参数
 
@@ -77,6 +77,7 @@ codex-cliproxy install --upstream-only --select all
 | `--prefix PREFIX` | 设置第三方模型前缀，默认 `cliproxy/`。 |
 | `--select SELECTOR` | 直接指定模型，支持序号、范围、模型 ID、通配符（如 `gpt-*`）、`all` 或 `none`。 |
 | `--upstream-only` | 只使用第三方上游。 |
+| `--manual-codex-config` | 不修改 `~/.codex/config.toml`，安装后以 warning 打印需要手动配置的键与值。与 `--upstream-only` 同用时会询问「是否直接修改 codex 配置」：答 `y` 转为托管写入（本参数不生效），默认 `N` 保持手动模式。 |
 | `--restart-codex` | 停止当前 Codex app-server，让后续会话重新加载配置。 |
 | `--yes` | 再次安装时跳过原地更新确认。 |
 
@@ -98,6 +99,10 @@ codex-cliproxy models --sync --upstream-only --select all
 
 **不带 `--upstream-only` 的同步命令会切回混合模式。**
 刷新时会复用已保存的上游 Key。
+
+手动模式（`install --manual-codex-config`）下 `models --sync --upstream-only` 照常完成 static 切换，
+但不会写入 `model_catalog_json`，而是打印需要手动添加的键与目录文件路径；
+切回混合模式时同样会提示手动删除该键。`status` 的 `codexConfigManaged` 字段可查看当前模式。
 
 也可以直接指定选择：
 
@@ -176,12 +181,14 @@ codex-cliproxy config --log off
 | `--max-log-size SIZE` | 主日志大小上限，支持 `512KB`、`10MB`、`1M`；`0` 表示不限。 |
 | `--zcode on\|off` | 开关 ZCode 模型，默认关闭。 |
 | `--codebuddy on\|off` | 开关 CodeBuddy/WorkBuddy 模型，默认关闭。 |
+| `--qoder on\|off` | 开关本机 Qoder 模型，默认关闭；支持国际版与国内版。 |
+| `--agy on\|off` | 开关本机 Antigravity（`agy/`）模型，默认关闭。 |
 | `--codebuddy-region auto\|cn\|intl` | 选择 CodeBuddy/WorkBuddy 模型目录的刷新地域，默认 `auto`。 |
 
 参数可以组合使用。CLI 配置写入仅支持 macOS：已安装后台服务时自动重启网关，
 没有后台服务时仅保存配置，需自行重启前台进程。
 如提示配置已保存但重启失败，执行 `codex-cliproxy restart`。
-修改 `--zcode`、`--codebuddy` 或 `--codebuddy-region` 时会同时失效 Codex 的
+修改 `--zcode`、`--codebuddy`、`--qoder`、`--agy` 或 `--codebuddy-region` 时会同时失效 Codex 的
 模型目录缓存，Codex 启动或下一次校验时会立即重新拉取列表；纯日志参数不影响目录。
 
 常用文件位置：
@@ -240,8 +247,88 @@ W 表示 WorkBuddy。选择对应条目后，网关会按该条目路由到对�
 codex-cliproxy config --codebuddy off
 ```
 
-这两类接入均需网关监听本机环回地址，并且在 `--upstream-only` 模式下不生效。
+### 使用 Qoder 模型（国际版与国内版）
+
+先在本机登录 Qoder（国际版 `qoder`，国内版 `qodercn`；或直接使用对应版本
+的 Qoder 桌面应用登录），再开启统一的 Qoder 开关；CLI 与桌面版、国际版与
+国内版互相独立，可同时启用：
+
+```bash
+qoder login      # 国际版 CLI，配置目录 ~/.qoder
+qodercn login    # 国内版 CLI，配置目录 ~/.qoder-cn
+codex-cliproxy config --qoder on
+```
+
+请求头的产品标识跟随凭据来源：CLI 令牌发 `product=cli / ClientType=5`，
+桌面令牌发 `product=app / ClientType=10`，Qoder 用量页据此区分客户端。
+CLI 登录缺失时，网关会自动回退读取 Qoder 桌面版的登录
+（macOS：`~/Library/Application Support/com.qoder.app.stable` /
+`com.qodercn.app.stable`）。桌面版凭据由 Electron safeStorage 加密，
+网关按需从 macOS 钥匙串读取解密密钥（只读、不落盘；若系统弹出授权框，
+选择「始终允许」即可）。调试时可用 `QODER_FORCE_DESKTOP=1` 强制只读
+桌面版登录（对 launchd 网关：`launchctl setenv QODER_FORCE_DESKTOP 1`
+后 `launchctl kickstart -k gui/$(id -u)/codex-cliproxy-gateway`，
+恢复用 `launchctl unsetenv` 后再重启）。
+
+模型显示名为 `Qoder-INTL/<名称>` 或 `Qoder-CN/<名称>`，
+调用 ID 为 `qoder-intl/<上游模型键>` 或 `qoder-cn/<上游模型键>`。
+例如当前国际版 Flash 为 `qoder-intl/qfmodel`、国内版为 `qoder-cn/qfmodel`，
+以各账号实时目录为准。
+上游并发受限时请求会进入 Qoder 排队，网关按官方 CLI 语义等待并自动恢复重试；
+持续繁忙时返回明确的排队失败提示，需稍后重试或关闭其他 Qoder 会话。
+推理档位按目录展示；当前 Flash 与 Max 支持低、中、超高，默认分别为中、超高。
+名称后显示当前倍率：零倍率为 `(free)`，非零为 `(x倍率)`；
+当前 Flash 为 `(free)`、Max 为 `(x0.5)`，以刷新后的目录为准。
+上下文从每个模型的 `context_config` 自动取最大可用档位，推理请求同步发送
+`context_length`。当前 Max 和 Flash 为 1M，客户端保留 5% 预算后约显示 950k；
+没有独立的上下文手动配置。
+网关直接调用 Qoder 服务，不依赖 `qodercli2api` 或 CLI 推理子进程。
+
+目录在启动及每两分钟刷新，读取时有 100 秒缓存；只展示当前账号启用的模型。
+更新失败保留同账号最近成功的目录，未知模型不会回退到 `auto`。
+登录文件只读消费，默认位于 `~/.qoder/.auth`，支持 `QODER_CONFIG_DIR`；
+国内版默认位于 `~/.qoder-cn/.auth`，支持 `QODERCN_CONFIG_DIR`；
+两版登录互相独立，不会跨地域使用授权。登录失效时请运行对应的
+`qoder login` / `qodercn login`，网关不会续期或写回登录文件。
+
+Web UI 的 Qoder 开关后会以只读复选框展示当前实际生效的登录来源，取值可能是
+`CLI-INTL`、`CLI-CN`、`DESKTOP-INTL`、`DESKTOP-CN`。每个地域按网关真实加载
+顺序显示：CLI 登录存在时只显示 CLI，缺失才回退显示桌面版，因此 CLI 与桌面版
+同时登录不会重复出现。探测只判断文件是否存在，不读取或展示凭据内容。
+
+开启请求日志时，Qoder 使用 `qoder-v1-responses-http-<时间戳>.log`，
+记录模型、状态、用量和耗时。推理超时按连续 120 秒没有数据判断，
+上游输出和心跳会重置计时；流式超时会返回明确的失败事件。
+
+免费资格由 Qoder 当前账号和活动决定；`billable=false` 是当次上游结果，
+用量中的 Credits 计算值不等于实际扣费，不能承诺永久免费。
+
+关闭：`codex-cliproxy config --qoder off`。
+
+上述接入均需网关监听本机环回地址，并且在 `--upstream-only` 模式下不生效。
 Web 界面检测到本机配置后会显示对应开关；已经开启的开关会保留显示，方便关闭。
+
+### 使用 Antigravity 模型（agy）
+
+先在本机安装并登录 Antigravity CLI（`agy`，数据目录 `~/.gemini/antigravity-cli`），
+再开启 Antigravity 开关：
+
+```bash
+agy              # 首次交互登录（Google 账号）
+codex-cliproxy config --agy on
+```
+
+网关只读消费 `~/.gemini/antigravity-cli/antigravity-oauth-token`：
+access_token 有效期 1 小时，由 agy 进程负责刷新（常驻可执行
+`agy remote-control start`）；网关过期即快速失败并提示刷新，绝不自行刷新或写回凭据。
+
+模型显示名为 `AGN/<名称>`，调用 ID 为 `agy/<上游模型 id>`。同一模型的多档位变体
+（high/medium/low）在目录中合并为一个 ID（如 `agy/gemini-3.8-flash`），由请求的
+`reasoning.effort` 选择档位（缺省 medium，缺档就近回退）；显式档位 ID
+（如 `agy/gemini-3.8-flash-high`）仍可直接调用。目录按官方推荐位与档位动态生成，
+以账号实时返回为准。
+上游为 Google Cloud Code Assist 内部接口（HTTP/SSE），仅环回监听可用，
+与官方、第三方上游互不影响。
 
 ## 服务管理与卸载
 

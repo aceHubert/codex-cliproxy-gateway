@@ -408,6 +408,92 @@ button {
   margin-top: 4px;
 }
 
+.field-switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+/* Qoder 登录来源只读复选：只呈现检测结果，不提供交互态。 */
+.qoder-source-options {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.qoder-source-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--fg-secondary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.qoder-source-option input {
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: default;
+}
+
+.region-segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-input-editable);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+}
+
+.region-btn {
+  min-width: 38px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.region-btn:hover:not(.active) {
+  color: var(--fg-secondary);
+}
+
+.region-btn.active {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+.region-btn:disabled {
+  color: var(--fg-dim);
+  cursor: not-allowed;
+}
+
+.region-btn.active:disabled {
+  background: transparent;
+}
+
+.region-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .error-text {
   color: #f87171;
 }
@@ -520,6 +606,74 @@ input:checked + .slider:before {
 .pill-cyan { background: rgba(6, 182, 212, 0.12); color: #22d3ee; }
 .pill-purple { background: rgba(168, 85, 247, 0.12); color: #c084fc; }
 .pill-green { background: rgba(16, 185, 129, 0.12); color: #34d399; }
+.pill-amber { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
+.pill-red { background: rgba(239, 68, 68, 0.12); color: #f87171; }
+
+.pill-badge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* 手动模式（--manual-codex-config）的 config.toml 配置指引：逐键期望值 + 当前状态。 */
+.manual-codex-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.06);
+}
+.manual-codex-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #f59e0b;
+}
+.manual-codex-keys {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.manual-codex-key {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 8px 10px;
+  font-size: 12px;
+}
+.manual-codex-keyname {
+  color: var(--accent);
+  font-weight: 600;
+}
+.manual-codex-expected {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-secondary);
+  word-break: break-all;
+  user-select: text;
+}
+.manual-codex-current {
+  grid-column: 2 / 4;
+  font-size: 11px;
+  color: var(--fg-muted);
+  word-break: break-all;
+}
+.manual-codex-current code {
+  font-family: var(--font-mono);
+}
+.manual-codex-footnote {
+  margin: 0;
+}
+
+/* Codex 配置行：徽标不参与挤压，说明文字允许换行补充。 */
+.codex-config-desc {
+  font-size: 11px;
+  color: var(--fg-muted);
+  min-width: 0;
+}
 
 /* 模型选择：当前选择常驻，上游目录按需拉取后暂存追加。 */
 .model-picker {

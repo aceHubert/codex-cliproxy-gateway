@@ -1132,7 +1132,9 @@ test("isRequestLogName recognizes request logs and spares process logs", () => {
   assert.equal(isRequestLogName("cliproxy-v1-alpha-http-20260101000001.log"), true);
   assert.equal(isRequestLogName("cliproxy-v1-responses-ws-01a01960-3a52.log"), true);
   assert.equal(isRequestLogName("cliproxy-error-20260101000001.log"), true);
-  assert.equal(isRequestLogName("zai-error-20260101000001.log"), true);
+  assert.equal(isRequestLogName("zcode-error-20260101000001.log"), true);
+  assert.equal(isRequestLogName("zai-error-20260101000001.log"), false);
+  assert.equal(isRequestLogName("qoder-v1-responses-http-20260101000001.log"), true);
   // 进程日志由 launchd 持有句柄，历史审计文件只有一份，都不能被保留计数删掉。
   assert.equal(isRequestLogName("gateway.log"), false);
   assert.equal(isRequestLogName("gateway.error.log"), false);
@@ -2027,6 +2029,359 @@ test("upstream-only mode forwards HTTP and WebSocket models without prefix routi
   }
 });
 
+test("cliproxy non-GPT compaction accepts top-level output_text and replays its summary", async () => {
+  const originalFetch = globalThis.fetch;
+  const captured: { url: string; options: RequestInit }[] = [];
+  globalThis.fetch = (async (url, options) => {
+    captured.push({ url: String(url), options: options ?? {} });
+    if (captured.length === 1) {
+      return Response.json({
+        id: "resp_summary",
+        status: "completed",
+        output_text: "保留这份上游摘要",
+      });
+    }
+    return new Response("replayed", { status: 200 });
+  }) as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const first = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { authorization: "Bearer oauth-token", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/free/space-bunny-alpha",
+        stream: true,
+        input: [
+          { type: "message", role: "user", content: "保留这个问题" },
+          { type: "compaction_trigger" },
+        ],
+      }),
+    }));
+    const frames = (await first.text())
+      .split("\n\n")
+      .map((frame) => frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6))
+      .filter((data): data is string => Boolean(data) && data !== "[DONE]")
+      .map((data) => JSON.parse(data));
+    const completed = frames.find((event) => event.type === "response.completed");
+    assert.equal(completed.response.output.length, 1);
+    assert.equal(completed.response.output[0].type, "compaction");
+
+    const compaction = completed.response.output[0];
+    const replay = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "cliproxy/free/space-bunny-alpha", input: [compaction] }),
+    }));
+    assert.equal(await replay.text(), "replayed");
+    assert.equal(captured.length, 2);
+    assert.equal(captured[0].url, "https://cliproxy.example/v1/responses");
+    const summaryRequest = JSON.parse(captured[0].options.body as string);
+    assert.equal(summaryRequest.model, "free/space-bunny-alpha");
+    assert.equal(summaryRequest.stream, true);
+    assert.deepEqual(summaryRequest.input.map((item: { type: string }) => item.type), ["message", "message"]);
+    const replayRequest = JSON.parse(captured[1].options.body as string);
+    assert.equal(replayRequest.input[0].type, "message");
+    assert.match(replayRequest.input[0].content[0].text, /保留这份上游摘要/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cliproxy non-GPT compaction accepts text blocks and Chat Completions responses", async () => {
+  const originalFetch = globalThis.fetch;
+  const upstreamPayloads = [
+    {
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "text", text: "文本块摘要" }] }],
+    },
+    {
+      choices: [{ message: { role: "assistant", content: "Chat Completions 摘要" } }],
+    },
+  ];
+  let fetchCount = 0;
+  globalThis.fetch = (async () => Response.json(upstreamPayloads[fetchCount++])) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    for (const [index, summary] of ["文本块摘要", "Chat Completions 摘要"].entries()) {
+      const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "cliproxy/free/space-bunny-alpha",
+          input: [{ type: "compaction_trigger" }],
+        }),
+      }));
+      assert.equal(response.status, 200);
+      const result = await response.json() as {
+        status: string;
+        output: Array<{ type: string; encrypted_content: string }>;
+      };
+      assert.equal(result.status, "completed");
+      assert.equal(result.output.length, 1);
+      assert.equal(result.output[0].type, "compaction");
+      const encoded = result.output[0].encrypted_content;
+      assert.ok(encoded.startsWith("ocx1:"));
+      assert.equal(Buffer.from(encoded.slice(5), "base64").toString("utf8"), summary);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("non-GPT compaction aggregates a streaming Responses summary", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response([
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"流式"}\n\n',
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"摘要"}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+    "data: [DONE]\n\n",
+  ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/free/space-bunny-alpha",
+        stream: true,
+        input: [{ type: "compaction_trigger" }],
+      }),
+    }));
+    assert.equal(response.status, 200);
+    const frames = (await response.text())
+      .split("\n\n")
+      .map((frame) => frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6))
+      .filter((data): data is string => Boolean(data) && data !== "[DONE]")
+      .map((data) => JSON.parse(data));
+    const completed = frames.find((event) => event.type === "response.completed");
+    assert.equal(completed.response.output.length, 1);
+    assert.equal(
+      Buffer.from(completed.response.output[0].encrypted_content.slice("ocx1:".length), "base64").toString("utf8"),
+      "流式摘要",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("截断或失败的 SSE 压缩流不返回历史替换条目", async () => {
+  const originalFetch = globalThis.fetch;
+  const delta = 'data: {"type":"response.output_text.delta","delta":"部分摘要"}\n\n';
+  const completed = 'data: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n';
+  const error = 'event: error\ndata: {"error":{"message":"private-upstream-error"}}\n\n';
+  const streams = [
+    delta,
+    delta + "data: [DONE]\n\n",
+    delta + error,
+    delta + 'data: {"type":"response.failed","response":{"output_text":"部分摘要"}}\n\n',
+    delta + 'data: {"type":"response.incomplete","response":{"output_text":"部分摘要"}}\n\n',
+    delta + completed + error,
+    delta + error + completed,
+    delta + 'data: {"type":"response.completed","response":{"status":"incomplete"}}\n\n',
+    'data: {"choices":[{"delta":{"content":"部分摘要"},"finish_reason":null}]}\n\ndata: [DONE]\n\n',
+    'data: {"choices":[{"delta":{"content":"部分摘要"},"finish_reason":"length"}]}\n\ndata: [DONE]\n\n',
+  ];
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1", catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    for (const [index, body] of streams.entries()) {
+      globalThis.fetch = (async () => new Response(body, {
+        headers: { "content-type": "text/event-stream" },
+      })) as unknown as typeof fetch;
+      for (const stream of [false, true]) {
+        const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "cliproxy/deepseek-v4", stream, input: [{ type: "compaction_trigger" }] }),
+        }));
+        assert.equal(response.status, 502, `失败流 ${index}，stream=${stream}`);
+        assert.doesNotMatch(await response.text(), /encrypted_content|部分摘要|private-upstream-error/);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("SSE 压缩接受明确成功的 Responses 与 Chat Completions 终态", async () => {
+  const originalFetch = globalThis.fetch;
+  const streams = [
+    'data: {"type":"response.output_text.delta","delta":"完整摘要"}\n\ndata: {"type":"response.done","response":{"output":[]}}\n\n',
+    'data: {"choices":[{"delta":{"content":"完整摘要"},"finish_reason":null}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+  ];
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1", catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    for (const body of streams) {
+      globalThis.fetch = (async () => new Response(body, {
+        headers: { "content-type": "text/event-stream" },
+      })) as unknown as typeof fetch;
+      const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "cliproxy/deepseek-v4", input: [{ type: "compaction_trigger" }] }),
+      }));
+      assert.equal(response.status, 200);
+      const result = await response.json() as { output: Array<{ encrypted_content: string }> };
+      assert.equal(Buffer.from(result.output[0].encrypted_content.slice(5), "base64").toString("utf8"), "完整摘要");
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("non-GPT compaction preserves an opaque upstream compaction item", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response([
+    'event: response.output_item.done\ndata: {"type":"response.output_item.done","item":{"id":"cmp_upstream","type":"compaction_summary","status":"completed","encrypted_content":"opaque-upstream"}}\n\n',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"status":"completed","output":[]}}\n\n',
+    "data: [DONE]\n\n",
+  ].join(""), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/free/space-bunny-alpha",
+        stream: true,
+        input: [{ type: "compaction_trigger" }],
+      }),
+    }));
+    const frames = (await response.text())
+      .split("\n\n")
+      .map((frame) => frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6))
+      .filter((data): data is string => Boolean(data) && data !== "[DONE]")
+      .map((data) => JSON.parse(data));
+    const completed = frames.find((event) => event.type === "response.completed");
+    assert.equal(completed.response.output.length, 1);
+    assert.equal(completed.response.output[0].type, "compaction");
+    assert.equal(completed.response.output[0].encrypted_content, "opaque-upstream");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("compaction no-summary diagnostics expose shape without response text", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({
+    status: "completed",
+    output: [{
+      type: "reasoning",
+      summary: [{ type: "summary_text", text: "do-not-log-this-summary" }],
+    }],
+    provider_metadata: "do-not-log-this-metadata",
+  })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/free/space-bunny-alpha",
+        input: [{ type: "compaction_trigger" }],
+      }),
+    }));
+    assert.equal(response.status, 502);
+    const body = await response.text();
+    assert.match(body, /Upstream compaction returned no summary text/);
+    assert.match(body, /top-level=\[output,provider_metadata,status\]/);
+    assert.match(body, /output=\[reasoning\]/);
+    assert.match(body, /content=\[none\]/);
+    assert.match(body, /summary=\[summary_text\]/);
+    assert.doesNotMatch(body, /do-not-log-this-summary|do-not-log-this-metadata/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("completed empty compaction responses stay a structured 502", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({
+    background: false,
+    created_at: 1,
+    error: null,
+    id: "resp-empty",
+    incomplete_details: null,
+    model: "free/space-bunny-alpha",
+    object: "response",
+    status: "completed",
+  })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "cliproxy/free/space-bunny-alpha",
+        input: [{ type: "compaction_trigger" }],
+      }),
+    }));
+    assert.equal(response.status, 502);
+    const body = await response.text();
+    assert.match(body, /Upstream compaction returned no summary text/);
+    assert.match(body, /top-level=\[background,created_at,error,id,incomplete_details,model,object,status\]/);
+    assert.match(body, /output=\[missing\]/);
+    assert.match(body, /content=\[missing\]/);
+    assert.match(body, /summary=\[missing\]/);
+    assert.match(body, /choices=missing/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("log groups come from the request path and stay filesystem-safe", async () => {
   const originalFetch = globalThis.fetch;
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-group-log-"));
@@ -2201,6 +2556,9 @@ test("non-GPT remote compaction v2 is summarized, wrapped once, and replayed as 
         model: "cliproxy/deepseek-v4",
         stream: true,
         stream_options: { include_usage: true },
+        include: ["reasoning.encrypted_content"],
+        reasoning: { effort: "high" },
+        store: true,
         tools: [{ type: "function", name: "read_file" }],
         text: { format: { type: "json_schema" } },
         input: [
@@ -2211,11 +2569,14 @@ test("non-GPT remote compaction v2 is summarized, wrapped once, and replayed as 
     }));
 
     assert.equal(captured[0].url, "https://cliproxy.example/v1/responses");
-    assert.equal(new Headers(captured[0].options.headers).get("accept"), "application/json");
+    assert.equal(new Headers(captured[0].options.headers).get("accept"), "text/event-stream");
     const summaryRequest = JSON.parse(captured[0].options.body as string);
     assert.equal(summaryRequest.model, "deepseek-v4");
-    assert.equal(summaryRequest.stream, false);
+    assert.equal(summaryRequest.stream, true);
     assert.equal(summaryRequest.stream_options, undefined);
+    assert.equal(summaryRequest.include, undefined);
+    assert.equal(summaryRequest.reasoning, undefined);
+    assert.equal(summaryRequest.store, undefined);
     assert.equal(summaryRequest.tools, undefined);
     assert.equal(summaryRequest.text, undefined);
     assert.deepEqual(summaryRequest.input.map((item: { type: string }) => item.type), ["message", "message"]);
@@ -2230,7 +2591,9 @@ test("non-GPT remote compaction v2 is summarized, wrapped once, and replayed as 
       .filter((data): data is string => Boolean(data) && data !== "[DONE]")
       .map((data) => JSON.parse(data));
     const done = frames.find((event) => event.type === "response.output_item.done");
+    const added = frames.find((event) => event.type === "response.output_item.added");
     const completed = frames.find((event) => event.type === "response.completed");
+    assert.equal(added.item.type, "compaction");
     assert.equal(done.item.type, "compaction");
     assert.equal(completed.response.output.length, 1);
     assert.equal(completed.response.output[0].id, done.item.id);

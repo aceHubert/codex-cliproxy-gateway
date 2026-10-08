@@ -37,6 +37,8 @@ import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlV
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
 import { validateZcodeConfig, zcodeEnabled } from "./zcode/index.ts";
 import { codebuddyEnabled, validateCodebuddyConfig } from "./codebuddy/index.ts";
+import { qoderEnabled, validateQoderConfig } from "./qoder/index.ts";
+import { agyEnabled, validateAgyConfig } from "./agy/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -73,6 +75,8 @@ const DEFAULTS = {
   upstreamOnly: false,
   zcode: false,
   codebuddy: false,
+  qoder: false,
+  agy: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
 interface BackupRecord {
@@ -83,12 +87,25 @@ interface BackupRecord {
 interface InstallState {
   version: number;
   installedAt: string;
-  configBackup: BackupRecord;
-  installedConfigHash: string;
+  /** 首次托管安装前的 config.toml 纯净备份；手动模式安装（codexConfigManaged=false）没有。 */
+  configBackup?: BackupRecord;
+  /** 最近一次写入 config.toml 后的哈希；手动模式安装不跟踪。 */
+  installedConfigHash?: string;
   gatewayBaseUrl: string;
   config: GatewayConfig;
   /** 配置已写入但网关重启未成功；下一次写配置或 models --sync 会再次重启。 */
   pendingRestart?: boolean;
+  /**
+   * 是否由 codex-cliproxy 托管 ~/.codex/config.toml 的受管键。缺省视为 true（旧 state 兼容）；
+   * false 对应 install --manual-codex-config：所有命令不得改写 config.toml，
+   * 需要改写时以 warning + 设置方法的形式告知用户。
+   */
+  codexConfigManaged?: boolean;
+}
+
+/** 该安装是否托管 config.toml；缺省（旧安装或字段缺失）一律按托管处理。 */
+function isCodexConfigManaged(state: Pick<InstallState, "codexConfigManaged">): boolean {
+  return state.codexConfigManaged !== false;
 }
 
 const MANAGED_CONFIG_KEYS = [
@@ -108,7 +125,7 @@ Usage:
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--codebuddy-region auto|cn|intl] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--codebuddy-region auto|cn|intl] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy web
   codex-cliproxy status
 
@@ -126,6 +143,10 @@ Install options:
   --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
   --upstream-only       use only the third-party upstream's models with their
                         original IDs (--cpa-only is a deprecated alias)
+  --manual-codex-config leave ~/.codex/config.toml untouched and print the keys
+                        to configure by hand; combined with --upstream-only it
+                        asks whether to manage config.toml directly (answering
+                        yes installs in managed mode instead)
   --model-merge-json URL  GitHub repository or HTTP(S) models.json URL
   --restart-codex       stop Codex app-server after config.toml is updated
   --yes                 update an existing installation in place without asking
@@ -153,6 +174,8 @@ Config:
   config --codebuddy-region auto|cn|intl
                         prefer CodeBuddy credentials from a region; auto uses
                         the most recently refreshed login
+  config --qoder on|off toggle local Qoder Responses compatibility (intl + China editions)
+  config --agy on|off    toggle local Antigravity (agy/) Responses compatibility
   config --log on|off   toggle request logging
   config --max-request-logs N
                         max request log files kept across the directory; 0 (default) means unlimited
@@ -198,7 +221,7 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const key = value.slice(2);
-    if (["help", "sync", "upstream-only", "cpa-only", "restart-codex", "yes", "start", "daemon", "status", "stop", "restart"].includes(key)) {
+    if (["help", "sync", "upstream-only", "cpa-only", "restart-codex", "yes", "manual-codex-config", "start", "daemon", "status", "stop", "restart"].includes(key)) {
       options[key] = true;
       continue;
     }
@@ -251,6 +274,47 @@ function confirmInstallOverwrite(): boolean {
     bytes = 0; // 非 TTY 读失败按拒绝处理
   }
   return /^y/i.test(buffer.subarray(0, bytes).toString("utf8").trim());
+}
+
+/**
+ * 「upstream-only 必须修改 codex 配置，是否修改？」的交互询问：y/Y 视为同意直接托管写入。
+ * 与 confirmInstallOverwrite 同一安全默认——EOF、读失败或其余输入一律视为不修改。
+ */
+function promptModifyCodexConfig(): boolean {
+  process.stdout.write("Modify ~/.codex/config.toml directly? [N/y] ");
+  const buffer = Buffer.alloc(256);
+  let bytes = 0;
+  try {
+    while (bytes < buffer.length) {
+      const read = fs.readSync(0, buffer, bytes, buffer.length - bytes, null);
+      if (read <= 0) break;
+      bytes += read;
+      if (buffer.subarray(0, bytes).includes(0x0a)) break;
+    }
+  } catch {
+    bytes = 0;
+  }
+  return /^y/i.test(buffer.subarray(0, bytes).toString("utf8").trim());
+}
+
+/**
+ * --manual-codex-config 与 --upstream-only 冲突的抉择（不报错、不中止安装）：
+ * - "managed"：用户答 y，直接托管写入 config.toml，本次 --manual-codex-config 不生效；
+ * - "manual"：默认答案 N（含非交互与 --yes），不改写 config.toml，装完打印手动配置方法。
+ */
+export function resolveCodexConfigConflict(
+  options: { skipPrompt?: boolean; interactive?: boolean },
+  prompt: () => boolean = promptModifyCodexConfig,
+): "manual" | "managed" {
+  console.log(
+    "WARNING: --upstream-only requires managed config.toml keys (model_catalog_json) in ~/.codex/config.toml, which --manual-codex-config does not write.",
+  );
+  const interactive = options.interactive ?? Boolean(process.stdin.isTTY);
+  if (options.skipPrompt === true || !interactive) {
+    console.log("Keeping ~/.codex/config.toml untouched; manual configuration instructions will be printed after install.");
+    return "manual";
+  }
+  return prompt() ? "managed" : "manual";
 }
 
 function stringOption(options: CliOptions, key: string): string | undefined {
@@ -315,6 +379,28 @@ function restoreBackup(file: string, record: BackupRecord): void {
     fs.copyFileSync(record.backup, file);
   } else {
     fs.rmSync(file, { force: true });
+  }
+}
+
+/**
+ * 按 uninstall 语义把 config.toml 还原到托管前的状态：安装后未被手改过就整文件还原
+ * 纯净备份，否则仅还原受管键。uninstall 与「托管切手动」的 install 共用这一份逻辑。
+ */
+export function restoreManagedCodexToml(
+  paths: ResolvedPaths,
+  state: Pick<InstallState, "configBackup" | "installedConfigHash">,
+  currentToml: string,
+): void {
+  if (!state.configBackup) {
+    throw new Error(
+      `Installation state has no config.toml backup; restore these keys in ${paths.configToml} manually: ${MANAGED_CONFIG_KEYS.join(", ")}`,
+    );
+  }
+  if (state.installedConfigHash !== undefined && hash(currentToml) === state.installedConfigHash) {
+    restoreBackup(paths.configToml, state.configBackup);
+  } else {
+    const backupToml = fs.readFileSync(state.configBackup.backup, "utf8");
+    atomicWrite(paths.configToml, restoreRootTomlKeys(currentToml, backupToml, MANAGED_CONFIG_KEYS));
   }
 }
 
@@ -444,6 +530,8 @@ export function applyRoutingMode(
 const AUDITED_FIELDS = [
   "zcode",
   "codebuddy",
+  "qoder",
+  "agy",
   "codebuddyRegion",
   "upstreamOnly",
   "requestLogging",
@@ -620,6 +708,14 @@ async function install(options: CliOptions): Promise<void> {
   requireMacOS();
   requireBun();
   const upstreamOnly = upstreamOnlyOption(options);
+  // 手动模式：所有命令不改写 ~/.codex/config.toml，需要改写处一律 warning + 设置方法打印。
+  // 与 --upstream-only 同时出现时先问「是否修改 codex 配置」：y 转托管写入，默认 N 走手动。
+  let manualCodexConfig = options["manual-codex-config"] === true;
+  if (manualCodexConfig && upstreamOnly
+    && resolveCodexConfigConflict({ skipPrompt: options.yes === true }) === "managed") {
+    manualCodexConfig = false;
+    console.log("Managing ~/.codex/config.toml for this installation (--manual-codex-config ignored).");
+  }
   const paths = resolvePaths();
   const switching = fs.existsSync(paths.stateFile);
 
@@ -675,12 +771,15 @@ async function install(options: CliOptions): Promise<void> {
   applyRoutingMode(config, paths, upstreamOnly);
   const installSelector = stringOption(options, "select");
   // 先保留原有的受管 model_catalog_json 守卫；真正是否写入要等选择结果确定。
-  applyModelCatalogToml(
-    currentToml,
-    upstreamOnly && !isSelectNone(installSelector),
-    paths,
-    config.catalogPath,
-  );
+  // 手动模式对 config.toml 只读，守卫一并跳过。
+  if (!manualCodexConfig) {
+    applyModelCatalogToml(
+      currentToml,
+      upstreamOnly && !isSelectNone(installSelector),
+      paths,
+      config.catalogPath,
+    );
+  }
   const apiKey = getInstallApiKey(config.upstreamBaseUrl, stringOption(options, "key-env"));
   const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, config, Boolean(modelMergeJson));
 
@@ -723,17 +822,25 @@ async function install(options: CliOptions): Promise<void> {
     console.log(`Selected ${selectedModels.length} ${upstreamLabel(config)} models.`);
   }
   config.selectedModels = selectedModels;
-  const { patchedToml: modelCatalogToml } = applyModelCatalogToml(
-    currentToml,
-    upstreamOnly && selectedModels.length > 0,
-    paths,
-    config.catalogPath,
-  );
+  // 手动模式不增删 config.toml 的 model_catalog_json，patch 产物与原文一致。
+  const { patchedToml: modelCatalogToml } = manualCodexConfig
+    ? { patchedToml: currentToml }
+    : applyModelCatalogToml(
+      currentToml,
+      upstreamOnly && selectedModels.length > 0,
+      paths,
+      config.catalogPath,
+    );
 
   // 切换模式不动纯净备份；旧密钥/旧 state 先留底，失败时恢复。
   const previousState = switching ? fs.readFileSync(paths.stateFile, "utf8") : undefined;
   const previousApiKey = switching ? readApiKey(true) : undefined;
-  const configBackup = switching ? undefined : backupConfig(paths.configToml);
+  const previousManaged = switching ? isCodexConfigManaged(loadJson<InstallState>(paths.stateFile)) : true;
+  // 手动模式不写 config.toml、不需要备份；手动切回托管时从「开始托管那一刻」重新取
+  // 纯净备份，让 uninstall 的还原语义从新的托管周期重新起算。
+  const configBackup = !manualCodexConfig && (!switching || !previousManaged)
+    ? backupConfig(paths.configToml)
+    : undefined;
   let launchInstalled = false;
   // LaunchAgent 的恢复责任从开始替换 plist 时即成立：installLaunchAgent 内部会先覆盖
   // plist 并 bootout 原服务，若 bootstrap/kickstart 抛错，launchInstalled 尚未置位，
@@ -763,32 +870,60 @@ async function install(options: CliOptions): Promise<void> {
     writeGatewayConfig(paths.gatewayConfig, config);
 
     const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
-    const patchedToml = managedCodexServiceToml(modelCatalogToml, gatewayBaseUrl);
-    // 网关 host/port/mount 与 upstreamOnly 未变时 config.toml 的受管键已指向本网关，
-    // 无需重写（patchRootToml 对相同值产物一致，可用字符串相等判断）。
-    tomlUnchanged = patchedToml === currentToml;
-    if (!tomlUnchanged) atomicWrite(paths.configToml, patchedToml);
+    let writtenTomlHash: string | undefined;
+    if (manualCodexConfig) {
+      // 托管切手动：先把此前写入的受管键按 uninstall 语义还原，让 config.toml 回到
+      // 不含 codex-cliproxy 改动的状态后交还用户；此后所有命令只读不改。
+      // 失败回滚会写回 currentToml，与「现有安装保持原样」的语义一致。
+      if (switching && previousManaged) {
+        restoreManagedCodexToml(paths, loadJson<InstallState>(paths.stateFile), currentToml);
+        tomlUnchanged = false;
+      } else {
+        tomlUnchanged = true;
+      }
+    } else {
+      const patchedToml = managedCodexServiceToml(modelCatalogToml, gatewayBaseUrl);
+      // 网关 host/port/mount 与 upstreamOnly 未变时 config.toml 的受管键已指向本网关，
+      // 无需重写（patchRootToml 对相同值产物一致，可用字符串相等判断）。
+      tomlUnchanged = patchedToml === currentToml;
+      if (!tomlUnchanged) atomicWrite(paths.configToml, patchedToml);
+      writtenTomlHash = hash(patchedToml);
+    }
 
     if (switching) {
-      // 保留首次安装的纯净备份：只有实际重写了 config.toml 且其未被手改过才推进 hash，
-      // 保证后续 uninstall 的整文件还原语义不变（与 models --sync 一致）。
       const state = loadJson<InstallState>(paths.stateFile);
       state.version = 4;
       state.gatewayBaseUrl = gatewayBaseUrl;
       state.config = config;
-      if (!tomlUnchanged && hash(currentToml) === state.installedConfigHash) {
-        state.installedConfigHash = hash(patchedToml);
+      state.codexConfigManaged = !manualCodexConfig;
+      if (manualCodexConfig) {
+        // 手动模式不再跟踪 config.toml：uninstall/restart/models --sync 依据
+        // codexConfigManaged=false 跳过改写与还原，备份与 hash 一并作废。
+        delete state.configBackup;
+        delete state.installedConfigHash;
+      } else if (!previousManaged) {
+        // 手动切回托管：新的托管周期从当前 config.toml 重新起算备份与 hash。
+        state.configBackup = configBackup;
+        state.installedConfigHash = writtenTomlHash;
+      } else if (!tomlUnchanged && hash(currentToml) === state.installedConfigHash) {
+        // 保留首次安装的纯净备份：只有实际重写了 config.toml 且其未被手改过才推进 hash，
+        // 保证后续 uninstall 的整文件还原语义不变（与 models --sync 一致）。
+        state.installedConfigHash = writtenTomlHash;
       }
       writeJson(paths.stateFile, state);
     } else {
-      writeJson(paths.stateFile, {
+      const state: InstallState = {
         version: 4,
         installedAt: new Date().toISOString(),
-        configBackup: configBackup!,
-        installedConfigHash: hash(patchedToml),
         gatewayBaseUrl,
         config,
-      });
+        codexConfigManaged: !manualCodexConfig,
+      };
+      if (!manualCodexConfig) {
+        state.configBackup = configBackup!;
+        state.installedConfigHash = writtenTomlHash;
+      }
+      writeJson(paths.stateFile, state);
     }
 
     const cliPath = fs.realpathSync(process.argv[1]);
@@ -855,7 +990,8 @@ async function install(options: CliOptions): Promise<void> {
           uninstallLaunchAgent(paths.launchAgent);
         }
       }
-      restoreBackup(paths.configToml, configBackup!);
+      // 手动模式全程未写 config.toml（托管切手动除外，走 tomlUnchanged 回写），没有备份也不需要还原。
+      if (!manualCodexConfig) restoreBackup(paths.configToml, configBackup!);
       deleteApiKey();
       removeManagedRuntimeFiles(paths);
       if (previousGatewayConfig !== undefined) atomicWrite(paths.gatewayConfig, previousGatewayConfig);
@@ -864,13 +1000,35 @@ async function install(options: CliOptions): Promise<void> {
     throw new Error(composeInstallFailureMessage(message, { diagnostics, restoreIssues }));
   }
 
+  const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
   if (switching) {
-    console.log(`Installation updated in place. Gateway: http://${config.host}:${config.port}${config.mountPath}`);
+    console.log(`Installation updated in place. Gateway: ${gatewayBaseUrl}`);
   } else {
-    console.log(`Installed. Gateway: http://${config.host}:${config.port}${config.mountPath}`);
+    console.log(`Installed. Gateway: ${gatewayBaseUrl}`);
   }
   console.log("Codex ChatGPT OAuth was not modified.");
+  if (manualCodexConfig) {
+    const currentTomlAfterInstall = fs.existsSync(paths.configToml)
+      ? fs.readFileSync(paths.configToml, "utf8")
+      : "";
+    const configuredCatalog = readRootTomlString(currentTomlAfterInstall, "model_catalog_json");
+    const staticCatalogActive = upstreamOnly && selectedModels.length > 0;
+    console.log("WARNING: --manual-codex-config keeps ~/.codex/config.toml untouched. Configure it manually:");
+    for (const key of MANAGED_CONFIG_KEYS.filter((managedKey) => managedKey !== "model_catalog_json")) {
+      console.log(`  ${key} = "${gatewayBaseUrl}"`);
+    }
+    if (staticCatalogActive) {
+      if (configuredCatalog !== config.catalogPath) {
+        console.log(`  model_catalog_json = "${config.catalogPath}"`);
+        console.log("WARNING: without model_catalog_json Codex will not load the static upstream-only catalog.");
+      }
+    } else if (configuredCatalog !== undefined) {
+      console.log("WARNING: remove model_catalog_json from ~/.codex/config.toml to leave upstream-only mode.");
+    }
+    console.log("Uninstall and later commands will not modify ~/.codex/config.toml.");
+  }
   if (options["restart-codex"] === true) await refreshCodexAppServer();
+  else if (manualCodexConfig) console.log("After updating ~/.codex/config.toml, fully quit and reopen Codex Desktop.");
   else if (upstreamOnly) console.log("Upstream-only catalog configured; fully quit and reopen Codex Desktop, or reinstall with --restart-codex.");
   else console.log("Fully quit and reopen Codex Desktop, or reinstall with --restart-codex.");
 }
@@ -886,19 +1044,23 @@ async function uninstall(options: CliOptions): Promise<void> {
   uninstallLaunchAgent(paths.webUiLaunchAgent);
   const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
-  const removeLegacyCatalog = readRootTomlString(currentToml, "model_catalog_json") === legacyCatalogFile;
-  if (hash(currentToml) === state.installedConfigHash) {
-    restoreBackup(paths.configToml, state.configBackup);
-  } else {
-    const backupToml = fs.readFileSync(state.configBackup.backup, "utf8");
-    atomicWrite(paths.configToml, restoreRootTomlKeys(currentToml, backupToml, MANAGED_CONFIG_KEYS));
+  // 手动模式的 config.toml 属于用户：不还原受管键，也不清理其引用的目录文件。
+  if (isCodexConfigManaged(state)) {
+    restoreManagedCodexToml(paths, state, currentToml);
+    if (readRootTomlString(currentToml, "model_catalog_json") === legacyCatalogFile) {
+      fs.rmSync(legacyCatalogFile, { force: true });
+    }
   }
-  if (removeLegacyCatalog) fs.rmSync(legacyCatalogFile, { force: true });
   deleteApiKey();
   invalidateModelsCache(paths.modelsCacheFile);
   removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true });
 
-  console.log("Uninstalled. Managed config.toml values were restored; config.json was preserved.");
+  if (isCodexConfigManaged(state)) {
+    console.log("Uninstalled. Managed config.toml values were restored; config.json was preserved.");
+  } else {
+    console.log("Uninstalled. ~/.codex/config.toml was left untouched (--manual-codex-config installation); config.json was preserved.");
+    console.log(`Remove these keys from ~/.codex/config.toml yourself if the gateway is no longer needed: ${MANAGED_CONFIG_KEYS.join(", ")}`);
+  }
   console.log("Codex auth.json was never changed.");
   if (options["restart-codex"] === true) await refreshCodexAppServer();
 }
@@ -948,11 +1110,19 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
+  // 手动模式（install --manual-codex-config）下 config.toml 属于用户：static（--upstream-only）
+  // 切换照常完成，但不写 model_catalog_json，改为在收尾时以 warning + 设置方法告知用户。
+  const manualCodexConfig = fs.existsSync(paths.stateFile)
+    && !isCodexConfigManaged(loadJson<InstallState>(paths.stateFile));
+
   applyRoutingMode(config, paths, upstreamOnly);
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
-  // 同步前先拒绝非受管 model_catalog_json，避免后续模型覆盖文件下载产生半更新。
-  applyModelCatalogToml(source, upstreamOnly && !isSelectNone(selector), paths, config.catalogPath);
+  // 同步前先拒绝非受管 model_catalog_json，避免后续模型覆盖文件下载产生半更新；
+  // 手动模式对 config.toml 只读，守卫与改写一并跳过。
+  if (!manualCodexConfig) {
+    applyModelCatalogToml(source, upstreamOnly && !isSelectNone(selector), paths, config.catalogPath);
+  }
   const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, config, Boolean(modelMergeJson));
   const selectNone = isSelectNone(selector);
   const proxyCatalog: ModelCatalog = selectNone
@@ -977,12 +1147,15 @@ async function models(options: CliOptions): Promise<void> {
       requireNonEmpty: upstreamOnly,
     });
   }
-  const { patchedToml, previousCatalog } = applyModelCatalogToml(
-    source,
-    upstreamOnly && selectedModels.length > 0,
-    paths,
-    config.catalogPath,
-  );
+  // 手动模式不改写 config.toml：patch 产物保持与原文一致，也不清理其引用的目录文件。
+  const { patchedToml, previousCatalog } = manualCodexConfig
+    ? { patchedToml: source, previousCatalog: null as string | null }
+    : applyModelCatalogToml(
+      source,
+      upstreamOnly && selectedModels.length > 0,
+      paths,
+      config.catalogPath,
+    );
 
   const selectedProxyModels = proxyCatalog.models.filter((model) => selectedModels.includes(model.slug));
   const result = await rebuildCatalog(
@@ -995,12 +1168,12 @@ async function models(options: CliOptions): Promise<void> {
   writeGatewayConfig(paths.gatewayConfig, config);
 
   if (patchedToml !== source) atomicWrite(paths.configToml, patchedToml);
-  if (previousCatalog === legacyCatalogFile) fs.rmSync(legacyCatalogFile, { force: true });
+  if (!manualCodexConfig && previousCatalog === legacyCatalogFile) fs.rmSync(legacyCatalogFile, { force: true });
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.version = 4;
     state.config = config;
-    if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
+    if (!manualCodexConfig && hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
     writeJson(paths.stateFile, state);
   }
   recordConfigAudit("models --sync", config, auditBefore, paths, patchedToml === source ? [] : [{
@@ -1025,6 +1198,18 @@ async function models(options: CliOptions): Promise<void> {
     console.log(`CPA catalog synced for dynamic split routing: ${result.proxyCount} selected models.`);
   }
   printCurrentModels(config, selectedModels);
+  if (manualCodexConfig) {
+    // 手动模式的 config.toml 指引：本应写入/删除 model_catalog_json 的地方改为告知用户；
+    // 已正确配置时不输出，避免每次同步刷屏。
+    const configuredCatalog = readRootTomlString(source, "model_catalog_json");
+    if (upstreamOnly && selectedModels.length > 0 && configuredCatalog !== config.catalogPath) {
+      console.log("WARNING: manual codex config mode: add this key to ~/.codex/config.toml to load the static catalog:");
+      console.log(`  model_catalog_json = "${config.catalogPath}"`);
+      console.log("Without it Codex will not load the static upstream-only catalog; fully quit and reopen Codex after adding it.");
+    } else if (!upstreamOnly && configuredCatalog !== undefined) {
+      console.log("WARNING: manual codex config mode: remove model_catalog_json from ~/.codex/config.toml to leave upstream-only mode, then fully quit and reopen Codex.");
+    }
+  }
   if (!restartCodex) {
     if (upstreamOnly) {
       console.log("Upstream-only catalog configured; restart Codex to load it, or rerun with --restart-codex.");
@@ -1053,8 +1238,11 @@ async function status(): Promise<void> {
     "experimental_realtime_webrtc_call_base_url",
   );
   let health = "unreachable";
+  // 未安装时无从谈及托管，输出 null 与 installed:false 对齐。
+  let codexConfigManaged: boolean | null = null;
   if (installed) {
     const state = loadJson<InstallState>(paths.stateFile);
+    codexConfigManaged = isCodexConfigManaged(state);
     const healthConfig = config ?? state.config;
     try {
       const response = await fetch(`http://${healthConfig.host}:${healthConfig.port}/healthz`);
@@ -1065,6 +1253,7 @@ async function status(): Promise<void> {
     installed,
     serviceLoaded: Boolean(service),
     health,
+    codexConfigManaged,
     openaiBaseUrl: configuredBaseUrl,
     experimentalRealtimeWsBaseUrl: configuredRealtimeWsBaseUrl,
     experimentalRealtimeWebrtcCallBaseUrl: configuredRealtimeWebrtcCallBaseUrl,
@@ -1097,6 +1286,8 @@ function serve(options: CliOptions): void {
     paths.upstreamModelsCacheFile,
     { codexModelsCacheFile: paths.modelsCacheFile },
     processLog,
+    { codexModelsCacheFile: paths.modelsCacheFile },
+    { codexModelsCacheFile: paths.modelsCacheFile },
     { codexModelsCacheFile: paths.modelsCacheFile },
   );
   // 本进程已带着当前配置启动：此前置位的 pendingRestart 已完成使命，清掉它，
@@ -1186,9 +1377,10 @@ async function startWebUiService(paths: ResolvedPaths, config: GatewayConfig): P
 
 /**
  * web 命令：默认（及 `--start`）前台启动——检查网关（未运行则启动）后在前台运行
- * UI 服务并打开浏览器，Ctrl-C 停止；`--daemon` 后台启动——经 LaunchAgent 拉起后打开
- * 浏览器，终端立即释放。dev:ui（CODEX_CLIPROXY_UI_DEV=1）复用本命令启动 UI API，
- * 但 Vite 还要接着占用终端，因此始终走后台路径。
+ * UI 服务并打开浏览器，Ctrl-C 停止；若 UI 服务已在运行（如 --daemon 拉起的后台
+ * 实例），不再报错要求先停，直接打开浏览器。`--daemon` 后台启动——经 LaunchAgent
+ * 拉起后打开浏览器，终端立即释放。dev:ui（CODEX_CLIPROXY_UI_DEV=1）复用本命令启动
+ * UI API，但 Vite 还要接着占用终端，因此始终走后台路径。
  * 子选项只作用于 UI 服务本身，不动网关：`--status` 查看运行状态，`--stop` 停止，
  * `--restart` 先停再起。
  */
@@ -1254,13 +1446,11 @@ async function webCommand(options: CliOptions): Promise<void> {
       console.log(`Web UI API is ready at http://127.0.0.1:${uiPort}/ui/api`);
       return;
     }
+  } else if (await isWebUiRunning(uiPort)) {
+    // 服务已在运行（多半是 --daemon 拉起的）：对用户而言目标就是打开面板，
+    // 已可用即直接落到下方打开浏览器，不要求先 --stop 再重跑。
+    console.log("Web UI is already running.");
   } else {
-    // 前台启动：端口已被后台服务占用时 Bun.serve 会抛晦涩的端口冲突，先给出可执行的修复方式。
-    if (await isWebUiRunning(uiPort)) {
-      throw new Error(
-        `Web UI is already running on port ${uiPort}; stop it first with: codex-cliproxy web --stop`,
-      );
-    }
     runWebUiForeground(paths, config, true);
     return;
   }
@@ -1288,6 +1478,8 @@ function onOffValue(options: CliOptions, key: string): boolean | undefined {
 async function configCommand(options: CliOptions): Promise<void> {
   const zcodeTarget = onOffValue(options, "zcode");
   const codebuddyTarget = onOffValue(options, "codebuddy");
+  const qoderTarget = onOffValue(options, "qoder");
+  const agyTarget = onOffValue(options, "agy");
   const codebuddyRegionOption = stringOption(options, "codebuddy-region");
   const logTarget = onOffValue(options, "log");
   const maxLogsOption = stringOption(options, "max-request-logs");
@@ -1297,9 +1489,11 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && codebuddyTarget === undefined && codebuddyRegionOption === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && codebuddyRegionOption === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
     const codebuddyActive = codebuddyEnabled(config);
+    const qoderActive = qoderEnabled(config);
+    const agyActive = agyEnabled(config);
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
       zcode: zcodeActive,
@@ -1308,6 +1502,10 @@ async function configCommand(options: CliOptions): Promise<void> {
       codebuddy: codebuddyActive,
       ...(config.codebuddy === true && !codebuddyActive ? { codebuddyConfigured: true } : {}),
       codebuddyRegion: config.codebuddyRegion ?? "auto",
+      qoder: qoderActive,
+      ...(config.qoder === true && !qoderActive ? { qoderConfigured: true } : {}),
+      agy: agyActive,
+      ...(config.agy === true && !agyActive ? { agyConfigured: true } : {}),
       requestLogging: config.requestLogging === true,
       logDir: config.logDir || paths.logDir,
       maxRequestLogs: config.maxRequestLogs ?? 0,
@@ -1333,6 +1531,18 @@ async function configCommand(options: CliOptions): Promise<void> {
     applied.push(codebuddyTarget && !codebuddyActive
       ? "CodeBuddy compatibility saved but inactive: upstream-only mode treats CodeBuddy as disabled."
       : `CodeBuddy compatibility ${codebuddyTarget ? "enabled" : "disabled"}.`);
+  }
+  if (qoderTarget !== undefined) {
+    config.qoder = qoderTarget;
+    applied.push(qoderTarget && !qoderEnabled(config)
+      ? "Qoder 开关已保存；upstream-only 模式下暂不生效。"
+      : `Qoder 适配${qoderTarget ? "已启用" : "已禁用"}。`);
+  }
+  if (agyTarget !== undefined) {
+    config.agy = agyTarget;
+    applied.push(agyTarget && !agyEnabled(config)
+      ? "Antigravity 开关已保存；upstream-only 模式下暂不生效。"
+      : `Antigravity（agy/）适配${agyTarget ? "已启用" : "已禁用"}。`);
   }
   if (codebuddyRegionOption !== undefined) {
     const normalized = codebuddyRegionOption.trim().toLowerCase();
@@ -1363,6 +1573,8 @@ async function configCommand(options: CliOptions): Promise<void> {
   // （否则保存成功、新进程却被 validate*Config 拒绝启动，网关直接不可用）。
   validateZcodeConfig(config);
   validateCodebuddyConfig(config);
+  validateQoderConfig(config);
+  validateAgyConfig(config);
   writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
@@ -1375,7 +1587,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   // Codex 的 models_cache.json（对齐 install / models --sync），让重拉起的
   // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
   // 纯日志选项不影响目录，不触发失效。
-  if (zcodeTarget !== undefined || codebuddyTarget !== undefined || codebuddyRegionOption !== undefined) {
+  if (zcodeTarget !== undefined || codebuddyTarget !== undefined || qoderTarget !== undefined || agyTarget !== undefined || codebuddyRegionOption !== undefined) {
     invalidateModelsCache(paths.modelsCacheFile);
   }
 
@@ -1414,10 +1626,21 @@ async function controlGateway(
   } else {
     const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
     const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
-    const patchedToml = managedCodexServiceToml(source, gatewayBaseUrl);
-    if (patchedToml !== source) atomicWrite(paths.configToml, patchedToml);
     const state = loadJson<InstallState>(paths.stateFile);
-    if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
+    if (isCodexConfigManaged(state)) {
+      const patchedToml = managedCodexServiceToml(source, gatewayBaseUrl);
+      if (patchedToml !== source) atomicWrite(paths.configToml, patchedToml);
+      if (hash(source) === state.installedConfigHash) state.installedConfigHash = hash(patchedToml);
+    } else {
+      // 手动模式不补写受管键；本应补写（服务键与网关地址不一致）时以 warning + 期望值告知。
+      const drifted = MANAGED_CONFIG_KEYS
+        .filter((key) => key !== "model_catalog_json")
+        .filter((key) => readRootTomlString(source, key) !== gatewayBaseUrl);
+      if (drifted.length > 0) {
+        console.log("WARNING: manual codex config mode: these keys in ~/.codex/config.toml do not point at the gateway:");
+        for (const key of drifted) console.log(`  ${key} = "${gatewayBaseUrl}"`);
+      }
+    }
     state.gatewayBaseUrl = gatewayBaseUrl;
     state.config = config;
     writeJson(paths.stateFile, state);
@@ -1474,8 +1697,16 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
       current.zcode = false;
       dirty = true;
     }
+    if (!Object.hasOwn(current, "agy")) {
+      current.agy = false;
+      dirty = true;
+    }
     if (!Object.hasOwn(current, "codebuddy")) {
       current.codebuddy = false;
+      dirty = true;
+    }
+    if (!Object.hasOwn(current, "qoder")) {
+      current.qoder = false;
       dirty = true;
     }
     if (dirty) {
@@ -1528,12 +1759,12 @@ function syncGatewayConfig(command: string, options: CliOptions): void {
 
 /** 各命令接受的选项；白名单外的 --key 一律报错，避免拼写错误被静默忽略后部分生效。 */
 const COMMAND_OPTIONS: Record<string, string[]> = {
-  install: ["upstream-url", "cliproxy-url", "upstream-type", "port", "prefix", "official-url", "key-env", "select", "upstream-only", "cpa-only", "model-merge-json", "restart-codex", "yes"],
+  install: ["upstream-url", "cliproxy-url", "upstream-type", "port", "prefix", "official-url", "key-env", "select", "upstream-only", "cpa-only", "manual-codex-config", "model-merge-json", "restart-codex", "yes"],
   uninstall: ["restart-codex"],
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["zcode", "codebuddy", "codebuddy-region", "log", "max-request-logs", "max-log-size"],
+  config: ["zcode", "codebuddy", "qoder", "agy", "codebuddy-region", "log", "max-request-logs", "max-log-size"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };
 

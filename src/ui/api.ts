@@ -19,10 +19,29 @@ export interface UiStatus {
   routing: string[];
 }
 
+/** 手动模式下待配置键的展示条目：expected 为应写入的值，current 为用户 config.toml 当前值。 */
+export interface ManualCodexKeyRow {
+  key: string;
+  expected: string;
+  current: string | null;
+  matches: boolean;
+}
+
+/** 手动模式（--manual-codex-config）的 config.toml 配置指引；仅 codexConfigManaged=false 时返回。 */
+export interface ManualCodexConfig {
+  gatewayBaseUrl: string;
+  staticCatalogActive: boolean;
+  removeModelCatalogJson: boolean;
+  keys: ManualCodexKeyRow[];
+}
+
 export interface UiConfig {
   editable: {
     zcode: boolean;
     codebuddy: boolean;
+    codebuddyRegion: "auto" | "cn" | "intl";
+    qoder: boolean;
+    agy: boolean;
     requestLogging: boolean;
     logDir: string;
     maxRequestLogs: number;
@@ -33,6 +52,11 @@ export interface UiConfig {
   detected: {
     zcode: boolean;
     codebuddy: boolean;
+    qoder: boolean;
+    /** Qoder 当前生效登录来源；每地域按 CLI 优先、桌面回退计算，只含标签不含凭据。 */
+    qoderSources: Array<"CLI-INTL" | "CLI-CN" | "DESKTOP-INTL" | "DESKTOP-CN">;
+    /** Antigravity CLI 凭据文件存在性探测结果。 */
+    agy: boolean;
   };
   readonly: {
     upstreamBaseUrl: string;
@@ -46,6 +70,10 @@ export interface UiConfig {
     prefix: string;
     officialBaseUrl: string;
     catalogPath: string;
+    /** config.toml 管理模式：true = 托管受管键，false = 手动（--manual-codex-config）。 */
+    codexConfigManaged: boolean;
+    /** 手动模式的配置指引；托管模式无此字段。 */
+    manualCodexConfig?: ManualCodexConfig;
   };
   configVersion: string;
 }
@@ -54,6 +82,9 @@ export interface UiConfig {
 export interface UiConfigChanges {
   zcode?: boolean;
   codebuddy?: boolean;
+  codebuddyRegion?: "auto" | "cn" | "intl";
+  qoder?: boolean;
+  agy?: boolean;
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;

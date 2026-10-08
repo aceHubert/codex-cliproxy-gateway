@@ -5,6 +5,8 @@ import type { LogFileRef, RequestLogSink } from "./request-log.ts";
 import type { GatewayConfig } from "./types.ts";
 import { isZcodeModel } from "./zcode/catalog.ts";
 import { isCodebuddyModel } from "./codebuddy/catalog.ts";
+import { isQoderModel } from "./qoder/catalog.ts";
+import { isAgyModel } from "./agy/catalog.ts";
 
 const MAX_REALTIME_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_WEBSOCKET_BYTES = 1024 * 1024;
@@ -74,7 +76,15 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   startedAt?: number;
   /** 握手请求时间（localTime 格式），进程日志摘要条目的时间戳。 */
   requestTime?: string;
+  /** Responses WebSocket 的协议级帧处理；返回事件时不再把原帧转发给上游。 */
+  handleResponseFrame?: (frame: string) => Promise<ResponseFrameAction | null>;
+  /** 异步压缩帧按连接串行处理，避免摘要请求与普通帧乱序。 */
+  responseFrameQueue?: Promise<void>;
 }
+
+export type ResponseFrameAction =
+  | { kind: "forward"; frame: string }
+  | { kind: "events"; events: string[] };
 
 /** 帧路由判定结果：照常转发（可改写）/ 需断开重连 / 已确认 HTTP-only 需触发降级。 */
 export type FrameRouting =
@@ -83,12 +93,14 @@ export type FrameRouting =
   | { kind: "reject"; model: string; family: string };
 
 /**
- * 只走 HTTP 适配器的模型族：zcode 与 codebuddy/workbuddy 的上游不是 Responses
- * WebSocket 端点，这些前缀的帧无论落在哪条桥上都不能转发。判定用纯前缀匹配，
- * 刻意不依赖 zcodeEnabled/codebuddyEnabled——族被禁用时模型名同样不该漏到上游。
+ * 只走 HTTP 适配器的模型族：zcode、codebuddy/workbuddy、qoder 与 agy 的上游不是
+ * Responses WebSocket 端点，这些前缀的帧无论落在哪条桥上都不能转发。判定用纯前缀
+ * 匹配，刻意不依赖 *Enabled——族被禁用时模型名同样不该漏到上游。
  */
-export function httpOnlyModelFamily(model: string): "zcode" | "codebuddy" | "workbuddy" | undefined {
+export function httpOnlyModelFamily(model: string): "zcode" | "codebuddy" | "workbuddy" | "qoder" | "agy" | undefined {
   if (isZcodeModel(model)) return "zcode";
+  if (isQoderModel(model)) return "qoder";
+  if (isAgyModel(model)) return "agy";
   if (!isCodebuddyModel(model)) return undefined;
   return model.toLowerCase().startsWith("workbuddy") ? "workbuddy" : "codebuddy";
 }
@@ -632,6 +644,51 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
     if (ws.data.noteTurnId && typeof frame === "string") {
       const turnId = turnIdFromResponseCreate(frame);
       if (turnId) ws.data.noteTurnId(turnId);
+    }
+    if (ws.data.handleResponseFrame && typeof frame === "string") {
+      const processFrame = async (): Promise<void> => {
+        const action = await ws.data.handleResponseFrame!(frame as string);
+        if (action?.kind === "events") {
+          for (const event of action.events) sendToClient(ws, event);
+          return;
+        }
+        const nextFrame = action?.kind === "forward" ? action.frame : frame;
+        if (typeof nextFrame !== "string") return;
+        logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
+          event: "ws-send",
+          url: ws.data.url,
+          frame: nextFrame,
+        });
+        if (upstream?.readyState === WebSocket.OPEN) {
+          upstream.send(nextFrame);
+          return;
+        }
+        if (upstream && upstream.readyState !== WebSocket.CONNECTING) {
+          ws.close(1011, "Realtime upstream WebSocket is unavailable");
+          return;
+        }
+        const nextBytes = ws.data.queuedBytes + frameBytes(nextFrame);
+        if (nextBytes > MAX_PENDING_WEBSOCKET_BYTES) {
+          ws.close(1009, "Realtime upstream connection queue exceeded 1 MiB");
+          upstream?.close(1009, "Client queue limit exceeded");
+          return;
+        }
+        ws.data.queue.push(nextFrame);
+        ws.data.queuedBytes = nextBytes;
+      };
+      ws.data.responseFrameQueue = (ws.data.responseFrameQueue ?? Promise.resolve())
+        .then(processFrame)
+        .catch((error) => {
+          const cause = error instanceof Error ? error : new Error(String(error));
+          logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
+            event: "ws-upstream-error",
+            url: ws.data.url,
+            detail: { error: `${cause.name}: ${cause.message}` },
+          });
+          upstream?.close(1011, "Responses frame handling failed");
+          ws.close(1011, "Responses frame handling failed");
+        });
+      return;
     }
     logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
       event: "ws-send",

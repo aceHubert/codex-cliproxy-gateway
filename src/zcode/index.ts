@@ -315,7 +315,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
           requestTime, method: request.method, url: at,
           reqHeaders: request.headers, reqBody: redactValue(input),
           status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
-        }, family);
+        }, "zcode");
         // 与网关主链一样，进程日志里每条请求恰好一行：逻辑错误也算错误，走错误摘要。
         if (status >= 400 || logicalError) {
           logGatewayError(sink?.processLog, {

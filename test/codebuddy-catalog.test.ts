@@ -74,11 +74,11 @@ test("credits 解析：免费、倍率与格式异常共用同一常量", () => 
   assert.ok(isFreeCredits("x0 credits"));
   assert.ok(isFreeCredits("x0.00"));
   assert.ok(!isFreeCredits("x0.14 credits"));
-  assert.equal(displayNameWithCredits("Auto", "x0.79 credits", "intl-cli"), "INTL-C/Auto (x0.79)");
-  assert.equal(displayNameWithCredits("GPT-5.6-Luna", "x0.14 credits", "intl-cli"), "INTL-C/GPT-5.6-Luna (x0.14)");
-  assert.equal(displayNameWithCredits("Free Model", "x0", "cn-cli"), "CN-C/Free Model (free)");
-  assert.equal(displayNameWithCredits("Plain", "未知", "cn-cli"), "CN-C/Plain");
-  assert.equal(displayNameWithCredits("Plain", undefined, "intl-work"), "INTL-W/Plain");
+  assert.equal(displayNameWithCredits("Auto", "x0.79 credits", "intl-cli"), "CB-INTL/Auto (x0.79)");
+  assert.equal(displayNameWithCredits("GPT-5.6-Luna", "x0.14 credits", "intl-cli"), "CB-INTL/GPT-5.6-Luna (x0.14)");
+  assert.equal(displayNameWithCredits("Free Model", "x0", "cn-cli"), "CB-CN/Free Model (free)");
+  assert.equal(displayNameWithCredits("Plain", "未知", "cn-cli"), "CB-CN/Plain");
+  assert.equal(displayNameWithCredits("Plain", undefined, "intl-work"), "WB-INTL/Plain");
 });
 
 test("parseCodebuddyConfigData：picker 引用解析、禁用与可用清单过滤", () => {
@@ -124,7 +124,7 @@ test("synthesizeCodebuddyEntry 按①~④映射合成 Codex 条目", () => {
     tags: ["badge:x"],
   }), 7, "intl-cli");
   assert.equal(entry.slug, "gpt-5.6-luna");
-  assert.equal(entry.display_name, "INTL-C/GPT-5.6-Luna (x0.14)");
+  assert.equal(entry.display_name, "CB-INTL/GPT-5.6-Luna (x0.14)");
   assert.equal(entry.description, "轻量模型");
   assert.equal(entry.context_window, 1000000);
   assert.equal(entry.max_context_window, 1000000);
@@ -156,7 +156,7 @@ test("synthesizeCodebuddyEntry 按①~④映射合成 Codex 条目", () => {
   assert.equal(tier.supports_reasoning_summaries, false);
   assert.equal(tier.default_reasoning_level, undefined);
   assert.deepEqual(tier.input_modalities, ["text"]);
-  assert.equal(tier.display_name, "CN-C/Auto (x0.79)");
+  assert.equal(tier.display_name, "CB-CN/Auto (x0.79)");
 });
 
 test("推理档位：有效非空 supportedEfforts 沿用上游列表", () => {
@@ -372,9 +372,9 @@ test("目录存储：双产品接口各拉各的目录并合并两个前缀族",
     assert.deepEqual([...fetched].sort(), ["https://www.codebuddy.ai/v3/config", "https://www.workbuddy.ai/v3/config"]);
     assert.ok(fs.existsSync(path.join(directory, "codebuddy-intl-catalog.json")));
     assert.ok(fs.existsSync(path.join(directory, "workbuddy-intl-catalog.json")));
-    // display_name 带产品×地域标签：cli 族 INTL-C、work 族 INTL-W，同名模型据此区分。
-    assert.match(catalog.models.find((model) => model.slug === "codebuddy-intl/a")!.display_name!, /^INTL-C\//);
-    assert.match(catalog.models.find((model) => model.slug === "workbuddy-intl/w1")!.display_name!, /^INTL-W\//);
+    // display_name 带产品×地域标签：cli 族 CB-INTL、work 族 WB-INTL，同名模型据此区分。
+    assert.match(catalog.models.find((model) => model.slug === "codebuddy-intl/a")!.display_name!, /^CB-INTL\//);
+    assert.match(catalog.models.find((model) => model.slug === "workbuddy-intl/w1")!.display_name!, /^WB-INTL\//);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

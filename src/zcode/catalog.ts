@@ -16,11 +16,11 @@ const PLAN_PREFIXES: Partial<Record<ZcodeSelection["kind"], string>> = {
   "team-coding-plan": "zcode-team-coding-plan/",
   "start-plan": "zcode-start-plan/",
 };
-/** 显示名后缀与 ZCode 客户端模型选择器的套餐分组（个人/团队/免费）一致。 */
-const PLAN_DISPLAY_SUFFIXES: Partial<Record<ZcodeSelection["kind"], string>> = {
-  "individual-coding-plan": " (ZCode个人)",
-  "team-coding-plan": " (ZCode团队)",
-  "start-plan": " (ZCode免费)",
+/** 显示名括号内与 ZCode 客户端模型选择器的套餐分组（个人/团队/免费）一致。 */
+const PLAN_DISPLAY_LABELS: Partial<Record<ZcodeSelection["kind"], string>> = {
+  "individual-coding-plan": "个人",
+  "team-coding-plan": "团队",
+  "start-plan": "免费",
 };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -73,6 +73,14 @@ function readOverrides(overrideFile?: string): unknown {
     ? JSON.parse(fs.readFileSync(overrideFile, "utf8")) : bundledOverrides;
 }
 
+/** 归一化显示名：剥掉历史 ZCode 前缀/后缀，确保渠道标识只由投影层统一添加。 */
+function stripZcodeChannelLabel(name: string): string {
+  return name
+    .replace(/^ZCode\//, "")
+    .replace(/ \(ZCode[^)]*\)$/, "")
+    .replace(/（ZCode[^）]*）$/, "");
+}
+
 /**
  * 由内置厂商预设与覆盖规则合成全量裸 ID 目录。纯内存计算：数据源是构建期静态 import，
  * 重建成本与模型条数同级，不需要磁盘缓存，也不携带任何套餐或授权信息。
@@ -89,8 +97,7 @@ export function buildZcodeVendorCatalog(overrideFile?: string): ModelCatalog {
     return {
       ...entry,
       slug,
-      // 对外目录统一标注 ZCode 渠道，与 cliproxy/new-api 的同名条目区分开。
-      display_name: `${entry.display_name ?? slug} (ZCode)`,
+      display_name: entry.display_name ?? slug,
       prefer_websockets: false,
       // zcode 链路已把 Responses web_search 原生映射为 web_search_20250305（实测 z.ai 支持）。
       supports_search_tool: true,
@@ -121,15 +128,15 @@ export function createZcodeCatalogForModels(
   const prefix = plan === "api-key" && apiProviderID
     ? zcodeAPIProviderPrefix(apiProviderID)
     : PLAN_PREFIXES[plan] ?? ZCODE_PREFIX;
-  const suffix = plan === "api-key" && apiProviderID
-    ? `（ZCode ${apiProviderName ?? apiProviderID}）`
-    : PLAN_DISPLAY_SUFFIXES[plan] ?? " (ZCode)";
+  // 渠道统一用 ZCode/ 前缀标注（与 cliproxy/new-api 的同名条目区分），括号内只保留
+  // 套餐分组或多 Key 的 provider 名，不再重复 ZCode 字样。
+  const qualifier = plan === "api-key"
+    ? apiProviderID ? `（${apiProviderName ?? apiProviderID}）` : ""
+    : PLAN_DISPLAY_LABELS[plan] ? ` (${PLAN_DISPLAY_LABELS[plan]})` : "";
   return { models: cached.models.filter((entry) => supported.has(entry.slug.toLowerCase())).map((entry) => ({
     ...entry,
     slug: `${prefix}${entry.slug}`,
-    display_name: `${(entry.display_name ?? entry.slug)
-      .replace(/ \(ZCode[^)]*\)$/, "")
-      .replace(/（ZCode[^）]*）$/, "")}${suffix}`,
+    display_name: `ZCode/${stripZcodeChannelLabel(entry.display_name ?? entry.slug)}${qualifier}`,
   })) };
 }
 

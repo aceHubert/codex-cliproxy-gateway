@@ -13,6 +13,11 @@ import {
 } from "./codebuddy/index.ts";
 import type { CodebuddyDependencies } from "./codebuddy/index.ts";
 import { isCodebuddyModel, mergeCodebuddyCatalog } from "./codebuddy/catalog.ts";
+import { createQoderAdapter, qoderEnabled, qoderError, validateQoderConfig } from "./qoder/index.ts";
+import type { QoderDependencies } from "./qoder/index.ts";
+import { isQoderModel, mergeQoderCatalog } from "./qoder/catalog.ts";
+import { agyEnabled, agyError, createAgyAdapter, isAgyModel, mergeAgyCatalog, validateAgyConfig } from "./agy/index.ts";
+import type { AgyDependencies } from "./agy/index.ts";
 import {
   dialUpstreamWebSocket,
   forwardedHeaders,
@@ -23,7 +28,7 @@ import {
   realtimeWebSocketTarget,
   websocketUrl,
 } from "./realtime.ts";
-import type { RealtimeProviderMode, RealtimeSocketData } from "./realtime.ts";
+import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
 import { mergeCatalog, normalizeCatalog } from "./catalog.ts";
 import { atomicWrite } from "./toml.ts";
 import {
@@ -110,7 +115,11 @@ function compactionMessage(item: Record<string, unknown>): Record<string, unknow
 
 function rewriteCompactionHistory(input: unknown): unknown {
   if (!Array.isArray(input)) return input;
-  return input.map((item) => isRecord(item) && item.type === "compaction" ? compactionMessage(item) : item);
+  return input.map((item) => {
+    if (!isRecord(item) || item.type !== "compaction") return item;
+    // 本地 ocx1 摘要可还原为文本；上游 opaque 摘要必须原样回放给同一上游。
+    return decodeCompactionSummary(item.encrypted_content) ? compactionMessage(item) : item;
+  });
 }
 
 function stripInputImages(value: unknown): unknown {
@@ -129,6 +138,7 @@ function hasCompactionTrigger(input: unknown): boolean {
 function buildCompactionRequest(
   body: Record<string, unknown>,
   upstreamModel: string,
+  stream = false,
 ): Record<string, unknown> {
   const {
     tools: _tools,
@@ -136,7 +146,14 @@ function buildCompactionRequest(
     parallel_tool_calls: _parallelToolCalls,
     additional_tools: _additionalTools,
     stream_options: _streamOptions,
+    include: _include,
+    reasoning: _reasoning,
     text: _text,
+    store: _store,
+    background: _background,
+    previous_response_id: _previousResponseId,
+    conversation: _conversation,
+    prompt_cache_key: _promptCacheKey,
     ...rest
   } = body;
   const input = Array.isArray(body.input)
@@ -146,7 +163,7 @@ function buildCompactionRequest(
   return {
     ...rest,
     model: upstreamModel,
-    stream: false,
+    stream,
     input: [
       ...stripInputImages(rewriteCompactionHistory(input)) as unknown[],
       {
@@ -158,16 +175,187 @@ function buildCompactionRequest(
   };
 }
 
-function responseText(payload: Record<string, unknown>): string {
-  if (!Array.isArray(payload.output)) return "";
-  return payload.output
-    .filter((item) => isRecord(item) && item.type === "message" && Array.isArray(item.content))
-    .flatMap((item) => item.content as unknown[])
-    .flatMap((part) => isRecord(part) && part.type === "output_text" && typeof part.text === "string"
-      ? [part.text]
-      : [])
+function textFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .filter((part) => isRecord(part)
+      && (part.type === "output_text" || part.type === "text")
+      && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("");
+}
+
+function chatCompletionText(payload: Record<string, unknown>): string {
+  if (!Array.isArray(payload.choices)) return "";
+  return payload.choices
+    .filter((choice) => isRecord(choice))
+    .flatMap((choice) => {
+      if (isRecord(choice.message)) return [textFromContent(choice.message.content)];
+      return typeof choice.text === "string" ? [choice.text] : [];
+    })
     .join("")
     .trim();
+}
+
+function responseText(payload: Record<string, unknown>): string {
+  if (Array.isArray(payload.output)) {
+    const canonical = payload.output
+      .filter((item) => isRecord(item) && item.type === "message")
+      .map((item) => textFromContent(item.content))
+      .join("")
+      .trim();
+    if (canonical) return canonical;
+  }
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
+  if (typeof payload.text === "string" && payload.text.trim()) return payload.text.trim();
+  return chatCompletionText(payload);
+}
+
+type ParsedCompactionResponse = {
+  payload: Record<string, unknown>;
+  summary: string;
+  compactionItem?: Record<string, unknown>;
+};
+
+function compactionItemFromPayload(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!Array.isArray(payload.output)) return undefined;
+  const item = payload.output.find((entry) => isRecord(entry)
+    && (entry.type === "compaction" || entry.type === "compaction_summary")
+    && typeof entry.encrypted_content === "string");
+  return isRecord(item) ? { ...item, type: "compaction" } : undefined;
+}
+
+function parseSseFrames(body: string): Record<string, unknown>[] {
+  const frames: Record<string, unknown>[] = [];
+  const blocks = body.split(/\r?\n\r?\n/);
+  for (const block of blocks) {
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (isRecord(parsed)) {
+        const event = block.split(/\r?\n/).find((line) => line.startsWith("event:"))?.slice(6).trim();
+        if (event && typeof parsed.type !== "string") parsed.type = event;
+        frames.push(parsed);
+      }
+    } catch {
+      // 忽略非 JSON 的 SSE 注释/心跳，最终由无摘要错误统一报告。
+    }
+  }
+  return frames;
+}
+
+function parseCompactionResponseBody(body: string): ParsedCompactionResponse {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isRecord(parsed)) throw new Error("compaction response is not an object");
+    return { payload: parsed, summary: responseText(parsed), compactionItem: compactionItemFromPayload(parsed) };
+  }
+
+  const frames = parseSseFrames(body);
+  if (frames.length === 0) throw new Error("compaction response is neither JSON nor SSE");
+  let terminal: Record<string, unknown> | undefined;
+  let completed = false;
+  let failed = false;
+  const deltas: string[] = [];
+  let compactionItem: Record<string, unknown> | undefined;
+  for (const frame of frames) {
+    const type = typeof frame.type === "string" ? frame.type : "";
+    // 失败状态不可被后续文本或成功帧覆盖，避免用残缺摘要替换完整历史。
+    if (type === "error" || type === "response.error" || frame.error
+      || (isRecord(frame.response) && frame.response.error)) failed = true;
+    if (type === "response.output_text.delta" && typeof frame.delta === "string") {
+      deltas.push(frame.delta);
+      continue;
+    }
+    if (type === "response.output_text.done" && typeof frame.text === "string" && deltas.length === 0) {
+      deltas.push(frame.text);
+      continue;
+    }
+    if (type === "response.content_part.done" && isRecord(frame.part) && typeof frame.part.text === "string" && deltas.length === 0) {
+      deltas.push(frame.part.text);
+      continue;
+    }
+    if ((type === "response.output_item.done" || type === "response.output_item.added")
+      && isRecord(frame.item) && deltas.length === 0) {
+      if ((frame.item.type === "compaction" || frame.item.type === "compaction_summary")
+        && typeof frame.item.encrypted_content === "string") {
+        compactionItem = { ...frame.item, type: "compaction" };
+      }
+      const itemText = responseText({ output: [frame.item] });
+      if (itemText) deltas.push(itemText);
+      continue;
+    }
+    if (type === "response.completed" || type === "response.done" || type === "response.failed" || type === "response.incomplete") {
+      if (isRecord(frame.response)) terminal = frame.response;
+      else terminal = frame;
+      if (type === "response.failed" || type === "response.incomplete"
+        || (terminal.status !== undefined && terminal.status !== "completed")) failed = true;
+      else completed = true;
+    }
+    if (Array.isArray(frame.choices)) {
+      for (const choice of frame.choices) {
+        if (!isRecord(choice)) continue;
+        const delta = isRecord(choice.delta) ? choice.delta : choice.message;
+        if (isRecord(delta) && typeof delta.content === "string") deltas.push(delta.content);
+        if (choice.finish_reason === "stop") completed = true;
+        else if (choice.finish_reason !== undefined && choice.finish_reason !== null) failed = true;
+      }
+    }
+  }
+  const summary = deltas.join("").trim() || (terminal ? responseText(terminal) : "");
+  const payload = {
+    object: "response",
+    output: [],
+    ...terminal,
+    // SSE 必须有协议明确的成功终态，已有文本或 [DONE] 均不能证明摘要完整。
+    status: completed && !failed ? "completed" : "failed",
+  };
+  return { payload, summary, compactionItem };
+}
+
+async function readCompactionResponse(response: Response): Promise<ParsedCompactionResponse> {
+  return parseCompactionResponseBody(await response.text());
+}
+
+function isCompletedCompactionPayload(payload: unknown): payload is Record<string, unknown> {
+  if (!isRecord(payload)) return false;
+  if (payload.status !== undefined) return payload.status === "completed";
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) return true;
+  return chatCompletionText(payload).length > 0;
+}
+
+function compactionResponseShape(payload: Record<string, unknown>): string {
+  const topLevel = Object.keys(payload).sort().slice(0, 16).join(",") || "none";
+  const outputTypes = Array.isArray(payload.output)
+    ? payload.output.map((item) => isRecord(item) && typeof item.type === "string" ? item.type : typeof item).join(",") || "none"
+    : "missing";
+  const contentTypes = Array.isArray(payload.output)
+    ? payload.output
+      .filter((item) => isRecord(item) && Array.isArray(item.content))
+      .flatMap((item) => item.content as unknown[])
+      .map((part) => isRecord(part) && typeof part.type === "string" ? part.type : typeof part)
+      .join(",") || "none"
+    : "missing";
+  const summaryTypes = Array.isArray(payload.output)
+    ? payload.output
+      .filter((item) => isRecord(item) && Array.isArray(item.summary))
+      .flatMap((item) => item.summary as unknown[])
+      .map((part) => isRecord(part) && typeof part.type === "string" ? part.type : typeof part)
+      .join(",") || "none"
+    : "missing";
+  const choices = Array.isArray(payload.choices) ? String(payload.choices.length) : "missing";
+  return `top-level=[${topLevel}], output=[${outputTypes}], content=[${contentTypes}], summary=[${summaryTypes}], choices=${choices}`;
+}
+
+function noCompactionSummaryError(message: string, payload: Record<string, unknown>): string {
+  return `${message} (${compactionResponseShape(payload)})`;
 }
 
 function compactUserMessages(input: unknown): string[] {
@@ -205,13 +393,13 @@ function compactV1Output(input: unknown, summary: string): Record<string, unknow
   }));
 }
 
-function syntheticCompactionResponse(
+function syntheticCompactionResult(
   payload: Record<string, unknown>,
   upstreamModel: string,
   summary: string,
-  stream: boolean,
-): Response {
-  const item = {
+  compactionItem?: Record<string, unknown>,
+): { response: Record<string, unknown>; events: Array<{ event: string; data: Record<string, unknown> }> } {
+  const item = compactionItem ?? {
     type: "compaction",
     id: `cmp_${uuid()}`,
     encrypted_content: encodeCompactionSummary(summary),
@@ -225,25 +413,110 @@ function syntheticCompactionResponse(
     output: [item],
     usage: payload.usage ?? null,
   };
-  if (!stream) return Response.json(response);
-
   const created = { ...response, status: "in_progress", output: [], usage: null };
-  const frames = [
-    ["response.created", { type: "response.created", sequence_number: 0, response: created }],
-    ["response.output_item.done", {
-      type: "response.output_item.done",
-      sequence_number: 1,
-      output_index: 0,
-      item,
-    }],
-    ["response.completed", { type: "response.completed", sequence_number: 2, response }],
-  ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+  return {
+    response,
+    events: [
+      { event: "response.created", data: { type: "response.created", sequence_number: 0, response: created } },
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          sequence_number: 1,
+          output_index: 0,
+          item: { ...item, status: "in_progress" },
+        },
+      },
+      {
+        event: "response.output_item.done",
+        data: {
+          type: "response.output_item.done",
+          sequence_number: 2,
+          output_index: 0,
+          item,
+        },
+      },
+      { event: "response.completed", data: { type: "response.completed", sequence_number: 3, response } },
+    ],
+  };
+}
+
+function syntheticCompactionResponse(
+  payload: Record<string, unknown>,
+  upstreamModel: string,
+  summary: string,
+  stream: boolean,
+  compactionItem?: Record<string, unknown>,
+): Response {
+  const result = syntheticCompactionResult(payload, upstreamModel, summary, compactionItem);
+  if (!stream) return Response.json(result.response);
+
+  const frames = result.events
+    .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join("");
   return new Response(`${frames}data: [DONE]\n\n`, {
     headers: {
       "content-type": "text/event-stream",
       "cache-control": "no-cache",
     },
   });
+}
+
+function httpUrlFromWebSocket(url: string): string {
+  const parsed = new URL(url);
+  parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
+  return parsed.href;
+}
+
+async function handleResponsesWebSocketFrame(
+  frame: string,
+  target: { url: string; headers: Record<string, string> },
+): Promise<ResponseFrameAction | null> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(frame);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload)) return null;
+  const model = typeof payload.model === "string" ? payload.model : undefined;
+  if (!model || isGptModel(model)) return null;
+
+  if (hasCompactionTrigger(payload.input)) {
+    const compactionBody = { ...payload };
+    delete compactionBody.type;
+    const headers = new Headers(target.headers);
+    headers.set("accept", "text/event-stream");
+    headers.set("content-type", "application/json");
+    const upstream = await fetch(httpUrlFromWebSocket(target.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildCompactionRequest(compactionBody, model, true)),
+      redirect: "manual",
+    });
+    if (!upstream.ok) throw new Error(`Responses WebSocket compaction upstream returned HTTP ${upstream.status}`);
+    const result = await readCompactionResponse(upstream);
+    const payloadResult = result.payload;
+    if (!isCompletedCompactionPayload(payloadResult) || payloadResult.error) {
+      throw new Error("Responses WebSocket compaction upstream did not complete");
+    }
+    const summary = result.summary || responseText(payloadResult);
+    if (!summary && !result.compactionItem) throw new Error(noCompactionSummaryError(
+      "Responses WebSocket compaction upstream returned no summary text",
+      payloadResult,
+    ));
+    const synthetic = syntheticCompactionResult(payloadResult, model, summary, result.compactionItem);
+    return {
+      kind: "events",
+      events: synthetic.events.map(({ data }) => JSON.stringify(data)),
+    };
+  }
+
+  if (Array.isArray(payload.input) && payload.input.some((item) => isRecord(item) && item.type === "compaction")) {
+    payload.input = rewriteCompactionHistory(payload.input);
+    return { kind: "forward", frame: JSON.stringify(payload) };
+  }
+  return null;
 }
 
 function compactionError(message: string): Response {
@@ -457,6 +730,22 @@ export function isCodebuddyResponsesWebSocket(request: Request, config: GatewayC
     && isCodebuddyModel(modelFromRoutingHint(request));
 }
 
+/** Antigravity Responses 只走 HTTP/SSE，WebSocket 升级一律本地拒绝。 */
+export function isAgyResponsesWebSocket(request: Request, config: GatewayConfig): boolean {
+  return agyEnabled(config)
+    && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket"
+    && isAgyModel(modelFromRoutingHint(request));
+}
+
+/** Qoder 使用 HTTP/SSE 转换，不能将授权和请求送入通用 WebSocket 上游。 */
+export function isQoderResponsesWebSocket(request: Request, config: GatewayConfig): boolean {
+  return qoderEnabled(config)
+    && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket"
+    && isQoderModel(modelFromRoutingHint(request));
+}
+
 /**
  * Responses over WebSocket 的转发目标：Codex 试探（GET + upgrade）带 x-codex-routing-hint，
  * 据此选上游；realtime 保留路径返回 null（维持原有 426 行为）。
@@ -476,6 +765,7 @@ export function responsesWebSocketTarget(
   const hintedModel = modelFromRoutingHint(request);
   if (isZcodeResponsesWebSocket(request, config)) return null;
   if (isCodebuddyResponsesWebSocket(request, config)) return null;
+  if (isAgyResponsesWebSocket(request, config)) return null;
   const route = config.upstreamOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
     : decideThreadRoute(request, hintedModel, prefix, cpaThreads, cpaTurns);
@@ -574,6 +864,8 @@ function modelCatalogResponse(
       object: "model",
       owned_by: zcodeEnabled && isZcodeModel(model.slug) ? "zcode"
         : isCodebuddyModel(model.slug) ? "codebuddy"
+        : isQoderModel(model.slug) ? "qoder"
+        : isAgyModel(model.slug) ? "agy"
         : owner === "mixed"
         ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
         : owner,
@@ -621,12 +913,16 @@ async function catalogModelsResponse(
   clientVersionFile?: string,
   zcodeCatalog?: ModelCatalog,
   codebuddyCatalog?: ModelCatalog,
+  qoderCatalog?: ModelCatalog,
+  agyCatalog?: ModelCatalog,
 ): Promise<Response> {
   const incomingUrl = new URL(request.url);
   const clientVersion = incomingUrl.searchParams.get("client_version");
   const respond = (catalog: ModelCatalog, owner: "cliproxy" | "mixed" | "openai") => {
     let merged = zcodeCatalog ? mergeZcodeCatalog(catalog, zcodeCatalog) : catalog;
     if (codebuddyCatalog) merged = mergeCodebuddyCatalog(merged, codebuddyCatalog);
+    if (qoderCatalog) merged = mergeQoderCatalog(merged, qoderCatalog);
+    if (agyCatalog) merged = mergeAgyCatalog(merged, agyCatalog);
     return modelCatalogResponse(merged, clientVersion, owner, config.prefix, Boolean(zcodeCatalog));
   };
   if (config.upstreamOnly === true) {
@@ -665,7 +961,7 @@ async function catalogModelsResponse(
     }
   }
   if (!native) {
-    if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length) {
+    if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length || qoderCatalog?.models.length || agyCatalog?.models.length) {
       let base: ModelCatalog = { models: [] };
       try { base = mergeDynamicCatalog(base, config); } catch { /* 有效 ZCode/CodeBuddy 目录独立可用。 */ }
       return respond(base, config.upstreamOnly ? "cliproxy" : "mixed");
@@ -699,11 +995,17 @@ export function createGatewayHandler(
   zcodeDependencies?: ZcodeDependencies,
   processLog?: ProcessLogTarget,
   codebuddyDependencies?: CodebuddyDependencies,
+  qoderDependencies?: QoderDependencies,
+  agyDependencies?: AgyDependencies,
 ): GatewayHandler {
   const handleZcode = createZcodeAdapter(config, { ...zcodeDependencies, processLog });
   const handleCodebuddy = createCodebuddyAdapter(config, { ...codebuddyDependencies, processLog });
+  const handleQoder = createQoderAdapter(config, { ...qoderDependencies, processLog });
+  const handleAgy = createAgyAdapter(config, { ...agyDependencies, processLog });
   const zcodeRequests = new WeakSet<Request>();
   const codebuddyRequests = new WeakSet<Request>();
+  const qoderRequests = new WeakSet<Request>();
+  const agyRequests = new WeakSet<Request>();
   const preparedBodies = new WeakMap<Request, { bytes?: ArrayBuffer; json?: Record<string, unknown> }>();
   /** 本次请求实际打到哪个上游。日志包装层在 handleCore 之外，只能这样把它取回来。 */
   const upstreams = new WeakMap<Request, string>();
@@ -763,6 +1065,8 @@ export function createGatewayHandler(
         request, config, clientVersionFile,
         zcodeEnabled(config) ? await handleZcode.catalog() : undefined,
         codebuddyEnabled(config) ? await handleCodebuddy.catalog() : undefined,
+        qoderEnabled(config) ? await handleQoder.catalog() : undefined,
+        agyEnabled(config) ? await handleAgy.catalog() : undefined,
       );
     }
 
@@ -771,13 +1075,25 @@ export function createGatewayHandler(
     const hintedModel = modelFromRoutingHint(request);
     if (isZcodeResponsesWebSocket(request, config)) return websocketNotSupportedResponse("zcode-http-only");
     if (isCodebuddyResponsesWebSocket(request, config)) return websocketNotSupportedResponse("codebuddy-http-only");
-    if ((zcodeEnabled(config) || codebuddyEnabled(config)) && (responsePath || compactPath) && request.method === "POST") {
+    if (isQoderResponsesWebSocket(request, config)) return websocketNotSupportedResponse("qoder-http-only");
+    if (isAgyResponsesWebSocket(request, config)) return websocketNotSupportedResponse("agy-http-only");
+    if ((zcodeEnabled(config) || codebuddyEnabled(config) || qoderEnabled(config) || agyEnabled(config)) && (responsePath || compactPath) && request.method === "POST") {
       const bytes = await readBodyBytes(request);
       let json: Record<string, unknown> | undefined;
       try { json = decodeJsonBody(bytes, request.headers); }
       catch (error) {
         if (isZcodeModel(hintedModel)) return zcodeError(400, error instanceof Error ? error.message : "无效请求正文");
         if (isCodebuddyModel(hintedModel)) return codebuddyError(400, error instanceof Error ? error.message : "无效请求正文");
+        if (isAgyModel(hintedModel)) return agyError(400, error instanceof Error ? error.message : "无效请求正文");
+        if (isQoderModel(hintedModel)) {
+          // 解析失败的正文也属于 Qoder 流量，不进入通用原始正文日志。
+          qoderRequests.add(request);
+          logGatewayError(processLog, {
+            requestTime: localTime(), method: request.method, url: incomingUrl.pathname,
+            status: 400, message: "Qoder 请求正文无效，请发送有效 JSON 对象。",
+          });
+          return qoderError(400, "Qoder 请求正文无效，请发送有效 JSON 对象。");
+        }
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
@@ -788,15 +1104,32 @@ export function createGatewayHandler(
         if (compactPath || hasCompactionTrigger(json.input)) {
           const input = json;
           return handleZcode.forward(request, buildCompactionRequest(input, String(model)), (payload) => {
-            if (payload.status !== "completed") return compactionError("ZCode 上游未完成上下文压缩");
+            if (!isCompletedCompactionPayload(payload)) return compactionError("ZCode 上游未完成上下文压缩");
             const summary = responseText(payload);
-            if (!summary) return compactionError("ZCode 上游没有返回压缩摘要");
+            if (!summary) return compactionError(noCompactionSummaryError("ZCode 上游没有返回压缩摘要", payload));
             return compactPath ? Response.json({ output: compactV1Output(input.input, summary) })
               : syntheticCompactionResponse(payload, String(model), summary, input.stream === true);
           });
         }
         json.input = rewriteCompactionHistory(json.input);
         return handleZcode.forward(request, json);
+      }
+      if (qoderEnabled(config) && isQoderModel(model)) {
+        qoderRequests.add(request);
+        if (!json) return qoderError(400, "Qoder Responses 请求必须是 JSON 对象");
+        json = { ...json, model };
+        if (compactPath || hasCompactionTrigger(json.input)) {
+          const input = json;
+          return handleQoder.forward(request, buildCompactionRequest(input, String(model)), (payload) => {
+            if (!isCompletedCompactionPayload(payload)) return compactionError("Qoder 上游未完成上下文压缩");
+            const summary = responseText(payload);
+            if (!summary) return compactionError(noCompactionSummaryError("Qoder 上游没有返回压缩摘要", payload));
+            return compactPath ? Response.json({ output: compactV1Output(input.input, summary) })
+              : syntheticCompactionResponse(payload, String(model), summary, input.stream === true);
+          });
+        }
+        json.input = rewriteCompactionHistory(json.input);
+        return handleQoder.forward(request, json);
       }
       if (codebuddyEnabled(config) && isCodebuddyModel(model)) {
         codebuddyRequests.add(request);
@@ -805,15 +1138,32 @@ export function createGatewayHandler(
         if (compactPath || hasCompactionTrigger(json.input)) {
           const input = json;
           return handleCodebuddy.forward(request, buildCompactionRequest(input, String(model)), (payload) => {
-            if (payload.status !== "completed") return compactionError("CodeBuddy 上游未完成上下文压缩");
+            if (!isCompletedCompactionPayload(payload)) return compactionError("CodeBuddy 上游未完成上下文压缩");
             const summary = responseText(payload);
-            if (!summary) return compactionError("CodeBuddy 上游没有返回压缩摘要");
+            if (!summary) return compactionError(noCompactionSummaryError("CodeBuddy 上游没有返回压缩摘要", payload));
             return compactPath ? Response.json({ output: compactV1Output(input.input, summary) })
               : syntheticCompactionResponse(payload, String(model), summary, input.stream === true);
           });
         }
         json.input = rewriteCompactionHistory(json.input);
         return handleCodebuddy.forward(request, json);
+      }
+      if (agyEnabled(config) && isAgyModel(model)) {
+        agyRequests.add(request);
+        if (!json) return agyError(400, "Antigravity Responses 请求必须是 JSON 对象");
+        json = { ...json, model };
+        if (compactPath || hasCompactionTrigger(json.input)) {
+          const input = json;
+          return handleAgy.forward(request, buildCompactionRequest(input, String(model)), (payload) => {
+            if (!isCompletedCompactionPayload(payload)) return compactionError("Antigravity 上游未完成上下文压缩");
+            const summary = responseText(payload);
+            if (!summary) return compactionError(noCompactionSummaryError("Antigravity 上游没有返回压缩摘要", payload));
+            return compactPath ? Response.json({ output: compactV1Output(input.input, summary) })
+              : syntheticCompactionResponse(payload, String(model), summary, input.stream === true);
+          });
+        }
+        json.input = rewriteCompactionHistory(json.input);
+        return handleAgy.forward(request, json);
       }
     }
 
@@ -832,7 +1182,11 @@ export function createGatewayHandler(
       return websocketNotSupportedResponse();
     }
 
-    if (config.upstreamOnly === true) {
+    // upstream-only 仍需经过下面的 Responses 路由：非 GPT 模型的 v1/v2 压缩需要
+    // 在网关重写并合成 compaction 条目，且下一轮要把 ocx1 摘要还原成可读文本。
+    // 其他路径继续直通，避免把模型流量无谓地改造成另一套协议。
+    const isUpstreamOnlyResponses = request.method === "POST" && (responsePath || compactPath);
+    if (config.upstreamOnly === true && !isUpstreamOnlyResponses) {
       const headers = copyRequestHeaders(request, { kind: "cliproxy", upstreamModel: "" }, apiKey, prefix);
       const contentEncoding = request.headers.get("content-encoding");
       if (contentEncoding) headers.set("content-encoding", contentEncoding);
@@ -867,16 +1221,28 @@ export function createGatewayHandler(
 
     // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
     const hinted = modelFromRoutingHint(request);
-    let route = hinted === undefined ? undefined : decideThreadRoute(request, hinted, prefix, cpaThreads, cpaTurns);
+    let route = config.upstreamOnly === true || hinted === undefined
+      ? undefined
+      : decideThreadRoute(request, hinted, prefix, cpaThreads, cpaTurns);
     let bytes: ArrayBuffer | undefined;
     let json: Record<string, unknown> | undefined;
     try {
       bytes = preparedBodies.get(request)?.bytes ?? await readBodyBytes(request);
       if (route === undefined || route.kind === "cliproxy") {
         json = preparedBodies.get(request)?.json ?? decodeJsonBody(bytes, request.headers);
-        route ??= decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+        route ??= config.upstreamOnly === true
+          ? {
+              kind: "cliproxy",
+              upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
+            }
+          : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
       }
-      route ??= decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+      route ??= config.upstreamOnly === true
+        ? {
+            kind: "cliproxy",
+            upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
+          }
+        : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
@@ -904,11 +1270,11 @@ export function createGatewayHandler(
       if (route.kind === "cliproxy" && !isGptModel(route.upstreamModel) && json && (isCompactV1 || isCompactV2)) {
         upstreamUrl = `${normalizeBaseUrl(config.upstreamBaseUrl)}/responses`;
         upstreams.set(request, upstreamUrl);
-        headers.set("accept", "application/json");
+        headers.set("accept", isCompactV2 ? "text/event-stream" : "application/json");
         const upstream = await fetch(upstreamUrl, {
           method: "POST",
           headers,
-          body: JSON.stringify(buildCompactionRequest(json, route.upstreamModel)),
+          body: JSON.stringify(buildCompactionRequest(json, route.upstreamModel, isCompactV2)),
           redirect: "manual",
           signal: request.signal,
         });
@@ -920,19 +1286,25 @@ export function createGatewayHandler(
           });
         }
 
-        let payload: unknown;
+        let parsed: ParsedCompactionResponse;
         try {
-          payload = await upstream.json();
+          parsed = await readCompactionResponse(upstream);
         } catch {
-          return compactionError("Upstream compaction returned invalid JSON");
+          return compactionError("Upstream compaction returned invalid JSON or SSE");
         }
-        if (!isRecord(payload) || payload.error || payload.status !== "completed") {
+        const payload = parsed.payload;
+        if (!isCompletedCompactionPayload(payload) || payload.error) {
           return compactionError(`Upstream compaction did not complete (status: ${String(isRecord(payload) ? payload.status ?? "unknown" : "unknown")})`);
         }
-        const summary = responseText(payload);
-        if (!summary) return compactionError("Upstream compaction returned no summary text");
-        if (isCompactV1) return Response.json({ output: compactV1Output(json.input, summary) });
-        return syntheticCompactionResponse(payload, route.upstreamModel, summary, json.stream === true);
+        const summary = parsed.summary || responseText(payload);
+        if (!summary && !parsed.compactionItem) {
+          return compactionError(noCompactionSummaryError("Upstream compaction returned no summary text", payload));
+        }
+        if (isCompactV1) {
+          if (!summary) return compactionError("Upstream compact response did not contain text for v1 history replacement");
+          return Response.json({ output: compactV1Output(json.input, summary) });
+        }
+        return syntheticCompactionResponse(payload, route.upstreamModel, summary, json.stream === true, parsed.compactionItem);
       }
 
       const upstream = await fetch(upstreamUrl, {
@@ -961,7 +1333,7 @@ export function createGatewayHandler(
     }
   };
 
-  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); } });
+  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); } });
 
   return Object.assign(async (request: Request): Promise<Response> => {
     const requestTime = localTime();
@@ -1006,8 +1378,9 @@ export function createGatewayHandler(
     }
 
     const response = await handleCore(request);
-    if (zcodeRequests.has(request) || codebuddyRequests.has(request)) return response;
+    if (zcodeRequests.has(request) || codebuddyRequests.has(request) || qoderRequests.has(request) || agyRequests.has(request)) return response;
     const url = incoming.pathname + incoming.search;
+    const qoderNegotiation = isQoderModel(modelFromRoutingHint(request));
 
     // 必须异步消费 clone：await 会读完整个响应流，令 SSE 退化成一次性返回。
     void response.clone().text().then((resBody) => {
@@ -1015,14 +1388,14 @@ export function createGatewayHandler(
       logExchange(sink, group, {
         requestTime,
         method: request.method,
-        url,
+        url: qoderNegotiation ? incoming.pathname : url,
         reqHeaders: request.headers,
         reqBody,
         status: response.status,
         resHeaders: response.headers,
         resBody,
         durationMs,
-      });
+      }, qoderNegotiation ? "qoder" : "cliproxy");
       // 进程日志里每条请求恰好一行：426 是协议协商（客户端会改用 HTTPS/SSE 重试），
       // 不算故障，但仍是完成的一次请求，因此走摘要而不是错误摘要。
       if (response.status >= 400 && response.status !== 426) {
@@ -1049,7 +1422,7 @@ export function createGatewayHandler(
       // Logging must never break the request flow.
     });
     return response;
-  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); } });
+  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); } });
 }
 
 /**
@@ -1066,6 +1439,7 @@ async function bridgeUpstreamWebSocket(
     prefix?: string;
     pinCpaThread?: () => void;
     noteTurnId?: (turnId: string) => void;
+    handleResponseFrame?: (frame: string) => Promise<ResponseFrameAction | null>;
   },
   sink: RequestLogSink | undefined,
   dialFailureResponse: (error: Error) => Response,
@@ -1090,6 +1464,7 @@ async function bridgeUpstreamWebSocket(
     prefix: target.prefix,
     pinCpaThread: target.pinCpaThread,
     noteTurnId: target.noteTurnId,
+    handleResponseFrame: target.handleResponseFrame,
     clientUrl: incoming.pathname + incoming.search,
     requestTime: localTime(),
     startedAt,
@@ -1130,16 +1505,20 @@ export function startGateway(
   zcodeDependencies?: ZcodeDependencies,
   processLog?: ProcessLogTarget,
   codebuddyDependencies?: CodebuddyDependencies,
+  qoderDependencies?: QoderDependencies,
+  agyDependencies?: AgyDependencies,
 ): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
   validateZcodeConfig(config);
   validateCodebuddyConfig(config);
+  validateQoderConfig(config);
+  validateAgyConfig(config);
   const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
   const cpaThreads = new Set<string>();
   const cpaTurns = new Set<string>();
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies);
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies, qoderDependencies, agyDependencies);
   let server: Bun.Server<RealtimeSocketData>;
   try {
     server = Bun.serve<RealtimeSocketData>({
@@ -1156,7 +1535,9 @@ export function startGateway(
         }
         if (incoming.pathname === "/zai" || incoming.pathname.startsWith("/zai/")
           || isZcodeResponsesWebSocket(request, config)
-          || isCodebuddyResponsesWebSocket(request, config)) return handler(request);
+          || isCodebuddyResponsesWebSocket(request, config)
+          || isQoderResponsesWebSocket(request, config)
+          || isAgyResponsesWebSocket(request, config)) return handler(request);
         const target = realtimeWebSocketTarget(request, config);
         if (target) {
           const accessError = realtimeAccessError(request, realtimeProviderMode);
@@ -1190,6 +1571,9 @@ export function startGateway(
               ...wsTarget,
               prefix: config.upstreamOnly === true ? "" : config.prefix || "cliproxy/",
               pinCpaThread: threadId ? () => rememberCpaThread(cpaThreads, threadId) : undefined,
+              handleResponseFrame: wsTarget.routeKind === "cliproxy"
+                ? (frame) => handleResponsesWebSocketFrame(frame, wsTarget)
+                : undefined,
               // official 连接不记 turn：官方会话的图片请求本就该走官方；若该连接后续
               // 迁移到 cliproxy（pinCpaThread 重连），turn 帧会在新连接上重新发送并被记录。
               noteTurnId: wsTarget.routeKind === "cliproxy"

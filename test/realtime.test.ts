@@ -496,6 +496,16 @@ test("HTTP-only model families are refused locally on every bridged socket", () 
     "HTTP-only frames must not leak to the CLIProxy upstream either",
   );
   assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "official", "cliproxy/"),
+    { kind: "reject", model: "agy/gemini-3.8-flash-high", family: "agy" },
+    "agy frame on an official socket must never reach the ChatGPT backend",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "cliproxy", "cliproxy/"),
+    { kind: "reject", model: "agy/gemini-3.8-flash-high", family: "agy" },
+    "agy frame must not leak to the CLIProxy upstream either",
+  );
+  assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/"),
     { kind: "reject", model: "codebuddy/deepseek-v4.1-flash", family: "codebuddy" },
     "legacy region-less codebuddy/ slugs are refused as well",
@@ -980,6 +990,166 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     gateway.stop(true);
     upstream.stop(true);
     fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("cliproxy WebSocket compacts v2 frames and replays the summary without SSE downgrade", async () => {
+  const upstreamMessages: string[] = [];
+  const summaryRequests: Record<string, unknown>[] = [];
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request, server) {
+      if (request.method === "POST" && new URL(request.url).pathname === "/v1/responses") {
+        summaryRequests.push(await request.json() as Record<string, unknown>);
+        return Response.json({
+          id: "resp_summary",
+          status: "completed",
+          output_text: "WebSocket 摘要",
+        });
+      }
+      if (server.upgrade(request)) return;
+      return new Response("upgrade failed", { status: 400 });
+    },
+    websocket: {
+      message(_ws, message) {
+        upstreamMessages.push(typeof message === "string" ? message : new TextDecoder().decode(message));
+      },
+    },
+  });
+  const gateway = startGateway({
+    ...config("https://official.invalid/v1"),
+    upstreamBaseUrl: `${upstream.url}v1`,
+  }, "builtin");
+  const url = new URL("/v1/responses", gateway.url);
+  url.protocol = "ws:";
+  const ClientWebSocket = WebSocket as unknown as new (
+    url: string | URL,
+    options: Bun.WebSocketOptions,
+  ) => WebSocket;
+  const client = new ClientWebSocket(url, {
+    headers: {
+      authorization: "Bearer official-oauth",
+      "x-codex-routing-hint": "model=cliproxy/free/space-bunny-alpha",
+    },
+  });
+  try {
+    const events = await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+      const received: Record<string, unknown>[] = [];
+      const timer = setTimeout(() => reject(new Error("cliproxy WebSocket compaction timed out")), 3_000);
+      client.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("cliproxy WebSocket compaction failed"));
+      };
+      client.onopen = () => client.send(JSON.stringify({
+        type: "response.create",
+        model: "cliproxy/free/space-bunny-alpha",
+        input: [{ type: "message", role: "user", content: "旧上下文" }, { type: "compaction_trigger" }],
+      }));
+      client.onmessage = (event) => {
+        const data = JSON.parse(String(event.data)) as Record<string, unknown>;
+        received.push(data);
+        if (data.type === "response.completed") {
+          clearTimeout(timer);
+          resolve(received);
+        }
+      };
+    });
+    const completed = events.find((event) => event.type === "response.completed");
+    assert.ok(completed);
+    const response = completed.response as { output: Array<{ type: string; encrypted_content: string }> };
+    assert.equal(response.output.length, 1);
+    assert.equal(response.output[0].type, "compaction");
+    assert.equal(Buffer.from(response.output[0].encrypted_content.slice(5), "base64").toString("utf8"), "WebSocket 摘要");
+    assert.equal(summaryRequests.length, 1);
+    assert.equal(summaryRequests[0].model, "free/space-bunny-alpha");
+    assert.equal(summaryRequests[0].stream, true);
+    assert.equal(upstreamMessages.length, 0, "compaction_trigger 不得原样转发到 cliproxy WebSocket");
+
+    const replay = response.output[0];
+    client.send(JSON.stringify({
+      type: "response.create",
+      model: "cliproxy/free/space-bunny-alpha",
+      input: [replay],
+    }));
+    for (let attempt = 0; attempt < 30 && upstreamMessages.length === 0; attempt++) await Bun.sleep(10);
+    assert.equal(upstreamMessages.length, 1);
+    const replayFrame = JSON.parse(upstreamMessages[0]) as { input: Array<{ type: string; content: Array<{ text: string }> }> };
+    assert.equal(replayFrame.input[0].type, "message");
+    assert.match(replayFrame.input[0].content[0].text, /WebSocket 摘要/);
+  } finally {
+    client.close();
+    gateway.stop(true);
+    upstream.stop(true);
+  }
+});
+
+test("cliproxy WebSocket closes cleanly when compaction upstream returns an empty response", async () => {
+  const upstreamMessages: string[] = [];
+  const upstream = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request, server) {
+      if (request.method === "POST" && new URL(request.url).pathname === "/v1/responses") {
+        return Response.json({
+          background: false,
+          created_at: 1,
+          error: null,
+          id: "resp-empty",
+          incomplete_details: null,
+          model: "free/space-bunny-alpha",
+          object: "response",
+          status: "completed",
+        });
+      }
+      if (server.upgrade(request)) return;
+      return new Response("upgrade failed", { status: 400 });
+    },
+    websocket: {
+      message(_ws, message) {
+        upstreamMessages.push(typeof message === "string" ? message : new TextDecoder().decode(message));
+      },
+    },
+  });
+  const gateway = startGateway({
+    ...config("https://official.invalid/v1"),
+    upstreamBaseUrl: `${upstream.url}v1`,
+  }, "builtin");
+  const url = new URL("/v1/responses", gateway.url);
+  url.protocol = "ws:";
+  const ClientWebSocket = WebSocket as unknown as new (
+    url: string | URL,
+    options: Bun.WebSocketOptions,
+  ) => WebSocket;
+  const client = new ClientWebSocket(url, {
+    headers: {
+      authorization: "Bearer official-oauth",
+      "x-codex-routing-hint": "model=cliproxy/free/space-bunny-alpha",
+    },
+  });
+  try {
+    const closeCode = await new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("empty compaction response did not close WebSocket")), 3_000);
+      client.onerror = () => {
+        clearTimeout(timer);
+        reject(new Error("empty compaction response WebSocket failed"));
+      };
+      client.onclose = (event) => {
+        clearTimeout(timer);
+        resolve(event.code);
+      };
+      client.onopen = () => client.send(JSON.stringify({
+        type: "response.create",
+        model: "cliproxy/free/space-bunny-alpha",
+        input: [{ type: "compaction_trigger" }],
+      }));
+    });
+    assert.equal(closeCode, 1011);
+    assert.equal(upstreamMessages.length, 0, "failed compaction must not reach upstream WebSocket");
+  } finally {
+    client.close();
+    gateway.stop(true);
+    upstream.stop(true);
   }
 });
 

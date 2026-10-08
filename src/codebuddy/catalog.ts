@@ -90,14 +90,14 @@ export function isFreeCredits(credits: unknown): boolean {
 }
 
 /**
- * 产品×地域展示标签：`INTL-C/GPT-5.6-Luna (x0.14)`、`CN-W/Auto (free)`。
- * W 表示 WorkBuddy（work 产品），C 表示 CodeBuddy CLI（cli 产品）；两族同名模型
+ * 产品×地域展示标签：`CB-INTL/GPT-5.6-Luna (x0.14)`、`WB-CN/Auto (free)`。
+ * WB 表示 WorkBuddy（work 产品），CB 表示 CodeBuddy CLI（cli 产品）；两族同名模型
  * 只在 display_name 上区分，Codex 选择框据此避免出现无法分辨的重复条目。
  */
 export function displayLabel(profile: CodebuddyProfile): string {
   const region = profileRegion(profile) === "intl" ? "INTL" : "CN";
-  const product = profileProduct(profile) === "work" ? "W" : "C";
-  return `${region}-${product}`;
+  const product = profileProduct(profile) === "work" ? "WB" : "CB";
+  return `${product}-${region}`;
 }
 
 /** 产品×地域标签 + 倍率并入 display_name；倍率缺失时不加括号后缀（不阻断目录构建）。 */

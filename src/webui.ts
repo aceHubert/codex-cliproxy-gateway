@@ -15,8 +15,12 @@ import {
 import { restartLaunchAgent } from "./launchd.ts";
 import { realPathOrResolve, resolvePaths } from "./paths.ts";
 import { isRequestLogName, safeLogPath } from "./request-log.ts";
-import { atomicWrite } from "./toml.ts";
+import { atomicWrite, readRootTomlString } from "./toml.ts";
 import { codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
+import { agyCredentialsPresent, defaultAgyCredentialFile } from "./agy/credentials.ts";
+import {
+  qoderActiveSources,
+} from "./qoder/credentials.ts";
 import { zcodeConfigPresent } from "./zcode/config.ts";
 import {
   configuredUpstreamType,
@@ -40,7 +44,7 @@ import type { GatewayConfig, ResolvedPaths } from "./types.ts";
  * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.codex-cliproxy-gateway/ui-token（0600）。
  *
  * 除「拉取模型」外，UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
- * codebuddyCredentialsPresent）：只 fs.existsSync 判断 ~/.zcode 与 .info 是否存在，
+ * codebuddyCredentialsPresent / qoderCredentialsPresent）：只探测本地配置与认证文件是否存在，
  * 不打开、不解析、不返回凭据内容，响应里只有布尔值。
  */
 
@@ -66,11 +70,19 @@ export interface WebUiContext {
   scheduleRestart?: (paths: ResolvedPaths) => void;
   /**
    * provider 本地配置探测的注入路径（测试用）：缺省按 paths.home 解析 ~/.zcode、
-   * 按平台默认位置解析 CodeBuddy/WorkBuddy 认证目录。只影响存在性探测，不读取凭据内容。
+   * 按平台默认位置解析 CodeBuddy/WorkBuddy 认证目录；Qoder 国际版尊重
+   * QODER_CONFIG_DIR，国内版尊重 QODERCN_CONFIG_DIR。只影响存在性探测，不读取凭据内容。
    */
   providerDeps?: {
     zcodeHome?: string;
     codebuddyAuthDir?: string;
+    qoderConfigDir?: string;
+    qoderCnConfigDir?: string;
+    /** 桌面版数据目录注入；null 显式禁用桌面检测，undefined 用平台默认。 */
+    qoderDesktopDir?: string | null;
+    qoderCnDesktopDir?: string | null;
+    /** Antigravity 凭据文件注入；缺省按平台默认位置探测。 */
+    agyCredentialFile?: string;
   };
   /**
    * 模型选择功能的测试注入点：上游 key 读取与「停止 Codex app-server」。
@@ -287,8 +299,74 @@ function faviconResponse(): Response {
   });
 }
 
-function statusResponse(config: GatewayConfig): Response {
-  const upstreamOnly = config.upstreamOnly === true;
+/** 手动模式（--manual-codex-config）待配置键的展示条目：期望值 + 用户 config.toml 当前值。 */
+interface ManualCodexKeyRow {
+  key: string;
+  expected: string;
+  current: string | null;
+  matches: boolean;
+}
+
+/**
+ * 读 state.json 的 codexConfigManaged：缺省、文件缺失或解析失败一律按托管（true）处理，
+ * 与 CLI 的旧 state 兼容语义一致。webui 不反向依赖 cli.ts，字段读取在本地完成。
+ */
+function readCodexConfigManaged(stateFile: string): boolean {
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { codexConfigManaged?: unknown };
+    return state.codexConfigManaged !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 手动模式的 config.toml 配置指引（与 CLI install / models --sync 的提示同源同条件）：
+ * 3 个服务键 = 网关地址；static 目录激活（upstreamOnly 且有已选模型）时追加
+ * model_catalog_json = catalogPath；非 static 但用户 toml 仍残留该键时提示删除。
+ * 只读取 4 个受管键做比对，URL 类当前值过 sanitizeUrlValue，不回显 toml 其他内容。
+ */
+function manualCodexConfigGuidance(
+  paths: ResolvedPaths,
+  config: GatewayConfig,
+): {
+  gatewayBaseUrl: string;
+  staticCatalogActive: boolean;
+  removeModelCatalogJson: boolean;
+  keys: ManualCodexKeyRow[];
+} {
+  const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
+  const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
+  const staticCatalogActive = config.upstreamOnly === true
+    && Array.isArray(config.selectedModels) && config.selectedModels.length > 0;
+  const configuredCatalog = readRootTomlString(source, "model_catalog_json");
+  const serviceKeys = ["openai_base_url", "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url"];
+  const keys: ManualCodexKeyRow[] = serviceKeys.map((key) => {
+    const current = readRootTomlString(source, key);
+    return {
+      key,
+      expected: gatewayBaseUrl,
+      current: current === undefined ? null : String(sanitizeUrlValue(current)),
+      matches: current === gatewayBaseUrl,
+    };
+  });
+  if (staticCatalogActive) {
+    keys.push({
+      key: "model_catalog_json",
+      expected: config.catalogPath,
+      current: configuredCatalog === undefined ? null : String(sanitizeUrlValue(configuredCatalog)),
+      matches: configuredCatalog === config.catalogPath,
+    });
+  }
+  return {
+    gatewayBaseUrl: String(sanitizeUrlValue(gatewayBaseUrl)),
+    staticCatalogActive,
+    removeModelCatalogJson: !staticCatalogActive && configuredCatalog !== undefined,
+    keys,
+  };
+}
+
+function statusResponse(config: GatewayConfig): Response {  const upstreamOnly = config.upstreamOnly === true;
   // URL query 可能携带 token：对外展示与审计同规则，只保留 origin 与路径。
   const upstreamBase = sanitizeUrlValue(config.upstreamBaseUrl);
   const officialBase = sanitizeUrlValue(config.officialBaseUrl);
@@ -309,12 +387,29 @@ function statusResponse(config: GatewayConfig): Response {
   });
 }
 
-function configResponse(paths: ResolvedPaths, providerDeps?: WebUiContext["providerDeps"]): Response {
+function configResponse(
+  paths: ResolvedPaths,
+  providerDeps?: WebUiContext["providerDeps"],
+  instanceOnly = false,
+): Response {
   const live = readGatewayConfigFile(paths.gatewayConfig);
+  // 管理模式来自安装 state；临时实例（serve --config）没有安装语义，按托管展示。
+  const codexConfigManaged = instanceOnly ? true : readCodexConfigManaged(paths.stateFile);
+  // Qoder 只读来源：按网关实际加载顺序（CLI 优先，缺失回退桌面版）返回当前生效项。
+  const qoderSources = qoderActiveSources({
+    intlConfigDir: providerDeps?.qoderConfigDir,
+    cnConfigDir: providerDeps?.qoderCnConfigDir,
+    intlDesktopDir: providerDeps?.qoderDesktopDir,
+    cnDesktopDir: providerDeps?.qoderCnDesktopDir,
+    home: paths.home,
+  });
   return Response.json({
     editable: {
       zcode: live.zcode === true,
       codebuddy: live.codebuddy === true,
+      codebuddyRegion: live.codebuddyRegion ?? "auto",
+      qoder: live.qoder === true,
+      agy: live.agy === true,
       requestLogging: live.requestLogging === true,
       logDir: live.logDir || path.join(path.dirname(live.catalogPath), "logs"),
       maxRequestLogs: live.maxRequestLogs ?? 0,
@@ -326,6 +421,10 @@ function configResponse(paths: ResolvedPaths, providerDeps?: WebUiContext["provi
     detected: {
       zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
       codebuddy: codebuddyCredentialsPresent(providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory()),
+      // 当前实际可加载任一地域凭据即显示开关；检测只看文件存在性，不读内容。
+      qoder: qoderSources.length > 0,
+      qoderSources,
+      agy: agyCredentialsPresent(providerDeps?.agyCredentialFile ?? defaultAgyCredentialFile(paths.home)),
     },
     readonly: {
       upstreamBaseUrl: sanitizeUrlValue(live.upstreamBaseUrl),
@@ -339,6 +438,10 @@ function configResponse(paths: ResolvedPaths, providerDeps?: WebUiContext["provi
       prefix: live.prefix,
       officialBaseUrl: sanitizeUrlValue(live.officialBaseUrl),
       catalogPath: live.catalogPath,
+      /** config.toml 管理模式：true = codex-cliproxy 托管受管键，false = 手动（--manual-codex-config）。 */
+      codexConfigManaged,
+      /** 仅手动模式返回：待配置键的期望值与用户 config.toml 当前值比对。托管模式无此字段。 */
+      ...(codexConfigManaged ? {} : { manualCodexConfig: manualCodexConfigGuidance(paths, live) }),
     },
     configVersion: live.configVersion ?? GATEWAY_CONFIG_VERSION,
   });
@@ -459,7 +562,7 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
 
   if (route === "config" && request.method === "GET") {
     try {
-      return configResponse(ctx.paths, ctx.providerDeps);
+      return configResponse(ctx.paths, ctx.providerDeps, ctx.instanceOnly === true);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },

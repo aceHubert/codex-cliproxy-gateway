@@ -132,6 +132,9 @@ test("ZCode 套餐筛选使用 slug 不使用 entry.name 或显示别名", { tim
     const renamed = { models: vendor.models.map((entry) => ({ ...entry, name: "test-display-alias", display_name: "另一个显示名" })) };
     assert.equal(createZcodeCatalog(snapshot("zai", ["test-display-alias"]), renamed).models.length, 0);
     assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0].toUpperCase()]), renamed).models[0]!.slug, `zcode-zai-test/${IDS[0]}`);
+    // 覆盖规则若残留旧版渠道标注，投影层只保留一份 ZCode/ 前缀。
+    const legacy = { models: vendor.models.map((entry) => ({ ...entry, display_name: `${entry.display_name ?? entry.slug} (ZCode)` })) };
+    assert.equal(createZcodeCatalog(snapshot("zai", [IDS[0]]), legacy).models[0]!.display_name, `ZCode/GLM-5.3（zai-test）`);
   });
 });
 
@@ -190,10 +193,10 @@ test("目录按套餐作用域生成前缀与显示名分组", { timeout: 60_000
     assert.deepEqual(team.models.map((entry) => entry.slug), [`zcode-team-coding-plan/${IDS[0]}`]);
     assert.deepEqual(start.models.map((entry) => entry.slug), [`zcode-start-plan/${IDS[1]}`]);
     assert.deepEqual(custom.models.map((entry) => entry.slug), [`zcode-zai-test/${IDS[0]}`]);
-    assert.equal(individual.models[0]!.display_name, `GLM-5.3 (ZCode个人)`);
-    assert.equal(team.models[0]!.display_name, `GLM-5.3 (ZCode团队)`);
-    assert.equal(start.models[0]!.display_name, `GLM-5.3-Flash (ZCode免费)`);
-    assert.equal(custom.models[0]!.display_name, `GLM-5.3（ZCode zai-test）`);
+    assert.equal(individual.models[0]!.display_name, `ZCode/GLM-5.3 (个人)`);
+    assert.equal(team.models[0]!.display_name, `ZCode/GLM-5.3 (团队)`);
+    assert.equal(start.models[0]!.display_name, `ZCode/GLM-5.3-Flash (免费)`);
+    assert.equal(custom.models[0]!.display_name, `ZCode/GLM-5.3（zai-test）`);
   });
 });
 
@@ -204,9 +207,9 @@ test("多个 ZCode API Key 使用 providerId 前缀和 providerName 显示名", 
   const namedCatalog = createZcodeCatalog(named, vendor);
   const anonymousCatalog = createZcodeCatalog(anonymous, vendor);
   assert.equal(namedCatalog.models[0]!.slug, `zcode-zai-api/${IDS[0]}`);
-  assert.equal(namedCatalog.models[0]!.display_name, `GLM-5.3（ZCode 工作 Key）`);
+  assert.equal(namedCatalog.models[0]!.display_name, `ZCode/GLM-5.3（工作 Key）`);
   assert.equal(anonymousCatalog.models[0]!.slug, `zcode-custom-official/${IDS[1]}`);
-  assert.equal(anonymousCatalog.models[0]!.display_name, `GLM-5.3-Flash（ZCode custom-official）`);
+  assert.equal(anonymousCatalog.models[0]!.display_name, `ZCode/GLM-5.3-Flash（custom-official）`);
   assert.equal(zcodeAPIProviderPrefix("zai-api"), "zcode-zai-api/");
   assert.equal(zcodeAPIProviderIDFromModel(`zcode-zai-api/${IDS[0]}`), "zai-api");
   assert.equal(zcodeAPIProviderIDFromModel(`zcode-custom-official/${IDS[1]}`), "custom-official");

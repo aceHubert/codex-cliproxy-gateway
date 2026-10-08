@@ -19,6 +19,9 @@ import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize
 interface FormState {
   zcode: boolean;
   codebuddy: boolean;
+  codebuddyRegion: "auto" | "cn" | "intl";
+  qoder: boolean;
+  agy: boolean;
   requestLogging: boolean;
   maxRequestLogs: string;
   maxGatewayLogBytes: string;
@@ -99,6 +102,9 @@ export function ConfigPage({
       setForm({
         zcode: next.editable.zcode,
         codebuddy: next.editable.codebuddy,
+        codebuddyRegion: next.editable.codebuddyRegion,
+        qoder: next.editable.qoder,
+        agy: next.editable.agy,
         requestLogging: next.editable.requestLogging,
         maxRequestLogs: String(next.editable.maxRequestLogs ?? 0),
         maxGatewayLogBytes: logSize.value,
@@ -124,6 +130,9 @@ export function ConfigPage({
     if (!config || !form) return false;
     return form.zcode !== config.editable.zcode
       || form.codebuddy !== config.editable.codebuddy
+      || form.codebuddyRegion !== config.editable.codebuddyRegion
+      || form.qoder !== config.editable.qoder
+      || form.agy !== config.editable.agy
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
       || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
@@ -134,6 +143,10 @@ export function ConfigPage({
   // 开关已开启时（例如用户删掉了本机配置）仍显示，便于在 UI 里关回。
   const showZcode = Boolean(config && (config.detected.zcode || config.editable.zcode));
   const showCodebuddy = Boolean(config && (config.detected.codebuddy || config.editable.codebuddy));
+  const showQoder = Boolean(config && (config.detected.qoder || config.editable.qoder));
+  const showAgy = Boolean(config && (config.detected.agy || config.editable.agy));
+  // 兼容旧后端返回结构：仅接受数组形式的生效来源，避免升级窗口期内渲染报错。
+  const qoderSources = Array.isArray(config?.detected.qoderSources) ? config.detected.qoderSources : [];
 
   /** 网关重启完成后恢复：刷新配置与状态并提示已生效。 */
   useEffect(() => {
@@ -187,6 +200,11 @@ export function ConfigPage({
       const changes: UiConfigChanges = {};
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
+      if (formSnapshot.codebuddyRegion !== config.editable.codebuddyRegion) {
+        changes.codebuddyRegion = formSnapshot.codebuddyRegion;
+      }
+      if (formSnapshot.qoder !== config.editable.qoder) changes.qoder = formSnapshot.qoder;
+      if (formSnapshot.agy !== config.editable.agy) changes.agy = formSnapshot.agy;
       if (formSnapshot.requestLogging !== config.editable.requestLogging) {
         changes.requestLogging = formSnapshot.requestLogging;
       }
@@ -401,21 +419,110 @@ export function ConfigPage({
                     <div className="field-control-area">
                       {/* upstream-only 模式下网关按禁用处理 codebuddy 入口（codebuddyEnabled）：
                           开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
-                        <input
-                          type="checkbox"
-                          checked={form.codebuddy}
-                          disabled={upstreamOnly}
-                          onChange={(event) => setForm({ ...form, codebuddy: event.target.checked })}
-                        />
-                        <span className="slider" />
-                      </label>
+                      <div className="field-switch-row">
+                        <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                          <input
+                            type="checkbox"
+                            checked={form.codebuddy}
+                            disabled={upstreamOnly}
+                            onChange={(event) => setForm({ ...form, codebuddy: event.target.checked })}
+                          />
+                          <span className="slider" />
+                        </label>
+                        <div className="region-segmented" role="group" aria-label={t("labelCodebuddyRegion")}>
+                          {(["auto", "cn", "intl"] as const).map((region) => (
+                            <button
+                              key={region}
+                              type="button"
+                              className={`region-btn${form.codebuddyRegion === region ? " active" : ""}`}
+                              disabled={upstreamOnly}
+                              aria-pressed={form.codebuddyRegion === region}
+                              onClick={() => setForm({ ...form, codebuddyRegion: region })}
+                            >
+                              {region.toUpperCase()}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                       <p className="field-desc">{t("descCodebuddy")}</p>
+                      <p className="field-desc">{t("descCodebuddyRegion")}</p>
                       {upstreamOnly && (
                         <p className="field-desc zcode-disabled-hint">{t("codebuddyDisabledHint")}</p>
                       )}
                       {!config.detected.codebuddy && (
                         <p className="field-desc zcode-disabled-hint">{t("codebuddyMissingHint")}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {showQoder && (
+                  <div className="field-row">
+                    <div className="field-label-group">
+                      <span className="field-label">{t("labelQoder")}</span>
+                      <span className="field-keyname">qoder</span>
+                    </div>
+                    <div className="field-control-area">
+                      {/* 统一开关目前接入国际版；纯上游模式下保留配置值并禁用入口。 */}
+                      <div className="field-switch-row">
+                        <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                          <input
+                            type="checkbox"
+                            checked={form.qoder}
+                            disabled={upstreamOnly}
+                            onChange={(event) => setForm({ ...form, qoder: event.target.checked })}
+                          />
+                          <span className="slider" />
+                        </label>
+                        {/* 只展示当前实际生效的来源（CLI 优先、桌面回退），不允许修改。 */}
+                        <div className="qoder-source-options" role="group" aria-label={t("labelQoderSources")}>
+                          {qoderSources.map((label) => (
+                            <label key={label} className="qoder-source-option">
+                              <input
+                                type="checkbox"
+                                checked
+                                readOnly
+                                onClick={(event) => event.preventDefault()}
+                              />
+                              <span>{label}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
+                      <p className="field-desc">{t("descQoder")}</p>
+                      <p className="field-desc">{t("descQoderSources")}</p>
+                      {upstreamOnly && (
+                        <p className="field-desc zcode-disabled-hint">{t("qoderDisabledHint")}</p>
+                      )}
+                      {!config.detected.qoder && (
+                        <p className="field-desc zcode-disabled-hint">{t("qoderMissingHint")}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {showAgy && (
+                  <div className="field-row">
+                    <div className="field-label-group">
+                      <span className="field-label">{t("labelAgy")}</span>
+                      <span className="field-keyname">agy</span>
+                    </div>
+                    <div className="field-control-area">
+                      {/* upstream-only 模式下网关按禁用处理 agy 入口（agyEnabled）：
+                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
+                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={form.agy}
+                          disabled={upstreamOnly}
+                          onChange={(event) => setForm({ ...form, agy: event.target.checked })}
+                        />
+                        <span className="slider" />
+                      </label>
+                      <p className="field-desc">{t("descAgy")}</p>
+                      {upstreamOnly && (
+                        <p className="field-desc zcode-disabled-hint">{t("agyDisabledHint")}</p>
+                      )}
+                      {!config.detected.agy && (
+                        <p className="field-desc zcode-disabled-hint">{t("agyMissingHint")}</p>
                       )}
                     </div>
                   </div>
@@ -441,6 +548,57 @@ export function ConfigPage({
               <span>{t("card2Note")}</span>
             </div>
             <div className="card-body">
+              <ReadonlyRow label={t("labelCodexConfig")} keyname={t("keynameCodexConfig")}>
+                <div className="readonly-box">
+                  <span className={`pill-badge ${config.readonly.codexConfigManaged ? "pill-green" : "pill-amber"}`}>
+                    {config.readonly.codexConfigManaged ? t("badgeCodexManaged") : t("badgeCodexManual")}
+                  </span>
+                  <span className="codex-config-desc">
+                    {config.readonly.codexConfigManaged ? t("descCodexManaged") : t("descCodexManual")}
+                  </span>
+                </div>
+              </ReadonlyRow>
+
+              {config.readonly.manualCodexConfig && (
+                <div className="manual-codex-block">
+                  <div className="manual-codex-title">{t("manualConfigTitle")}</div>
+                  <div className="manual-codex-keys">
+                    {config.readonly.manualCodexConfig.keys.map((row) => (
+                      <div key={row.key} className="manual-codex-key">
+                        <code className="manual-codex-keyname">{row.key}</code>
+                        <div className="manual-codex-expected">
+                          <span>= {row.expected}</span>
+                          <CopyButton text={`${row.key} = "${row.expected}"`} title={t("copyPath")} />
+                        </div>
+                        <span className={`pill-badge ${
+                          row.matches ? "pill-green" : row.current === null ? "pill-red" : "pill-amber"
+                        }`}>
+                          {row.matches
+                            ? `✓ ${t("manualKeyOk")}`
+                            : row.current === null
+                              ? `✗ ${t("manualKeyMissing")}`
+                              : `⚠ ${t("manualKeyMismatch")}`}
+                        </span>
+                        {row.current !== null && !row.matches && (
+                          <span className="manual-codex-current">
+                            {t("manualKeyCurrent")}: <code>{row.current}</code>
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                  {config.readonly.manualCodexConfig.staticCatalogActive
+                    && !config.readonly.manualCodexConfig.keys.some(
+                      (row) => row.key === "model_catalog_json" && row.matches,
+                    ) && (
+                      <p className="field-desc zcode-disabled-hint">{t("manualStaticNote")}</p>
+                  )}
+                  {config.readonly.manualCodexConfig.removeModelCatalogJson && (
+                    <p className="field-desc zcode-disabled-hint">{t("manualRemoveCatalogKey")}</p>
+                  )}
+                  <p className="field-desc manual-codex-footnote">{t("manualConfigFootnote")}</p>
+                </div>
+              )}
               <ReadonlyRow label={t("labelRouterMode")} keyname="routerMode">
                 <div className="readonly-box">
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
