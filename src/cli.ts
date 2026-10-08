@@ -37,6 +37,11 @@ import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlV
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
 import { validateZcodeConfig, zcodeEnabled } from "./zcode/index.ts";
 import { codebuddyEnabled, validateCodebuddyConfig } from "./codebuddy/index.ts";
+import {
+  defaultAuthDirectory,
+  listCodebuddyAccounts,
+  resolveCodebuddyAccountFile,
+} from "./codebuddy/credentials.ts";
 import { qoderEnabled, validateQoderConfig } from "./qoder/index.ts";
 import { agyEnabled, validateAgyConfig } from "./agy/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
@@ -125,7 +130,8 @@ Usage:
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
   codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--codebuddy-region auto|cn|intl] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy codebuddy --switch
   codex-cliproxy web
   codex-cliproxy status
 
@@ -171,9 +177,7 @@ Config:
   config --zcode on|off toggle ZCode Responses-to-Anthropic compatibility
   config --codebuddy on|off
                         toggle CodeBuddy/WorkBuddy Responses compatibility
-  config --codebuddy-region auto|cn|intl
-                        prefer CodeBuddy credentials from a region; auto uses
-                        the most recently refreshed login
+                        (account selection lives in codebuddy --switch)
   config --qoder on|off toggle local Qoder Responses compatibility (intl + China editions)
   config --agy on|off    toggle local Antigravity (agy/) Responses compatibility
   config --log on|off   toggle request logging
@@ -186,6 +190,12 @@ Config:
                         (5 newest backups kept) and truncates the live file in
                         place; 0 (default) means unlimited
   options may be combined; every change restarts the gateway automatically
+
+CodeBuddy:
+  codebuddy --switch    pick the CodeBuddy/WorkBuddy account with the arrow
+                        keys; auto (listed first, the default) follows the
+                        most recently refreshed login, so that login is not
+                        listed again
 
 Routing:
   cliproxy/*  -> CLIProxyAPI; prefix stripped and auth replaced
@@ -221,7 +231,7 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const key = value.slice(2);
-    if (["help", "sync", "upstream-only", "cpa-only", "restart-codex", "yes", "manual-codex-config", "start", "daemon", "status", "stop", "restart"].includes(key)) {
+    if (["help", "sync", "upstream-only", "cpa-only", "restart-codex", "yes", "manual-codex-config", "start", "daemon", "status", "stop", "restart", "switch"].includes(key)) {
       options[key] = true;
       continue;
     }
@@ -295,6 +305,64 @@ function promptModifyCodexConfig(): boolean {
     bytes = 0;
   }
   return /^y/i.test(buffer.subarray(0, bytes).toString("utf8").trim());
+}
+
+/** 箭头菜单的按键动作；缺省从 raw mode 的 stdin 读取，测试注入脚本化序列。 */
+export type SelectKey = "up" | "down" | "enter" | "cancel" | "other";
+
+export interface SelectKeySource {
+  /** 等待下一次按键并映射为菜单动作；EOF 或读失败视为取消。 */
+  read(): Promise<SelectKey>;
+  /** 菜单结束时恢复终端模式；必须在 finally 里调用。 */
+  close(): void;
+}
+
+/** 单次按键字节 → 菜单动作：↑/↓ 移动、Enter 确认；单独 Esc、q、Ctrl-C、Ctrl-D 取消。 */
+function mapSelectKey(chunk: string): SelectKey {
+  if (chunk === "\x1b[A" || chunk === "\x1bOA") return "up";
+  if (chunk === "\x1b[B" || chunk === "\x1bOB") return "down";
+  if (chunk === "\r" || chunk === "\n" || chunk === "\r\n") return "enter";
+  if (chunk === "\x1b" || chunk === "q" || chunk === "Q" || chunk === "\x03" || chunk === "\x04") return "cancel";
+  return "other";
+}
+
+/**
+ * 打开 raw mode 的按键源：按键经 stdin 的 data 事件逐块到达（箭头的 ESC 序列一次到达），
+ * 不用 fs.readSync（tty 流一旦创建 fd 0 即为非阻塞，同步读会 EAGAIN）。raw mode 下
+ * Ctrl-C 不再触发 SIGINT，由菜单自己按取消处理并在 close 恢复终端。
+ */
+function openRawKeySource(): SelectKeySource {
+  const stdin = process.stdin;
+  const raw = typeof stdin.setRawMode === "function";
+  if (raw) stdin.setRawMode(true);
+  const queue: SelectKey[] = [];
+  let waiter: ((key: SelectKey) => void) | undefined;
+  const push = (key: SelectKey): void => {
+    if (waiter === undefined) { queue.push(key); return; }
+    const resolve = waiter;
+    waiter = undefined;
+    resolve(key);
+  };
+  const onData = (chunk: Buffer | string): void => { push(mapSelectKey(chunk.toString())); };
+  const onEnd = (): void => { push("cancel"); };
+  stdin.on("data", onData);
+  stdin.on("end", onEnd);
+  stdin.on("error", onEnd);
+  stdin.resume();
+  return {
+    read() {
+      const queued = queue.shift();
+      if (queued !== undefined) return Promise.resolve(queued);
+      return new Promise((resolve) => { waiter = resolve; });
+    },
+    close() {
+      stdin.off("data", onData);
+      stdin.off("end", onEnd);
+      stdin.off("error", onEnd);
+      if (raw) stdin.setRawMode(false);
+      stdin.pause();
+    },
+  };
 }
 
 /**
@@ -532,7 +600,7 @@ const AUDITED_FIELDS = [
   "codebuddy",
   "qoder",
   "agy",
-  "codebuddyRegion",
+  "codebuddyAccount",
   "upstreamOnly",
   "requestLogging",
   "logDir",
@@ -1471,16 +1539,148 @@ function onOffValue(options: CliOptions, key: string): boolean | undefined {
   return normalized === "on";
 }
 
+export interface CodebuddyAccountSwitchDependencies {
+  /** 认证目录；缺省取平台默认目录。 */
+  authDirectory?: string;
+  /** 是否交互终端；缺省要求 stdin 与 stdout 都是 TTY（箭头菜单依赖 raw mode 与 ANSI 重绘）。 */
+  interactive?: boolean;
+  /** 按键源；缺省打开 raw mode 从 stdin 读取。 */
+  keySource?: SelectKeySource;
+}
+
+interface AccountMenuItem {
+  /** 写入配置的值：`"auto"` 或 `.info` 文件名。 */
+  value: string;
+  label: string;
+  /** 损坏的登录只展示不可选。 */
+  selectable: boolean;
+}
+
+/**
+ * 箭头菜单选择 CodeBuddy/WorkBuddy 账号（顶层 `codebuddy --switch` 的交互部分；
+ * config 只管开关）。auto 置顶并标出它此刻命中的登录；该登录不再单独列出
+ * （选它与选 auto 等价，而 auto 还能随客户端切换账号自动跟随）。返回 `"auto"` 或
+ * 选中的 `.info` 文件名；Esc/q/Ctrl-C/EOF 取消返回 undefined，绝不写配置。
+ * 非交互终端抛错；不做选择时网关缺省即 auto。
+ */
+export async function promptCodebuddyAccountSelection(
+  dependencies: CodebuddyAccountSwitchDependencies = {},
+): Promise<string | undefined> {
+  const interactive = dependencies.interactive ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!interactive) {
+    throw new Error(
+      "account switch requires an interactive terminal (arrow-key menu); without a selection the gateway keeps auto (most recently refreshed login)",
+    );
+  }
+  const authDirectory = dependencies.authDirectory ?? defaultAuthDirectory();
+  const entries = listCodebuddyAccounts(authDirectory);
+  if (entries.length === 0) {
+    console.log("No CodeBuddy/WorkBuddy logins found (.info); sign in at the desktop app or CLI first.");
+    return undefined;
+  }
+  // auto 此刻命中的登录（按 auto 规则、不看当前配置）折进 auto 项，不再单独可选。
+  const resolved = resolveCodebuddyAccountFile(authDirectory, "auto");
+  const current = entries.find((entry) => entry.file === resolved);
+  const items: AccountMenuItem[] = [
+    {
+      value: "auto",
+      label: `${current?.label ?? "no login yet"} (auto, follows the most recently refreshed login)`,
+      selectable: true,
+    },
+    ...entries
+      .filter((entry) => entry.file !== resolved)
+      .map((entry) => ({
+        value: entry.file,
+        label: entry.broken ? `${entry.label} (unusable)` : entry.label,
+        selectable: !entry.broken,
+      })),
+  ];
+  // 整块重绘：上移 N 行后逐行擦除再写，列表不随按键滚屏。
+  const render = (cursor: number, redraw: boolean): void => {
+    const lines = items.map((item, index) => `${index === cursor ? ">" : " "} ${item.label}`);
+    lines.push("  ↑/↓ move · Enter select · Esc cancel");
+    process.stdout.write(`${redraw ? `\x1b[${lines.length}A` : ""}${lines.map((line) => `\x1b[2K${line}\n`).join("")}`);
+  };
+  console.log("Select the CodeBuddy/WorkBuddy account:");
+  const keySource = dependencies.keySource ?? openRawKeySource();
+  let cursor = 0;
+  process.stdout.write("\x1b[?25l");
+  try {
+    render(cursor, false);
+    for (;;) {
+      const key = await keySource.read();
+      if (key === "cancel") return undefined;
+      if (key === "enter") return items[cursor].value;
+      if (key !== "up" && key !== "down") continue;
+      // 跳过不可选项，到顶/到底停住不环绕。
+      const step = key === "up" ? -1 : 1;
+      let next = cursor + step;
+      while (next >= 0 && next < items.length && !items[next].selectable) next += step;
+      if (next < 0 || next >= items.length) continue;
+      cursor = next;
+      render(cursor, true);
+    }
+  } finally {
+    process.stdout.write("\x1b[?25h");
+    keySource.close();
+  }
+}
+
+function codebuddyAccountApplied(account: string): string {
+  return account === "auto"
+    ? "CodeBuddy account set to auto (follows the most recently refreshed login)."
+    : `CodeBuddy account locked to ${account}.`;
+}
+
+/**
+ * config 选项写盘的共享收尾（`config` 命令与 `codebuddy --switch` 共用）：组合校验
+ * 先于写盘（保留原配置与运行中的服务）、同步 state.config、落审计、按需失效模型目录
+ * 缓存、打印变更摘要并重启网关。
+ */
+async function writeConfigAndRestart(
+  paths: ResolvedPaths,
+  config: GatewayConfig,
+  auditBefore: Record<string, unknown>,
+  command: string,
+  applied: string[],
+  options: { invalidateModels?: boolean; logDirLine?: string } = {},
+): Promise<void> {
+  // 与 Web UI 同一规则：组合校验先于写盘与重启，失败时保留原配置和运行中的服务
+  // （否则保存成功、新进程却被 validate*Config 拒绝启动，网关直接不可用）。
+  validateZcodeConfig(config);
+  validateCodebuddyConfig(config);
+  validateQoderConfig(config);
+  validateAgyConfig(config);
+  writeGatewayConfig(paths.gatewayConfig, config);
+  if (fs.existsSync(paths.stateFile)) {
+    const state = loadJson<InstallState>(paths.stateFile);
+    state.config = config;
+    writeJson(paths.stateFile, state);
+  }
+  recordConfigAudit(command, config, auditBefore, paths);
+  if (options.invalidateModels) invalidateModelsCache(paths.modelsCacheFile);
+  // 先报「改了什么」再执行重启：配置在上方已写盘，重启只是让新值生效；
+  // 摘要落在重启输出之后会被误读成「重启后才应用配置」。
+  for (const line of applied) console.log(line);
+  if (options.logDirLine) console.log(options.logDirLine);
+  if (fs.existsSync(paths.launchAgent)) {
+    await restartGatewayOnce(paths, config);
+    console.log("Gateway restarted to apply the new configuration.");
+  } else {
+    console.log("Gateway LaunchAgent is not installed; configuration saved without restart.");
+  }
+}
+
 /**
  * config 命令：无参数只打印当前设置；传入任何配置项时都写盘并重启网关，
- * 让运行中的进程重新加载完整配置，不对比目标值是否已匹配。
+ * 让运行中的进程重新加载完整配置，不对比目标值是否已匹配。config 只管开关与
+ * 日志项；CodeBuddy 账号选择只在 `codebuddy --switch`（缺省即 auto）。
  */
 async function configCommand(options: CliOptions): Promise<void> {
   const zcodeTarget = onOffValue(options, "zcode");
   const codebuddyTarget = onOffValue(options, "codebuddy");
   const qoderTarget = onOffValue(options, "qoder");
   const agyTarget = onOffValue(options, "agy");
-  const codebuddyRegionOption = stringOption(options, "codebuddy-region");
   const logTarget = onOffValue(options, "log");
   const maxLogsOption = stringOption(options, "max-request-logs");
   const maxLogSizeOption = stringOption(options, "max-log-size");
@@ -1489,7 +1689,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && codebuddyRegionOption === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
     const codebuddyActive = codebuddyEnabled(config);
     const qoderActive = qoderEnabled(config);
@@ -1501,7 +1701,7 @@ async function configCommand(options: CliOptions): Promise<void> {
       ...(config.zcode === true && !zcodeActive ? { zcodeConfigured: true } : {}),
       codebuddy: codebuddyActive,
       ...(config.codebuddy === true && !codebuddyActive ? { codebuddyConfigured: true } : {}),
-      codebuddyRegion: config.codebuddyRegion ?? "auto",
+      codebuddyAccount: config.codebuddyAccount ?? "auto",
       qoder: qoderActive,
       ...(config.qoder === true && !qoderActive ? { qoderConfigured: true } : {}),
       agy: agyActive,
@@ -1544,14 +1744,6 @@ async function configCommand(options: CliOptions): Promise<void> {
       ? "Antigravity 开关已保存；upstream-only 模式下暂不生效。"
       : `Antigravity（agy/）适配${agyTarget ? "已启用" : "已禁用"}。`);
   }
-  if (codebuddyRegionOption !== undefined) {
-    const normalized = codebuddyRegionOption.trim().toLowerCase();
-    if (normalized !== "auto" && normalized !== "cn" && normalized !== "intl") {
-      throw new Error(`--codebuddy-region expects auto, cn, or intl, got "${codebuddyRegionOption}"`);
-    }
-    config.codebuddyRegion = normalized;
-    applied.push(`CodeBuddy region preference set to ${normalized}.`);
-  }
   if (maxLogsOption !== undefined) {
     config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
     applied.push(`Max log files per group set to ${
@@ -1569,39 +1761,37 @@ async function configCommand(options: CliOptions): Promise<void> {
     if (logTarget) config.logDir ||= paths.logDir;
     applied.push(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
   }
-  // 与 Web UI 同一规则：组合校验先于写盘与重启，失败时保留原配置和运行中的服务
-  // （否则保存成功、新进程却被 validate*Config 拒绝启动，网关直接不可用）。
-  validateZcodeConfig(config);
-  validateCodebuddyConfig(config);
-  validateQoderConfig(config);
-  validateAgyConfig(config);
-  writeGatewayConfig(paths.gatewayConfig, config);
-  if (fs.existsSync(paths.stateFile)) {
-    const state = loadJson<InstallState>(paths.stateFile);
-    state.config = config;
-    writeJson(paths.stateFile, state);
-  }
-  recordConfigAudit("config", config, auditBefore, paths);
+  await writeConfigAndRestart(paths, config, auditBefore, "config", applied, {
+    // zcode/codebuddy/qoder/agy 开关会改变 /models 的目录内容：写盘时同步失效
+    // Codex 的 models_cache.json（对齐 install / models --sync），让重拉起的
+    // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
+    // 纯日志选项不影响目录，不触发失效。
+    invalidateModels: zcodeTarget !== undefined || codebuddyTarget !== undefined || qoderTarget !== undefined
+      || agyTarget !== undefined,
+    logDirLine: logTarget ? `Request logs will be written to: ${config.logDir}` : undefined,
+  });
+}
 
-  // zcode/codebuddy 开关与地域偏好会改变 /models 的目录内容：写盘时同步失效
-  // Codex 的 models_cache.json（对齐 install / models --sync），让重拉起的
-  // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
-  // 纯日志选项不影响目录，不触发失效。
-  if (zcodeTarget !== undefined || codebuddyTarget !== undefined || qoderTarget !== undefined || agyTarget !== undefined || codebuddyRegionOption !== undefined) {
-    invalidateModelsCache(paths.modelsCacheFile);
+/**
+ * 顶层 `codebuddy --switch`：CodeBuddy 账号选择的唯一入口（config 只管开关），
+ * 复用 config 的写盘管线（校验→写盘→state 同步→审计→失效目录缓存→重启）。
+ * 取消或非交互终端都不写配置；缺省即 auto。dependencies 供测试注入按键源。
+ */
+export async function codebuddyCommand(dependencies: CodebuddyAccountSwitchDependencies = {}): Promise<void> {
+  requireMacOS();
+  const paths = resolvePaths();
+  if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
+  const config = loadGatewayConfig(paths.gatewayConfig);
+  const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
+  const selection = await promptCodebuddyAccountSelection(dependencies);
+  if (selection === undefined) {
+    console.log("CodeBuddy account switch cancelled; no account change was saved.");
+    return;
   }
-
-  // 先报「改了什么」再执行重启：配置在上方已写盘，重启只是让新值生效；
-  // 摘要落在重启输出之后会被误读成「重启后才应用配置」。
-  for (const line of applied) console.log(line);
-  if (logTarget) console.log(`Request logs will be written to: ${config.logDir}`);
-
-  if (fs.existsSync(paths.launchAgent)) {
-    await restartGatewayOnce(paths, config);
-    console.log("Gateway restarted to apply the new configuration.");
-  } else {
-    console.log("Gateway LaunchAgent is not installed; configuration saved without restart.");
-  }
+  config.codebuddyAccount = selection;
+  await writeConfigAndRestart(paths, config, auditBefore, "codebuddy --switch", [
+    codebuddyAccountApplied(selection),
+  ], { invalidateModels: true });
 }
 
 async function controlGateway(
@@ -1685,6 +1875,12 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
       dirty = true;
     }
   }
+  // codebuddyAccount 的历史哨兵 "default" 已改名 "auto"：读取归一（migrateLegacyConfig）
+  // 已把内存值改好，这里让文件跟着改写并记审计，避免旧值被 validateCodebuddyConfig 拒绝。
+  if (before.codebuddyAccount === "default") {
+    explicitChanges.push({ field: "codebuddyAccount (default -> auto)", before: "default", after: "auto" });
+    dirty = true;
+  }
   const legacyCatalogPath = current.catalogPath === path.join(paths.codexHome, "cliproxy-catalog.json");
   if (legacyCatalogPath) {
     current.catalogPath = paths.catalogFile;
@@ -1764,7 +1960,8 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["zcode", "codebuddy", "qoder", "agy", "codebuddy-region", "log", "max-request-logs", "max-log-size"],
+  config: ["zcode", "codebuddy", "qoder", "agy", "log", "max-request-logs", "max-log-size"],
+  codebuddy: ["switch"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };
 
@@ -1804,7 +2001,10 @@ export async function runCli(args: string[]): Promise<void> {
   if (options.log !== undefined && command !== "config") {
     throw new Error("--log is only supported by the config command");
   }
-  if (["start", "stop", "restart", "serve", "models", "config", "status", "web"].includes(command)) {
+  if (command === "codebuddy" && options.switch !== true) {
+    throw new Error("The codebuddy command requires --switch");
+  }
+  if (["start", "stop", "restart", "serve", "models", "config", "codebuddy", "status", "web"].includes(command)) {
     syncGatewayConfig(command, options);
   }
 
@@ -1828,6 +2028,9 @@ export async function runCli(args: string[]): Promise<void> {
       break;
     case "config":
       await configCommand(options);
+      break;
+    case "codebuddy":
+      await codebuddyCommand();
       break;
     case "web":
       await webCommand(options);

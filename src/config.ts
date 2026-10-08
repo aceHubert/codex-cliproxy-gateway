@@ -59,11 +59,21 @@ export const LEGACY_FIELD_MIGRATIONS: readonly LegacyFieldMigration[] = [
     valid: (value) => isJsonObject(value) && typeof value.enabled === "boolean",
     convert: (value) => (value as JsonObject).enabled,
   },
+  {
+    old: "codebuddyRegion",
+    next: "codebuddyAccount",
+    valid: (value) => value === "auto" || value === "cn" || value === "intl",
+    // 旧地域偏好无法映射到具体账号：一律归一为 auto（最近刷新的登录），
+    // 需要锁定账号的用户在 codebuddy --switch 里重新显式选择。
+    convert: () => "auto",
+  },
 ];
 
 /**
  * 读取配置时把旧字段值补齐为新键（就地修改，保留旧键供文件级迁移判断）；
  * 迁移只发生在新键缺失且旧值类型合法时，绝不覆盖用户已写的新值。
+ * codebuddyAccount 的历史哨兵 "default" 同样在此归一为 "auto"，CLI、网关与 Web UI
+ * 三条读取路径都立即理解旧文件；文件级改写与审计见 syncGatewayConfigFile。
  */
 export function migrateLegacyConfig(config: JsonObject): JsonObject {
   for (const { old, next, valid, convert } of LEGACY_FIELD_MIGRATIONS) {
@@ -71,6 +81,7 @@ export function migrateLegacyConfig(config: JsonObject): JsonObject {
       config[next] = convert ? convert(config[old]) : config[old];
     }
   }
+  if (config.codebuddyAccount === "default") config.codebuddyAccount = "auto";
   return config;
 }
 

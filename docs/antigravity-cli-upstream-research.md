@@ -409,7 +409,7 @@ URL query 上；③ 客户端指纹主要落在 **body**（`ClientMetadata`、`u
 
 ## 7. 网关接入方案（对照现有适配器）
 
-参照 Qoder 接入（`docs/exec-plans/active/qoder-international-flash-proxy-integration.md`）
+参照 Qoder 接入（`docs/exec-plans/completed/qoder-international-flash-proxy-integration.md`）
 与 CodeBuddy「只读消费凭据」模式，新增 `src/antigravity/` 适配器：
 
 ```

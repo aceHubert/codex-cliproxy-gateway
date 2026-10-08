@@ -17,7 +17,7 @@ export interface ModelCatalog {
 /** 第三方上游类型：cliproxy 直接消费其 Codex 目录；newapi 从 OpenAI /models 列表本地合成目录。 */
 export type UpstreamType = "cliproxy" | "newapi";
 
-/** CodeBuddy 凭据地域：auto 按最近登录选择，cn/intl 固定地域并在无凭据时回退 auto。 */
+/** CodeBuddy 凭据地域（历史值）。字段已过时：凭据选择一律走 codebuddyAccount。 */
 export type CodebuddyRegion = "auto" | "cn" | "intl";
 
 export interface GatewayConfig {
@@ -51,8 +51,18 @@ export interface GatewayConfig {
   zcode?: boolean;
   /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时按禁用处理。 */
   codebuddy?: boolean;
-  /** CodeBuddy/WorkBuddy 凭据地域选择；缺省 auto。 */
+  /**
+   * @deprecated 已由 codebuddyAccount 取代。读取时旧值（auto/cn/intl）一次性迁移为
+   * codebuddyAccount="auto"；写入一律归一到 codebuddyAccount。
+   */
   codebuddyRegion?: CodebuddyRegion;
+  /**
+   * CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 `.info` 文件名时锁定该账号登录
+   * （文件缺失时运行期回退 auto，不改写配置）；值为 "auto" 或缺省时按最近刷新的
+   * 登录自动选取并随客户端切换跟随。展示标签（昵称 <邮箱> / 地域）由 Web UI 实时
+   * 解析，不落配置。历史哨兵 "default" 读取时归一为 "auto"。
+   */
+  codebuddyAccount?: string;
   /** 是否启用 Qoder Responses 入口；默认关闭，自动发现各地域登录。upstreamOnly 为 true 时按禁用处理。 */
   qoder?: boolean;
   /** 是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录。upstreamOnly 为 true 时按禁用处理。 */

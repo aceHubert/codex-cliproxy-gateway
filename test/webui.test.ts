@@ -19,6 +19,12 @@ const BASE = "http://127.0.0.1:8320";
 // mock.module 无法撤销，mock 前先捕获真实 execFileSync，供委托式 mock 转发。
 const realExecFileSync = childProcess.execFileSync;
 
+/** 最小形状的 JWT（iss + 可选展示声明）；CodeBuddy 凭据解析只依赖 issuer 与三段形状。 */
+function jwt(iss: string, claims: Record<string, unknown> = {}): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "RS256", typ: "JWT" })}.${encode({ iss, exp: 1893456000, ...claims })}.${encode({ sig: "test" })}`;
+}
+
 /** 挑一个当前空闲的端口：bind(0) 拿到后立即释放。真实 socket 用例不能写死端口——
  * 本机生产网关与 webui 服务就运行在 8320/8321 上。 */
 function freePort(): Promise<number> {
@@ -252,7 +258,6 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
       editable: {
         zcode: boolean;
         codebuddy: boolean;
-        codebuddyRegion: string;
         maxRequestLogs: number;
         selectedModels: string[];
       };
@@ -260,7 +265,6 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
     };
     assert.equal(payload.editable.zcode, false);
     assert.equal(payload.editable.codebuddy, false);
-    assert.equal(payload.editable.codebuddyRegion, "auto");
     assert.equal(payload.editable.maxRequestLogs, 0);
     // 模型选择已迁入可编辑分组（保存走 /ui/api/upstream/models，同步重建目录文件）。
     assert.deepEqual(payload.editable.selectedModels, ["glm-5.3", "kimi-k2"]);
@@ -480,13 +484,29 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
 
     fs.mkdirSync(path.join(home, ".zcode"), { recursive: true });
     fs.writeFileSync(path.join(home, ".zcode", "setting.json"), "{}");
-    // .info 写入伪造凭据正文：探测不得读取或回显它。
+    // .info 写入伪造凭据正文：探测与账号标签解析不得读取或回显它；损坏文件无可解析
+    // 账号，标签为 null（存在性探测仍算已登录）。
     fs.writeFileSync(infoFile, JSON.stringify({ auth: { accessToken: "ccp-secret-token" } }));
     const present = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { zcode: boolean; codebuddy: boolean };
+      detected: { zcode: boolean; codebuddy: boolean; codebuddyAccountLabel: string | null };
     };
     assert.equal(present.detected.zcode, false, "缺 config.json 时仍不算就绪");
     assert.equal(present.detected.codebuddy, true, ".info 存在即视为已登录");
+    assert.equal(present.detected.codebuddyAccountLabel, null, "损坏的 .info 解析不出账号标签");
+
+    // 换成有效登录后：标签只含非敏感的昵称/邮箱与地域，token 绝不进响应。
+    const accessToken = jwt("https://www.codebuddy.ai/auth/realms/copilot", { email: "web@example.com" });
+    const refreshToken = jwt("https://refresh.example/auth/realms/x");
+    fs.writeFileSync(infoFile, JSON.stringify({
+      account: { uid: "uid-webui", nickname: "WebUser", enterpriseId: "" },
+      auth: { accessToken, refreshToken, domain: "www.codebuddy.ai", expiresAt: Date.now() + 90 * 24 * 3600 * 1000 },
+    }));
+    const labeled = await handler(authedRequest("/ui/api/config"));
+    const labeledText = await labeled.text();
+    assert.ok(!labeledText.includes(accessToken), "账号标签响应不得包含 accessToken");
+    assert.ok(!labeledText.includes(refreshToken), "账号标签响应不得包含 refreshToken");
+    const labeledPayload = JSON.parse(labeledText) as { detected: { codebuddyAccountLabel: string | null } };
+    assert.equal(labeledPayload.detected.codebuddyAccountLabel, "WebUser <web@example.com> / intl");
 
     fs.writeFileSync(path.join(home, ".zcode", "config.json"), "{}");
     const ready = await handler(authedRequest("/ui/api/config"));
@@ -494,6 +514,57 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
     assert.ok(!readyText.includes("ccp-secret-token"), "探测结果不得包含凭据内容");
     const readyPayload = JSON.parse(readyText) as { detected: { zcode: boolean } };
     assert.equal(readyPayload.detected.zcode, true, "两个配置文件齐备后算就绪");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("GET /ui/api/config 的 CodeBuddy 账号标签随 codebuddyAccount 实时解析", async () => {
+  const fixture = await makeFixture();
+  const { paths, config, home, uiHtmlPath } = fixture;
+  const authDir = path.join(home, "auth");
+  fs.mkdirSync(authDir, { recursive: true });
+  const writeLogin = (file: string, nickname: string, domain: string, issuer: string, lastRefreshTime: number, email?: string) => {
+    fs.writeFileSync(path.join(authDir, file), JSON.stringify({
+      account: { uid: `uid-${nickname}`, nickname, enterpriseId: "" },
+      auth: {
+        accessToken: jwt(issuer, email === undefined ? {} : { email }),
+        refreshToken: jwt("https://refresh.example/auth/realms/x"),
+        domain,
+        expiresAt: Date.now() + 90 * 24 * 3600 * 1000,
+        lastRefreshTime,
+      },
+    }));
+  };
+  writeLogin("fresh-cn.info", "CnUser", "www.codebuddy.cn", "https://www.codebuddy.cn/auth/realms/copilot", 5_000);
+  writeLogin("stale-intl.info", "IntlUser", "www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", 1_000, "intl@example.com");
+  const handler = (request: Request) =>
+    handleWebUiRequest(request, config, { paths, uiHtmlPath, providerDeps: { codebuddyAuthDir: authDir } }, config.port);
+  try {
+    // 未设置（auto 语义）：解析最近刷新的登录，不落配置。
+    let payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { codebuddyAccountLabel: string | null };
+    };
+    assert.equal(payload.detected.codebuddyAccountLabel, "CnUser / cn");
+    // 锁定具体文件：标签随配置指向该文件。
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "stale-intl.info" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { codebuddyAccountLabel: string | null };
+    };
+    assert.equal(payload.detected.codebuddyAccountLabel, "IntlUser <intl@example.com> / intl");
+    // 锁定文件缺失：标签回落 auto 真实命中的账号，不显示过期的锁定名。
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "gone.info" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { codebuddyAccountLabel: string | null };
+    };
+    assert.equal(payload.detected.codebuddyAccountLabel, "CnUser / cn");
+    // 锁定文件存在但持续损坏：显示诊断标签（网关直读同样报错），不是「未选择」也不是 fallback 账号。
+    fs.writeFileSync(path.join(authDir, "broken-locked.info"), "{ not json");
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "broken-locked.info" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { codebuddyAccountLabel: string | null };
+    };
+    assert.equal(payload.detected.codebuddyAccountLabel, "broken-locked.info（凭据无法读取）");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -507,7 +578,6 @@ test("POST /ui/api/config applies supported fields, syncs state, and writes an a
       json: {
         zcode: true,
         codebuddy: true,
-        codebuddyRegion: "intl",
         maxRequestLogs: "5",
         maxGatewayLogBytes: "10MB",
       },
@@ -516,12 +586,11 @@ test("POST /ui/api/config applies supported fields, syncs state, and writes an a
     const payload = await response.json() as { restarting: boolean; applied: string[] };
     // 临时目录里没有 LaunchAgent，因此只写配置不触发重启调度。
     assert.equal(payload.restarting, false);
-    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "codebuddyRegion", "maxRequestLogs", "maxGatewayLogBytes"]);
+    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "maxRequestLogs", "maxGatewayLogBytes"]);
 
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, unknown>;
     assert.equal(saved.zcode, true);
     assert.equal(saved.codebuddy, true);
-    assert.equal(saved.codebuddyRegion, "intl");
     assert.equal(saved.maxRequestLogs, 5);
     assert.equal(saved.maxGatewayLogBytes, 10 * 1024 * 1024);
 
@@ -565,7 +634,9 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       { json: { maxGatewayLogBytes: "abc" }, message: /byte size/ },
       { json: { zcode: "yes" }, message: /boolean/ },
       { json: { codebuddy: "on" }, message: /boolean/ },
-      { json: { codebuddyRegion: "us" }, message: /codebuddyRegion expects auto, cn, or intl/ },
+      // 账号选择只在 CLI：UI 提交 codebuddyAccount 一律按不支持字段拒绝。
+      { json: { codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }, message: /Unsupported field/ },
+      { json: { codebuddyRegion: "cn" }, message: /Unsupported field/ },
       { json: { upstreamBaseUrl: "http://evil" }, message: /Unsupported field/ },
       { json: {}, message: /no supported fields/ },
     ];

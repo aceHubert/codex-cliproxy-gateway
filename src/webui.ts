@@ -16,7 +16,7 @@ import { restartLaunchAgent } from "./launchd.ts";
 import { realPathOrResolve, resolvePaths } from "./paths.ts";
 import { isRequestLogName, safeLogPath } from "./request-log.ts";
 import { atomicWrite, readRootTomlString } from "./toml.ts";
-import { codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
+import { codebuddyAccountLabel, codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
 import { agyCredentialsPresent, defaultAgyCredentialFile } from "./agy/credentials.ts";
 import {
   qoderActiveSources,
@@ -44,8 +44,10 @@ import type { GatewayConfig, ResolvedPaths } from "./types.ts";
  * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.codex-cliproxy-gateway/ui-token（0600）。
  *
  * 除「拉取模型」外，UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
- * codebuddyCredentialsPresent / qoderCredentialsPresent）：只探测本地配置与认证文件是否存在，
- * 不打开、不解析、不返回凭据内容，响应里只有布尔值。
+ * codebuddyCredentialsPresent / qoderCredentialsPresent）与 CodeBuddy 账号标签的受限
+ * 解析（codebuddyAccountLabel）：探测只看文件是否存在；标签解析按网关同一选取规则
+ * 解析出实际命中的 .info 后只提取非敏感的账号标识（昵称、邮箱、uid）与地域，
+ * token 绝不进入 UI 响应。
  */
 
 const GATEWAY_LOG_TAIL_BYTES = 256 * 1024;
@@ -395,6 +397,7 @@ function configResponse(
   const live = readGatewayConfigFile(paths.gatewayConfig);
   // 管理模式来自安装 state；临时实例（serve --config）没有安装语义，按托管展示。
   const codexConfigManaged = instanceOnly ? true : readCodexConfigManaged(paths.stateFile);
+  const codebuddyAuthDir = providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory();
   // Qoder 只读来源：按网关实际加载顺序（CLI 优先，缺失回退桌面版）返回当前生效项。
   const qoderSources = qoderActiveSources({
     intlConfigDir: providerDeps?.qoderConfigDir,
@@ -407,7 +410,6 @@ function configResponse(
     editable: {
       zcode: live.zcode === true,
       codebuddy: live.codebuddy === true,
-      codebuddyRegion: live.codebuddyRegion ?? "auto",
       qoder: live.qoder === true,
       agy: live.agy === true,
       requestLogging: live.requestLogging === true,
@@ -417,10 +419,14 @@ function configResponse(
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
-    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。
+    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是
+    // codebuddyAccountLabel：按网关同一选取规则实时解析当前实际命中的登录，
+    // 只提取非敏感的账号标识（昵称、邮箱、uid）与地域（auto 与锁定文件共用同一
+    // 流程），token 绝不进入响应；账号切换只在 CLI，UI 不提供也不接受该字段的写入。
     detected: {
       zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
-      codebuddy: codebuddyCredentialsPresent(providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory()),
+      codebuddy: codebuddyCredentialsPresent(codebuddyAuthDir),
+      codebuddyAccountLabel: codebuddyAccountLabel(codebuddyAuthDir, live.codebuddyAccount) ?? null,
       // 当前实际可加载任一地域凭据即显示开关；检测只看文件存在性，不读内容。
       qoder: qoderSources.length > 0,
       qoderSources,

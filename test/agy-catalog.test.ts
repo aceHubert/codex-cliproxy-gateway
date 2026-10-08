@@ -69,7 +69,7 @@ test("agy 目录合成：agy/ 前缀与显示名一致、能力字段来自 Mode
   const catalog = buildAgyCatalog(parseAgyCatalogData(modelsResponse()));
   const flash = catalog.models[0]!;
   assert.equal(flash.slug, `${AGY_PREFIX}gemini-3.8-flash`);
-  assert.equal(flash.display_name, "AGN/Gemini 3.8 Flash");
+  assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
   assert.equal(flash.prefer_websockets, false);
   assert.equal(flash.supports_reasoning_summaries, true);
   assert.deepEqual(flash.input_modalities, ["text"]);
@@ -160,7 +160,7 @@ test("agy 多档位家族合并为一个目录条目，单档位后缀模型保�
   assert.deepEqual(catalog.models.map((entry) => entry.slug),
     ["agy/gemini-3.8-flash", "agy/gemini-3.7-pro", "agy/gpt-oss-120b-medium"]);
   const flash = catalog.models[0]!;
-  assert.equal(flash.display_name, "AGN/Gemini 3.8 Flash");
+  assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
   assert.equal(flash.context_window, 1_000_000, "窗口取家族成员最大值");
   assert.match(flash.description!, /reasoning effort/);
   // supported_reasoning_levels 只列家族实际存在的档位：不得出现基底快照的 xhigh/minimal。
@@ -172,7 +172,7 @@ test("agy 多档位家族合并为一个目录条目，单档位后缀模型保�
   assert.equal(flash.web_search_tool_type, "text_and_image");
   // 无档位后缀的独立条目保留字段但置空档位（不删除字段）。
   const oss = catalog.models[2]!;
-  assert.equal(oss.display_name, "AGN/GPT-OSS 120B (Medium)");
+  assert.equal(oss.display_name, "AGY/GPT-OSS 120B (Medium)");
   assert.deepEqual((oss.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort), []);
   assert.equal(oss.default_reasoning_level, "medium");
 });

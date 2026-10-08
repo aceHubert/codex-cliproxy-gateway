@@ -54,6 +54,23 @@ test("ZCode 发布的 JSON Schema 声明默认关闭且移除旧属性", () => {
   assert.equal(Object.hasOwn(schema.properties, "zai"), false);
 });
 
+test("CodeBuddy 账号 Schema：codebuddyAccount 为字符串，codebuddyRegion 标 deprecated", () => {
+  const schema = JSON.parse(fs.readFileSync(
+    path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+  ));
+  assert.equal(schema.properties.codebuddyAccount.type, "string");
+  assert.match(schema.properties.codebuddyAccount.description, /codebuddy --switch/);
+  assert.equal(schema.properties.codebuddyRegion.deprecated, true);
+  // 合法形状不产生软告警；带路径或非字符串的账号值触发告警。
+  const config = validConfig(resolvePaths({ HOME: "/tmp/codex-codebuddy-schema" }));
+  assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }), []);
+  assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "auto" }), []);
+  // 历史哨兵 default 已改名：文件里残留的旧值由读取归一改写，schema 本身不再接受。
+  for (const bad of ["default", "../escape.info"]) {
+    assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: bad }), ["$.codebuddyAccount has an invalid format"], bad);
+  }
+});
+
 test("旧配置读取只提取合法 enabled，并优先保留新字段", () => {
   for (const enabled of [true, false]) {
     assert.equal(migrateLegacyConfig({ zai: { enabled } }).zcode, enabled);
@@ -61,6 +78,43 @@ test("旧配置读取只提取合法 enabled，并优先保留新字段", () => 
   }
   for (const zai of [null, true, {}, { enabled: "true" }, []]) {
     assert.equal(Object.hasOwn(migrateLegacyConfig({ zai }), "zcode"), false);
+  }
+});
+
+test("旧 codebuddyRegion 读取时归一为 codebuddyAccount=auto，且不覆盖已有账号", () => {
+  for (const region of ["auto", "cn", "intl"] as const) {
+    const migrated = migrateLegacyConfig({ codebuddyRegion: region });
+    assert.equal(migrated.codebuddyAccount, "auto", `${region} 一律归一为 auto`);
+    // 已有新值时不迁移：账号锁定优先于历史地域偏好。
+    assert.equal(migrateLegacyConfig({ codebuddyRegion: region, codebuddyAccount: "locked.info" }).codebuddyAccount, "locked.info");
+  }
+  // 非法旧值（手改成怪类型）不迁移，交由 schema 软告警。
+  for (const bogus of ["us", 42, null]) {
+    assert.equal(Object.hasOwn(migrateLegacyConfig({ codebuddyRegion: bogus }), "codebuddyAccount"), false);
+  }
+});
+
+test("历史哨兵 codebuddyAccount=default 读取归一为 auto，命令前置同步改写文件并记审计", () => {
+  assert.equal(migrateLegacyConfig({ codebuddyAccount: "default" }).codebuddyAccount, "auto");
+  assert.equal(migrateLegacyConfig({ codebuddyAccount: "locked.info" }).codebuddyAccount, "locked.info");
+  for (const configVersion of ["zcode-config-test-old", GATEWAY_CONFIG_VERSION]) {
+    withConfigFile((paths) => {
+      const config = { ...validConfig(paths), configVersion, codebuddyAccount: "default" };
+      fs.writeFileSync(paths.gatewayConfig, JSON.stringify(config));
+      fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, config }));
+      syncGatewayConfigFile(paths);
+      const synced = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+      assert.equal(synced.codebuddyAccount, "auto");
+      assert.deepEqual(gatewayConfigWarnings(synced), []);
+      assert.deepEqual(JSON.parse(fs.readFileSync(paths.stateFile, "utf8")).config, synced);
+      assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /codebuddyAccount \(default -> auto\)/);
+      // 再同步一次：文件与审计都不再变化。
+      const contents = fs.readFileSync(paths.gatewayConfig, "utf8");
+      const audit = fs.readFileSync(paths.stdoutLog, "utf8");
+      syncGatewayConfigFile(paths);
+      assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), contents);
+      assert.equal(fs.readFileSync(paths.stdoutLog, "utf8"), audit);
+    });
   }
 });
 

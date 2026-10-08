@@ -4,6 +4,7 @@ import {
   CodebuddyCredentialError,
   createCodebuddyCredentialCache,
   defaultAuthDirectory,
+  isCodebuddyAccountName,
 } from "./credentials.ts";
 import type { CodebuddyCredentialCache } from "./credentials.ts";
 import {
@@ -63,8 +64,9 @@ export function codebuddyEnabled(config: GatewayConfig): boolean {
 
 export function validateCodebuddyConfig(config: GatewayConfig): void {
   if (config.codebuddy !== undefined && typeof config.codebuddy !== "boolean") throw new Error("codebuddy 必须为 boolean");
-  if (config.codebuddyRegion !== undefined && !["auto", "cn", "intl"].includes(config.codebuddyRegion)) {
-    throw new Error("codebuddyRegion 必须是 auto、cn 或 intl");
+  if (config.codebuddyAccount !== undefined
+    && (typeof config.codebuddyAccount !== "string" || !isCodebuddyAccountName(config.codebuddyAccount))) {
+    throw new Error("codebuddyAccount 必须是认证目录内的 .info 文件名或 auto");
   }
   if (!codebuddyEnabled(config)) return;
   const host = config.host;
@@ -96,20 +98,19 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   const credentialCache = enabled
     ? dependencies.credentialCache ?? createCodebuddyCredentialCache(
       dependencies.authDirectory ?? defaultAuthDirectory(),
-      config.codebuddyRegion === "cn" || config.codebuddyRegion === "intl"
-        ? { preferredRegion: config.codebuddyRegion }
-        : {},
+      config.codebuddyAccount ? { preferredAccount: config.codebuddyAccount } : {},
     )
     : undefined;
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const catalogStore = enabled
     ? createCodebuddyCatalogStore({
       cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
-      // 目录刷新按 codebuddyRegion/auto 选择地域；请求路由则始终以带地域 slug 为准。
+      // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
+      // 请求路由则始终以带地域 slug 为准。
       credentials: async () => {
         const list = [];
         for (const product of ["cli", "work"] as const) {
-          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 配置地域缺失时由另一产品/auto 兜底。 */ }
+          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
         }
         return list;
       },

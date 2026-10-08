@@ -15,11 +15,11 @@ import { ModelPicker } from "./ModelPicker.tsx";
 import { useI18n } from "./i18n.tsx";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
 
-/** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。 */
+/** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。
+ * CodeBuddy 账号不在表单内：UI 只读展示实时解析标签，切换走 CLI。 */
 interface FormState {
   zcode: boolean;
   codebuddy: boolean;
-  codebuddyRegion: "auto" | "cn" | "intl";
   qoder: boolean;
   agy: boolean;
   requestLogging: boolean;
@@ -102,7 +102,6 @@ export function ConfigPage({
       setForm({
         zcode: next.editable.zcode,
         codebuddy: next.editable.codebuddy,
-        codebuddyRegion: next.editable.codebuddyRegion,
         qoder: next.editable.qoder,
         agy: next.editable.agy,
         requestLogging: next.editable.requestLogging,
@@ -130,7 +129,6 @@ export function ConfigPage({
     if (!config || !form) return false;
     return form.zcode !== config.editable.zcode
       || form.codebuddy !== config.editable.codebuddy
-      || form.codebuddyRegion !== config.editable.codebuddyRegion
       || form.qoder !== config.editable.qoder
       || form.agy !== config.editable.agy
       || form.requestLogging !== config.editable.requestLogging
@@ -200,9 +198,6 @@ export function ConfigPage({
       const changes: UiConfigChanges = {};
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
-      if (formSnapshot.codebuddyRegion !== config.editable.codebuddyRegion) {
-        changes.codebuddyRegion = formSnapshot.codebuddyRegion;
-      }
       if (formSnapshot.qoder !== config.editable.qoder) changes.qoder = formSnapshot.qoder;
       if (formSnapshot.agy !== config.editable.agy) changes.agy = formSnapshot.agy;
       if (formSnapshot.requestLogging !== config.editable.requestLogging) {
@@ -429,23 +424,14 @@ export function ConfigPage({
                           />
                           <span className="slider" />
                         </label>
-                        <div className="region-segmented" role="group" aria-label={t("labelCodebuddyRegion")}>
-                          {(["auto", "cn", "intl"] as const).map((region) => (
-                            <button
-                              key={region}
-                              type="button"
-                              className={`region-btn${form.codebuddyRegion === region ? " active" : ""}`}
-                              disabled={upstreamOnly}
-                              aria-pressed={form.codebuddyRegion === region}
-                              onClick={() => setForm({ ...form, codebuddyRegion: region })}
-                            >
-                              {region.toUpperCase()}
-                            </button>
-                          ))}
-                        </div>
+                        {/* 账号选择只在 CLI（codebuddy --switch）：这里只读显示后端实时
+                            解析的实际命中账号，无交互态、不进 changes、不写配置。 */}
+                        <span className="account-readonly" aria-label={t("labelCodebuddyAccount")}>
+                          {config.detected.codebuddyAccountLabel ?? t("codebuddyAccountNone")}
+                        </span>
                       </div>
                       <p className="field-desc">{t("descCodebuddy")}</p>
-                      <p className="field-desc">{t("descCodebuddyRegion")}</p>
+                      <p className="field-desc">{t("descCodebuddyAccount")}</p>
                       {upstreamOnly && (
                         <p className="field-desc zcode-disabled-hint">{t("codebuddyDisabledHint")}</p>
                       )}

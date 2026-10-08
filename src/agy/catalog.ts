@@ -19,7 +19,7 @@ import type { AgyCredentials } from "./credentials.ts";
 
 export const AGY_PREFIX = "agy/";
 /** 显示名前缀：与路由 slug 区分的大写标签（对齐 CodeBuddy 的 CB-/WB- 风格）。 */
-export const AGY_DISPLAY_PREFIX = "AGN/";
+export const AGY_DISPLAY_PREFIX = "AGY/";
 /** 目录缓存修订号：合成规则变化时递增，避免复用旧结构的磁盘缓存
  *  （v2：档位家族合并；v3：levels 按实际档位重建；v4：删 web_search_tool_type；
  *  v5：v3/v4 的字段删除改为保留字段置中性值——缺字段疑似导致 Codex 弃用目录）。 */

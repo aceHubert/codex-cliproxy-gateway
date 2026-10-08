@@ -12,7 +12,7 @@ compaction/426/族拒绝/models-cache 失效测试补齐。
 
 按调研文档（`docs/antigravity-cli-upstream-research.md`）实现 Antigravity CLI 上游适配器：
 config 提供 `agy` 开关，自动读取本机 agy 登录（只读），动态生成 `agy/` 前缀模型目录
-（显示名用大写 `AGN/` 标签，路由 slug 仍为 `agy/`），Codex 经 `/v1/responses` 调用 Google Cloud Code Assist `v1internal`
+（显示名用大写 `AGY/` 标签，路由 slug 仍为 `agy/`），Codex 经 `/v1/responses` 调用 Google Cloud Code Assist `v1internal`
 推理；Web UI 增加开关展示。与 Qoder/CodeBuddy 同构接入，不影响既有上游与安全红线。
 
 ## 范围

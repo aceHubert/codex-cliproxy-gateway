@@ -110,11 +110,16 @@
       "type": "boolean",
       "default": false
     },
+    "codebuddyAccount": {
+      "description": "CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 .info 文件名时锁定该账号登录（文件缺失时运行期回退 auto，不改写配置）；\"auto\" 或缺省按最近刷新的登录自动选取，并随客户端切换账号自动跟随。切换入口：codebuddy --switch。历史哨兵 \"default\" 读取时自动改写为 \"auto\"。",
+      "type": "string",
+      "pattern": "^(auto|[^/\\\\]+\\.info)$"
+    },
     "codebuddyRegion": {
-      "description": "CodeBuddy/WorkBuddy 凭据地域：auto 按最近刷新的登录选择；cn 或 intl 固定地域，指定地域没有凭据时回退 auto。",
+      "description": "(deprecated) 已由 codebuddyAccount 取代；读取时旧值自动迁移为 codebuddyAccount=\"auto\"，命令前置同步会移除该键。",
       "type": "string",
       "enum": ["auto", "cn", "intl"],
-      "default": "auto"
+      "deprecated": true
     },
     "qoder": {
       "description": "是否启用 Qoder Responses 入口；默认关闭，自动发现各地域 CLI 登录。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
