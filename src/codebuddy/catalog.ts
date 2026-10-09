@@ -41,6 +41,11 @@ export function isCodebuddyModel(model: unknown): boolean {
     || lower.startsWith(WORKBUDDY_PREFIX);
 }
 
+/** 对外目录实际使用的前缀族（产品 × 地域）；旧前缀 codebuddy/、workbuddy/ 已不再产出目录。 */
+export function codebuddyModelPrefixes(): string[] {
+  return MODEL_ROUTES.map((route) => route.prefix);
+}
+
 export function codebuddyFamilyPrefix(profile: CodebuddyProfile): string {
   const product = profileProduct(profile) === "work" ? "workbuddy" : "codebuddy";
   return `${product}-${profileRegion(profile)}/`;

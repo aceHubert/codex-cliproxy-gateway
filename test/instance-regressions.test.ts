@@ -77,6 +77,17 @@ test("serve 失败后连续配置调用仍修改当前环境的实例，且不�
   `);
 });
 
+test("模型排除命令使用当前实例配置和审计，不修改另一实例或默认服务", { timeout: 60_000 }, () => {
+  isolatedScenario(`
+    await assert.rejects(runCli(["serve", "--config", path.join(rootB, "missing.json")]), /Gateway config not found/);
+    await runCli(["models", "--exclude", "agy/hidden-model"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(rootA, "config.json"))).excludedModels, ["agy/hidden-model"]);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(rootB, "config.json"))).excludedModels, undefined);
+    assert.match(fs.readFileSync(pathsA.stdoutLog, "utf8"), /models --exclude/);
+    assert.deepEqual(calls, []);
+  `);
+});
+
 test("status 与 web 拒绝异实例健康响应，不能启动服务或打开其他实例 UI", { timeout: 60_000 }, () => {
   isolatedScenario(`
     fs.writeFileSync(pathsA.stateFile, JSON.stringify({ codexConfigManaged: false, codexHome: codexA, config: configFor(rootA) }));

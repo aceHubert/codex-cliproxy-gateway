@@ -120,6 +120,7 @@ function renderModelPicker(
   output: TerminalOutput,
   previousLines: number,
   message = "",
+  title = "Available CLIProxy models",
 ): number {
   const visibleCount = Math.min(availableModels.length, Math.max(1, Math.min(10, (output.rows || 24) - 4)));
   const start = Math.min(
@@ -130,7 +131,7 @@ function renderModelPicker(
   const selected = new Set(state.selectedModels);
   const maxWidth = Math.max(1, (output.columns || 80) - 1);
   const lines = [
-    `Available CLIProxy models (${start + 1}-${end}/${availableModels.length}):`,
+    `${title} (${start + 1}-${end}/${availableModels.length}):`,
     ...availableModels.slice(start, end).map((model, offset) => {
       const index = start + offset;
       const pointer = index === state.cursor ? ">" : " ";
@@ -153,6 +154,7 @@ function chooseModelsWithKeyboard(
   requireNonEmpty: boolean,
   input: TerminalInput,
   output: TerminalOutput,
+  title = "Available CLIProxy models",
 ): Promise<string[]> {
   return new Promise((resolve, reject) => {
     let state: PickerState = { cursor: 0, selectedModels: currentSelection };
@@ -176,7 +178,7 @@ function chooseModelsWithKeyboard(
       if (key.name === "up" || key.name === "down" || key.name === "space" || value === " ") {
         const pickerKey: PickerKey = value === " " ? "space" : key.name as PickerKey;
         state = applyModelPickerKey(state, pickerKey, availableModels);
-        renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines);
+        renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines, "", title);
         return;
       }
 
@@ -189,6 +191,7 @@ function chooseModelsWithKeyboard(
             output,
             renderedLines,
             "Select at least one model.",
+            title,
           );
           return;
         }
@@ -202,7 +205,7 @@ function chooseModelsWithKeyboard(
     input.setRawMode(true);
     input.resume();
     output.write("\x1b[?25l");
-    renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines);
+    renderedLines = renderModelPicker(availableModels, modelLabels, state, output, renderedLines, "", title);
   });
 }
 
@@ -213,6 +216,8 @@ interface ChooseModelsOptions {
   requireNonEmpty?: boolean;
   input?: TerminalInput;
   output?: TerminalOutput;
+  /** 列表标题（含用途说明，如排除模型勾选）；缺省沿用上游模型选择的标题。 */
+  title?: string;
 }
 
 export async function chooseModels({
@@ -222,6 +227,7 @@ export async function chooseModels({
   requireNonEmpty = false,
   input = process.stdin,
   output = process.stdout,
+  title,
 }: ChooseModelsOptions): Promise<string[]> {
   const entries = modelPickerEntries(availableModels);
   const available = entries.map((model) => model.slug);
@@ -240,7 +246,7 @@ export async function chooseModels({
     throw new Error("Interactive model selection requires a terminal; use --select all, model IDs, or number ranges");
   }
 
-  return chooseModelsWithKeyboard(available, modelLabels, current, requireNonEmpty, input, output);
+  return chooseModelsWithKeyboard(available, modelLabels, current, requireNonEmpty, input, output, title);
 }
 
 export function selectedModelsFromCatalog(catalog: ModelCatalog, prefix = "cliproxy/"): string[] {

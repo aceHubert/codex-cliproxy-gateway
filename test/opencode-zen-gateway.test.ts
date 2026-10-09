@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createGatewayHandler, isZenResponsesWebSocket } from "../src/gateway.ts";
+import { collectCompatibleModels } from "../src/cli.ts";
 import {
   ZEN_CLIENT_USER_AGENT,
   ZEN_AGENT_SYSTEM_PROMPT,
@@ -118,6 +119,38 @@ function chatRequest(model = MODEL, extra: Json = {}, headers: Record<string, st
     body: JSON.stringify({ model, messages: [{ role: "user", content: "解释 TCP TIME_WAIT 状态" }], ...extra }),
   });
 }
+
+test("合并排除规则后 Zen 目录与推理保持可用，原有兼容端仍在转发前拒绝", TIMEOUT, async () => {
+  await fixture(async ({ create }) => {
+    const handler = create({ excludedModels: ["agy/hidden-model", "opencode-zen/*"] });
+    const listed = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    const models = await listed.json() as { data: Array<{ id: string }> };
+    assert.ok(models.data.some((model) => model.id === MODEL));
+    const blocked = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "agy/hidden-model", input: "test" }),
+    }));
+    assert.equal(blocked.status, 404);
+    assert.equal(blocked.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+    const response = await handler(chatRequest());
+    assert.equal(response.status, 200);
+    await response.text();
+  });
+});
+
+test("普通兼容模型列表包含 Zen，五产品排除选择器不扩展到 Zen", TIMEOUT, async () => {
+  await fixture(async ({ config, directory }) => {
+    const dependencies = { zen: {
+      cacheDirectory: directory, refreshCatalogOnStart: false,
+      fetch: async () => Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }),
+      fetchMetadata: async () => ({}), probeModel: async () => "chat" as const,
+    } };
+    const listed = await collectCompatibleModels(config, dependencies);
+    assert.ok(listed.entries.some((model) => model.slug === MODEL));
+    const selectable = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
+    assert.equal(selectable.entries.some((model) => model.slug === MODEL), false);
+  });
+});
 
 test("zen 配置校验：类型、环回监听与前缀保留", () => {
   const base: GatewayConfig = {

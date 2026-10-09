@@ -538,6 +538,55 @@ input:checked + .slider:before {
   box-shadow: 0 0 0 2px var(--accent-glow);
 }
 
+/* 排除模型等多行规则输入：等宽字体，占据整行控件区 */
+.input-textarea {
+  background: var(--bg-input-editable);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-md);
+  padding: 7px 11px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg-primary);
+  width: 100%;
+  max-width: 360px;
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+.input-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* 排除模型分组输入：挂在各兼容端开关下方，自适应多列排布 */
+.excluded-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  max-width: 560px;
+}
+.excluded-groups .field-desc {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.excluded-group {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+.excluded-group-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.excluded-group .input-textarea {
+  max-width: none;
+}
+
 .log-size-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 76px;

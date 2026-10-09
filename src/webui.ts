@@ -7,10 +7,12 @@ import { GATEWAY_CONFIG_VERSION } from "./config.ts";
 import {
   applySelectedModelsPatch,
   applyWebUiConfigPatch,
+  excludedModelGroupsFor,
   markPendingRestart,
   parseSelectedModels,
   readGatewayConfigFile,
   sanitizeUrlValue,
+  splitExcludedModelsByGroup,
 } from "./config-update.ts";
 import { gatewayServiceLabel, restartLaunchAgent } from "./launchd.ts";
 import { instanceMarker, realPathOrResolve, resolvePaths, runWithInstancePaths } from "./paths.ts";
@@ -406,6 +408,13 @@ function configResponse(
     cnDesktopDir: providerDeps?.qoderCnDesktopDir,
     home: paths.home,
   });
+  // 排除模型按兼容端分组下发：条目不带前缀（保存时网关补全），前缀只在分组定义里
+  // 出现；归不进分组的规则放 other 原样回传，保证往返不丢。
+  const excludedGroups = excludedModelGroupsFor(live);
+  const { entries: excludedEntries, other: excludedOther } = splitExcludedModelsByGroup(
+    Array.isArray(live.excludedModels) ? live.excludedModels : [],
+    excludedGroups,
+  );
   return Response.json({
     editable: {
       zcode: live.zcode === true,
@@ -419,6 +428,9 @@ function configResponse(
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
+      excludedGroups,
+      excludedEntries,
+      excludedOther,
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
     // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是
@@ -601,6 +613,13 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
     try {
       const managesService = ctx.instanceOnly !== true;
       const { applied } = applyWebUiConfigPatch(ctx.paths, patch as Record<string, unknown>, managesService);
+      // 排除规则改变目录内容：与 selectedModels 同策略，动态路由下失效 Codex 目录缓存
+      // 让下一次 /models 立即反映（upstream-only 由 Codex 静态加载目录文件，靠重启生效）。
+      if (applied.some((change) => change.field === "excludedModels") && config.upstreamOnly !== true) {
+        try {
+          invalidateModelsCache(ctx.paths.modelsCacheFile);
+        } catch {}
+      }
       const restarting = managesService && fs.existsSync(ctx.paths.launchAgent);
       if (restarting) {
         markPendingRestart(ctx.paths.stateFile);

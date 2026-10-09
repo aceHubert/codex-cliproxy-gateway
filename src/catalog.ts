@@ -436,6 +436,62 @@ export function mergeCatalog(
   return { models: [...nativeModels, ...proxyModels] };
 }
 
+/**
+ * excludedModels 匹配器：对合并后的完整模型 ID（含厂商前缀，如 codebuddy-intl/gpt-4o）
+ * 判定，规则两侧统一小写。三种形态：以 `/` 结尾按前缀族匹配（codebuddy-intl/）、
+ * 含 `*` 按轻量 glob 匹配（* 等价 .*，如 qoder-cn/*、zcode*）、其余精确匹配。
+ * 纯 `*` 规则会排除全部模型，写入路径（parseExcludedModels）一律拒绝；运行期读到
+ * 手改配置里的裸通配时按空规则忽略，避免把整个目录清空。
+ */
+export interface ModelExclusionFilter {
+  isEmpty: boolean;
+  isExcluded(slug: string): boolean;
+}
+
+export function compileModelFilter(patterns: readonly string[] | undefined): ModelExclusionFilter {
+  const rules = (patterns ?? [])
+    .map((pattern) => pattern.trim().toLowerCase())
+    .filter((pattern) => pattern && !/^\*+$/.test(pattern))
+    .map((pattern) => {
+      if (pattern.endsWith("/")) {
+        return (slug: string) => slug.startsWith(pattern);
+      }
+      if (pattern.includes("*")) {
+        // 与 models.ts 的选择器同一语义：先整体转义，再把 * 还原为 .*，其余字符按字面量。
+        const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\*/g, ".*");
+        const glob = new RegExp(`^${escaped}$`);
+        return (slug: string) => glob.test(slug);
+      }
+      return (slug: string) => slug === pattern;
+    });
+  return {
+    isEmpty: rules.length === 0,
+    isExcluded(slug: string): boolean {
+      const normalized = slug.trim().toLowerCase();
+      return rules.some((rule) => rule(normalized));
+    },
+  };
+}
+
+/**
+ * 合并目录输出的最后一步：剔除所有命中 excludedModels 的条目。空规则原样返回。
+ * scope 限定排除的作用域（本地兼容端模型）：作用域外的条目——官方原生与上游
+ * cliproxy/ 模型——即使被历史规则点名也一律保留，它们的选择由 selectedModels
+ * 与 Codex 自身管理。
+ */
+export function filterExcludedModels(
+  catalog: ModelCatalog,
+  patterns: readonly string[] | undefined,
+  scope?: (slug: string) => boolean,
+): ModelCatalog {
+  const filter = compileModelFilter(patterns);
+  if (filter.isEmpty) return catalog;
+  return {
+    models: catalog.models.filter((model) =>
+      (scope ? !scope(model.slug) : false) || !filter.isExcluded(model.slug)),
+  };
+}
+
 interface SyncCatalogOptions {
   catalogFile: string;
   modelsConfigFile: string;

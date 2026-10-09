@@ -39,7 +39,8 @@ import {
   websocketUrl,
 } from "./realtime.ts";
 import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
-import { mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { isLocalAdapterModel } from "./config-update.ts";
 import { atomicWrite } from "./toml.ts";
 import {
   logExchange,
@@ -945,6 +946,10 @@ async function catalogModelsResponse(
     if (qoderCatalog) merged = mergeQoderCatalog(merged, qoderCatalog);
     if (agyCatalog) merged = mergeAgyCatalog(merged, agyCatalog);
     if (zenCatalog) merged = mergeZenCatalog(merged, zenCatalog);
+    // 所有适配器与上游目录合并完成后统一按 excludedModels 过滤（仅本地兼容端模型，
+    // 官方与上游模型不受影响）：无论命中哪个来源，/models（含 client_version 的
+    // Codex 原始目录形态）都不再暴露被排除模型。
+    merged = filterExcludedModels(merged, config.excludedModels, isLocalAdapterModel);
     return modelCatalogResponse(merged, clientVersion, owner, config.prefix, Boolean(zcodeCatalog));
   };
   if (config.upstreamOnly === true) {
@@ -1007,6 +1012,20 @@ export function isUnderMountPath(pathname: string, mountPath: string): boolean {
   return pathname === mountPath || pathname.startsWith(mountPath.endsWith("/") ? mountPath : `${mountPath}/`);
 }
 
+/** 被排除模型的推理请求拦截：模型已从 /models 撤下，会话继续点名它会直接 404，
+ * 绝不向对应上游转发；提示里给出解除排除的入口。 */
+function excludedModelResponse(model: string): Response {
+  return Response.json(
+    {
+      error: {
+        message: `Model "${model}" is excluded by the gateway's excludedModels configuration`,
+        hint: "Remove or narrow the exclusion (codex-cliproxy models --exclude, or the Web UI) to use this model",
+      },
+    },
+    { status: 404, headers: { "x-codex-cliproxy-gateway": "model-excluded" } },
+  );
+}
+
 export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
@@ -1038,6 +1057,7 @@ export function createGatewayHandler(
   const upstreams = new WeakMap<Request, string>();
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
+  const modelExclusion = compileModelFilter(config.excludedModels);
   const logging = config.requestLogging === true;
   const sink = resolveLogSink(config, processLog);
   // 启动补扫一次：保留计数按时间全局生效，不必等某个分组再被写入。ZCode 适配器用的是
@@ -1146,6 +1166,10 @@ export function createGatewayHandler(
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
+      // 排除拦截只覆盖原有本地兼容端；保留 Zen 多协议路由，不扩展排除作用域。
+      if (typeof model === "string" && isLocalAdapterModel(model) && modelExclusion.isExcluded(model)) {
+        return excludedModelResponse(model);
+      }
       // Zen 多协议：responses 入口对 opencode-zen/ 模型分发到 Zen 适配器（responses
       // 协议直通，其余协议自动转换）；compact 子树不支持。
       if (zenEnabled(config) && isZenModel(model)) {
@@ -1306,6 +1330,16 @@ export function createGatewayHandler(
         { error: { message: error instanceof Error ? error.message : String(error) } },
         { status: 400 },
       );
+    }
+    // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
+    // 模型已从 /models 撤下，继续转发只会把请求送向未启用的上游。仅本地兼容端
+    // 模型参与排除，上游与官方模型不受历史规则影响。
+    if (request.method === "POST") {
+      const requestedModel = typeof json?.model === "string" ? json.model : hinted;
+      if (typeof requestedModel === "string" && isLocalAdapterModel(requestedModel)
+        && modelExclusion.isExcluded(requestedModel)) {
+        return excludedModelResponse(requestedModel);
+      }
     }
     const upstreamBase = route.kind === "cliproxy" ? config.upstreamBaseUrl : config.officialBaseUrl;
     let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);

@@ -35,19 +35,29 @@ import {
 } from "./upstream-catalog.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
-import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
+import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 import { requestLogDir } from "./request-log.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
-import { validateZcodeConfig, zcodeEnabled } from "./zcode/index.ts";
-import { codebuddyEnabled, validateCodebuddyConfig } from "./codebuddy/index.ts";
+import { validateZcodeConfig, zcodeEnabled, createZcodeAdapter, type ZcodeDependencies } from "./zcode/index.ts";
+import {
+  codebuddyEnabled,
+  createCodebuddyAdapter,
+  validateCodebuddyConfig,
+  type CodebuddyDependencies,
+} from "./codebuddy/index.ts";
 import {
   defaultAuthDirectory,
   listCodebuddyAccounts,
   resolveCodebuddyAccountFile,
 } from "./codebuddy/credentials.ts";
-import { qoderEnabled, validateQoderConfig } from "./qoder/index.ts";
-import { agyEnabled, validateAgyConfig } from "./agy/index.ts";
-import { zenEnabled, validateZenConfig } from "./opencode/index.ts";
+import {
+  createQoderAdapter,
+  qoderEnabled,
+  validateQoderConfig,
+  type QoderDependencies,
+} from "./qoder/index.ts";
+import { agyEnabled, createAgyAdapter, validateAgyConfig, type AgyDependencies } from "./agy/index.ts";
+import { zenEnabled, createZenAdapter, validateZenConfig, type ZenDependencies } from "./opencode/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -68,6 +78,7 @@ import type {
   CliOptions,
   GatewayConfig,
   ModelCatalog,
+  ModelEntry,
   ResolvedPaths,
   UpstreamType,
 } from "./types.ts";
@@ -140,7 +151,7 @@ Usage:
   codex-cliproxy start|stop
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
-  codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
+  codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--exclude [PATTERNS]] [--restart-codex]
   codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--opencode-zen on|off] [--log on|off] [--debug on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy codebuddy --switch
   codex-cliproxy web
@@ -174,14 +185,33 @@ Install options:
   Refusing leaves the existing installation untouched.
 
 Models:
-  models                list models currently shown through CLIProxy
+  models                list active compatible models (full IDs with vendor
+                        prefixes and display names) plus the current exclusion
+                        rules
   models --sync         refresh models in dynamic split routing
   models --sync --upstream-only
                         switch to a static upstream-only catalog with original model IDs
   --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
+  --exclude [PATTERNS]  manage excluded models for the local compatibility
+                        endpoints; every rule must start with a full adapter
+                        prefix (zcode/, zcode-<plan>/, codebuddy-intl|cn/,
+                        workbuddy-intl|cn/, qoder-intl|cn/, agy/; the
+                        product family globs zcode*/, codebuddy-*/,
+                        workbuddy-*/, qoder-*\/ cover every plan/region
+                        prefix at once) and wildcards may only follow it
+                        (e.g. codebuddy-intl/gpt-4o, qoder-cn/qoder-*);
+                        upstream models are selected via
+                        models --sync and official models are not excludable;
+                        family-wide patterns (prefix/ or prefix/*) are
+                        rejected — turn that endpoint off instead;
+                        --exclude none (or "") clears it; without a value an
+                        interactive checkbox picker lists every local
+                        compatibility model (space toggles exclusion, enter
+                        saves)
   --model-merge-json URL  update the cached models.json override
-  --restart-codex       stop Codex app-server after sync to refresh the model picker;
-                        active tasks may error and require recovery or reopening
+  --restart-codex       stop Codex app-server after sync or exclusion changes
+                        to refresh the model picker; active tasks may error
+                        and require recovery or reopening
 
 Config:
   config                print the current gateway settings
@@ -251,6 +281,16 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const next = args[i + 1];
+    if (key === "exclude") {
+      // --exclude 的值可选：无值进入交互勾选，有值按逗号/空白拆分为追加规则；
+      // 空串与 none 是清空排除列表的显式哨兵，必须在取值阶段原样保留。
+      if (next === undefined || next.startsWith("--")) options.exclude = true;
+      else {
+        options.exclude = next;
+        i += 1;
+      }
+      continue;
+    }
     if (next === undefined || next.startsWith("--")) throw new Error(`--${key} requires a value`);
     options[key] = next;
     i += 1;
@@ -637,6 +677,7 @@ const AUDITED_FIELDS = [
   "catalogPath",
   "model_merge_json",
   "selectedModels",
+  "excludedModels",
 ] as const;
 
 function diffConfig(
@@ -1211,6 +1252,189 @@ function printCurrentModels(config: GatewayConfig, selectedModels: string[]): vo
   }
 }
 
+/** 适配器依赖注入：CLI 直连收集目录时保持与网关一致的缺省行为，测试可整体替换。 */
+export interface CompatibleModelsDependencies {
+  zcode?: ZcodeDependencies;
+  codebuddy?: CodebuddyDependencies;
+  qoder?: QoderDependencies;
+  agy?: AgyDependencies;
+  zen?: ZenDependencies;
+}
+
+export interface CompatibleModelsSnapshot {
+  /** 当前可用的全部兼容模型（完整 ID 含厂商前缀，zcode/、codebuddy-intl/、qoder-cn/、agy/、cliproxy/）。 */
+  entries: ModelEntry[];
+  /** 收集失败的来源标签；单个来源失败只提示，不影响其余来源。 */
+  failures: string[];
+}
+
+/**
+ * 收集当前启用的所有兼容模型：上游目录读 catalogPath 落盘文件（models --sync 的
+ * 产物，动态路由按配置补 prefix），各适配器按网关同一入口拉取（带本地缓存）。
+ * 与网关 /models 的合并口径一致，但不做 excludedModels 过滤——排除配置的勾选与
+ * 展示需要看到完整目录。`includeUpstream: false` 时只收集本地适配器模型：排除
+ * 仅作用于本地兼容转发，上游模型的选择由 `models --sync`（selectedModels）管理。
+ */
+export async function collectCompatibleModels(
+  config: GatewayConfig,
+  dependencies: CompatibleModelsDependencies = {},
+  { includeUpstream = true }: { includeUpstream?: boolean } = {},
+): Promise<CompatibleModelsSnapshot> {
+  const entries: ModelEntry[] = [];
+  const failures: string[] = [];
+
+  if (includeUpstream) {
+    try {
+      const proxy = JSON.parse(fs.readFileSync(config.catalogPath, "utf8")) as ModelCatalog;
+      if (!Array.isArray(proxy.models)) throw new Error("catalog file does not contain a models array");
+      const prefix = config.upstreamOnly === true ? "" : config.prefix;
+      entries.push(...proxy.models.map((model) => ({ ...model, slug: `${prefix}${model.slug}` })));
+    } catch {
+      failures.push(upstreamLabel(config));
+    }
+  }
+
+  const collect = async (
+    label: string,
+    enabled: boolean,
+    create: () => { catalog(): Promise<ModelCatalog>; close(): void },
+  ): Promise<void> => {
+    if (!enabled) return;
+    const adapter = create();
+    try {
+      entries.push(...(await adapter.catalog()).models);
+    } catch {
+      failures.push(label);
+    } finally {
+      adapter.close();
+    }
+  };
+
+  await collect("zcode", zcodeEnabled(config), () => createZcodeAdapter(config, dependencies.zcode));
+  await collect("codebuddy", codebuddyEnabled(config), () =>
+    createCodebuddyAdapter(config, { refreshCatalogOnStart: false, ...dependencies.codebuddy }));
+  await collect("qoder", qoderEnabled(config), () =>
+    createQoderAdapter(config, { refreshCatalogOnStart: false, ...dependencies.qoder }));
+  await collect("agy", agyEnabled(config), () =>
+    createAgyAdapter(config, { refreshCatalogOnStart: false, ...dependencies.agy }));
+  // 普通列表包含 Zen；排除选择器继续遵循五产品分组的既定作用域。
+  if (includeUpstream) {
+    await collect("opencode-zen", zenEnabled(config), () =>
+      createZenAdapter(config, { refreshCatalogOnStart: false, ...dependencies.zen }));
+  }
+  return { entries, failures };
+}
+
+function printExcludedModels(config: GatewayConfig): void {
+  const patterns = Array.isArray(config.excludedModels) ? config.excludedModels : [];
+  console.log(`Excluded models (${patterns.length} rule${patterns.length === 1 ? "" : "s"}):`);
+  if (patterns.length === 0) {
+    console.log("  (none)");
+    return;
+  }
+  for (const pattern of patterns) console.log(`  ${pattern}`);
+}
+
+/** models 无参视图：活跃兼容模型（完整 ID + 显示名称，显示名自带地域标签）与排除规则。 */
+async function printCompatibleModels(config: GatewayConfig): Promise<void> {
+  const { entries, failures } = await collectCompatibleModels(config);
+  const sorted = [...entries].sort((left, right) => left.slug.localeCompare(right.slug));
+  console.log(`Active compatible models (${sorted.length}):`);
+  if (sorted.length === 0) console.log("  (none)");
+  for (const model of sorted) {
+    console.log(`  ${model.display_name || model.slug} (${model.slug})`);
+  }
+  for (const failure of failures) {
+    console.log(`WARNING: ${failure} catalog unavailable; its models are not listed.`);
+  }
+  printExcludedModels(config);
+}
+
+/** models --exclude 的依赖注入：交互选择器的输入输出可替换（测试用）。 */
+export interface ExcludeModelsDependencies extends CompatibleModelsDependencies {
+  input?: typeof process.stdin;
+  output?: typeof process.stdout;
+}
+
+/**
+ * `models --exclude` 的统一落地：option 为 true 走交互勾选（当前精确 ID 规则预勾选，
+ * 前缀族/通配规则保留），为字符串时按逗号/空白拆分追加（none 或空串清空）。结果经
+ * parseExcludedModels 归一后走 writeConfigAndRestart：写盘、审计、失效 Codex 目录
+ * 缓存并热重启网关；值未变化时不写盘。
+ */
+export async function excludeModels(
+  paths: ResolvedPaths,
+  config: GatewayConfig,
+  option: true | string,
+  restartCodex = false,
+  dependencies: ExcludeModelsDependencies = {},
+): Promise<void> {
+  const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
+  // 存量规则宽松归一（早期版本的整族规则仍被引擎识别，不能把用户锁在配置外）；
+  // 只有本次新输入走 parseExcludedModels 的严格校验（拒绝整族形态）。
+  const current = normalizeExcludedModels(Array.isArray(config.excludedModels) ? config.excludedModels : []);
+  let appliedLine: string;
+  let next: string[];
+
+  if (option === true) {
+    const input = dependencies.input ?? process.stdin;
+    const output = dependencies.output ?? process.stdout;
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error(
+        "models --exclude requires an interactive terminal; pass patterns directly, e.g. models --exclude codebuddy-intl/gpt-4o",
+      );
+    }
+    // 排除仅作用于本地兼容端：勾选列表不含上游目录（其选择由 models --sync 管理）。
+    const { entries, failures } = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
+    if (entries.length === 0) {
+      throw new Error("No local compatibility models to list; enable an adapter (config --zcode on, …) first");
+    }
+    for (const failure of failures) {
+      console.log(`WARNING: ${failure} catalog unavailable; its models are not listed.`);
+    }
+    // 交互勾选只能表达精确 ID：仍在目录里的旧精确规则进入预勾选；前缀族/通配/已下线
+    // 的规则勾选表达不了，一律保留，由结果合并带回。
+    const listedLower = new Set(entries.map((model) => model.slug.toLowerCase()));
+    const preselected = current.filter((pattern) => listedLower.has(pattern.toLowerCase()));
+    const preserved = current.filter((pattern) => !listedLower.has(pattern.toLowerCase()));
+    const selected = await chooseModels({
+      availableModels: entries,
+      currentSelection: preselected,
+      requireNonEmpty: false,
+      input,
+      output,
+      title: "Local compatibility models - space marks exclusion",
+    });
+    next = normalizeExcludedModels([...preserved, ...selected]);
+    appliedLine = `Exclusion rules saved from selection: ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
+  } else {
+    const trimmed = option.trim();
+    if (trimmed === "" || trimmed.toLowerCase() === "none") {
+      next = [];
+      appliedLine = "Excluded models cleared.";
+    } else {
+      const incoming = parseExcludedModels(trimmed.split(/[\s,]+/));
+      next = normalizeExcludedModels([...current, ...incoming]);
+      const added = next.length - current.length;
+      appliedLine = `Exclusion rules updated: ${added} added, ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
+    }
+  }
+
+  if (JSON.stringify(current) === JSON.stringify(next)) {
+    console.log("Excluded models unchanged; nothing to save.");
+    printExcludedModels(config);
+    return;
+  }
+  config.excludedModels = next;
+  await writeConfigAndRestart(paths, config, auditBefore, "models --exclude", [appliedLine], {
+    // 与 models --sync 同一策略：动态路由失效 Codex 目录缓存即可；upstream-only 由
+    // Codex 静态加载目录文件，靠用户确认后的 --restart-codex 重读。
+    invalidateModels: config.upstreamOnly !== true,
+  });
+  printExcludedModels(config);
+  if (restartCodex) await refreshCodexAppServer();
+}
+
 async function models(options: CliOptions): Promise<void> {
   const restartCodex = options["restart-codex"] === true;
   // 模式由 flag 显式选择：带 --upstream-only（旧别名 --cpa-only）即 upstream-only，不带即 split 动态目录。
@@ -1226,8 +1450,18 @@ async function models(options: CliOptions): Promise<void> {
   if (modelMergeJson) config.model_merge_json = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
 
+  if (options.exclude !== undefined) {
+    if (options.sync === true) throw new Error("--exclude cannot be combined with --sync");
+    // --upstream-only 与 --model-merge-json 已被 runCli 的前置守卫拒绝（要求 --sync）；
+    // --select 语义属于上游模型选择，与排除规则无关，显式拒绝避免静默忽略。
+    if (options.select !== undefined) throw new Error("--select cannot be combined with --exclude");
+    await excludeModels(paths, config, options.exclude as true | string, restartCodex);
+    return;
+  }
+
   if (options.sync !== true) {
     printCurrentModels(config, currentSelection);
+    await printCompatibleModels(config);
     return;
   }
 
@@ -1784,6 +2018,8 @@ async function configCommand(options: CliOptions): Promise<void> {
       maxGatewayLogBytes: config.maxGatewayLogBytes ?? 0,
       catalogPath: config.catalogPath,
       selectedModels: Array.isArray(config.selectedModels) ? config.selectedModels.length : 0,
+      // 排除规则条数少且就是观测对象本身，直接回显规则（selectedModels 可能上百条才折成计数）。
+      excludedModels: Array.isArray(config.excludedModels) ? config.excludedModels : [],
     }, null, 2));
     return;
   }
@@ -2050,7 +2286,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   uninstall: ["restart-codex"],
   restart: ["restart-codex"],
   serve: ["config"],
-  models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
+  models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json", "exclude"],
   config: ["zcode", "codebuddy", "qoder", "agy", "opencode-zen", "log", "debug", "max-request-logs", "max-log-size"],
   codebuddy: ["switch"],
   web: ["start", "daemon", "status", "stop", "restart"],
@@ -2076,8 +2312,8 @@ export async function runCli(args: string[]): Promise<void> {
       throw new Error(`Unknown option --${key} for command "${command}"`);
     }
   }
-  if (command === "models" && options["restart-codex"] === true && options.sync !== true) {
-    throw new Error("--restart-codex requires models --sync");
+  if (command === "models" && options["restart-codex"] === true && options.sync !== true && options.exclude === undefined) {
+    throw new Error("--restart-codex requires models --sync or models --exclude");
   }
   if (command === "models" && stringOption(options, "model-merge-json") && options.sync !== true) {
     throw new Error("--model-merge-json requires models --sync");
@@ -2111,7 +2347,7 @@ export async function runCli(args: string[]): Promise<void> {
       }
     }
     const writesClient = command === "restart" || command === "codebuddy"
-      || (command === "models" && options.sync === true)
+      || (command === "models" && (options.sync === true || options.exclude !== undefined))
       || (command === "config" && Object.keys(options).length > 0);
     if (writesClient && fs.existsSync(paths.stateFile)) {
       const state = loadJson<InstallState>(paths.stateFile);
