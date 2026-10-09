@@ -286,6 +286,9 @@ test("Qoder 国内版使用独立授权与端点生成 Qoder-CN 目录并完成�
     assert.ok(intlFlash, "国际版目录保持并存");
     assert.equal(cnFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
     assert.equal(intlFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT);
+    // 客户端优先按 model_messages.instructions_template 渲染系统提示词：模板必须一并替换。
+    const messages = cnFlash.model_messages as { instructions_template?: string } | undefined;
+    assert.equal(messages?.instructions_template, QODER_AGENT_SYSTEM_PROMPT, "instructions_template 必须替换，否则客户端仍发官方提示词");
     const response = await handler(request("qoder-cn/qfmodel", { stream: false }));
     assert.equal(response.status, 200);
     const payload = await response.json() as Json;

@@ -22,6 +22,7 @@ interface FormState {
   codebuddy: boolean;
   qoder: boolean;
   agy: boolean;
+  opencodeZen: boolean;
   requestLogging: boolean;
   maxRequestLogs: string;
   maxGatewayLogBytes: string;
@@ -104,6 +105,8 @@ export function ConfigPage({
         codebuddy: next.editable.codebuddy,
         qoder: next.editable.qoder,
         agy: next.editable.agy,
+        // 兼容未带该字段的后端（升级窗口期）：缺省视为关闭。
+        opencodeZen: next.editable.opencodeZen === true,
         requestLogging: next.editable.requestLogging,
         maxRequestLogs: String(next.editable.maxRequestLogs ?? 0),
         maxGatewayLogBytes: logSize.value,
@@ -131,6 +134,7 @@ export function ConfigPage({
       || form.codebuddy !== config.editable.codebuddy
       || form.qoder !== config.editable.qoder
       || form.agy !== config.editable.agy
+      || form.opencodeZen !== (config.editable.opencodeZen === true)
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
       || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0);
@@ -200,6 +204,9 @@ export function ConfigPage({
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
       if (formSnapshot.qoder !== config.editable.qoder) changes.qoder = formSnapshot.qoder;
       if (formSnapshot.agy !== config.editable.agy) changes.agy = formSnapshot.agy;
+      if (formSnapshot.opencodeZen !== (config.editable.opencodeZen === true)) {
+        changes.opencodeZen = formSnapshot.opencodeZen;
+      }
       if (formSnapshot.requestLogging !== config.editable.requestLogging) {
         changes.requestLogging = formSnapshot.requestLogging;
       }
@@ -513,6 +520,32 @@ export function ConfigPage({
                     </div>
                   </div>
                 )}
+                {/* OpenCode Zen 无本机凭据依赖（公共鉴权 Bearer public），开关无条件显示；
+                    官方门禁策略调整导致 403 时靠错误信息指引，不在此做可用性探测。 */}
+                <div className="field-row">
+                  <div className="field-label-group">
+                    <span className="field-label">{t("labelOpencodeZen")}</span>
+                    <span className="field-keyname">opencodeZen</span>
+                  </div>
+                  <div className="field-control-area">
+                    {/* upstream-only 模式下网关按禁用处理 zen 入口（zenEnabled）：
+                        开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
+                    <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                      <input
+                        type="checkbox"
+                        checked={form.opencodeZen}
+                        disabled={upstreamOnly}
+                        onChange={(event) => setForm({ ...form, opencodeZen: event.target.checked })}
+                      />
+                      <span className="slider" />
+                    </label>
+                    <p className="field-desc">{t("descOpencodeZen")}</p>
+                    <p className="field-desc">{t("descOpencodeZenAuth")}</p>
+                      {upstreamOnly && (
+                        <p className="field-desc zcode-disabled-hint">{t("opencodeZenDisabledHint")}</p>
+                      )}
+                  </div>
+                </div>
               </>
             )}
           </div>

@@ -6,27 +6,41 @@
 
 | 适配器 | 数据文件 | 运行时消费点 |
 | --- | --- | --- |
-| zcode | `src/zcode/fingerprint-data.json` | `request-context.ts`（来源头）+ `index.ts` 的 `catalog()`（目录条目 `base_instructions`） |
-| codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `index.ts` 的 `catalog()`（仅 `codebuddy/*` 条目） |
-| qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `index.ts` 的 `catalog()`（目录条目） |
-| agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `index.ts` 的 `catalog()`（目录条目） |
-| opencode-zen | `src/opencode-zen/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `index.ts` 的 `catalog()`（目录条目 `base_instructions`）+ 转发路 `injectZenFingerprintBody`（门禁模板注入） |
+| zcode | `src/zcode/fingerprint-data.json` | `request-context.ts`（来源头）+ `index.ts` 的 `publishServedCatalog()`（成品目录 `base_instructions` + 模板） |
+| codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `catalog.ts` 的 `cloneCodexBase()`（条目 `base_instructions` + 模板） |
+| qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `catalog.ts` 的 `buildQoderCatalog()`（条目） |
+| agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `catalog.ts` 的 `buildAgyCatalog()`（条目） |
+| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildZenCatalog()`（条目）+ 转发路 `injectZenFingerprintBody`（门禁模板注入） |
 
 与本机安装强相关的值（ZCode.app 版本）仍在运行时动态读取，JSON 中的 `appVersion` 只是分析快照。
 
 ## base_instructions 接线（系统提示词下发方式）
 
-Codex 发系统提示词的依据是模型目录条目的 `base_instructions` 字段（真实 Codex catalog 快照
-`models/codex_client_models.json` 中每个条目都带 17–21K 字符的官方提示词；网关合成条目原本是
-空串，Codex 因此回退客户端内置默认提示词）。五个适配器的 `catalog()` facade 现在把该字段
-**直接替换**为各自的 `agentSystemPrompt`：Codex 从 `/v1/models?client_version=…` 或
-`config.toml` 的 `model_catalog_json` 缓存文件读到条目后，按官方客户端提示词发送。OpenCode Zen
-同时保留转发路的门禁模板注入：客户端送来的首条 system 已完整包含待注入模板时（目录下发即如此），
-`injectZenFingerprintBody` 不再重复注入，避免同一段提示词出现两遍。
+Codex 发系统提示词的依据是模型目录条目的 `model_messages.instructions_template` 字段（真实
+Codex catalog 快照 `models/codex_client_models.json` 中每个条目都带 17–21K 字符的官方提示词；
+网关合成条目从 gpt-5.5 快照基底 clone，Codex 因此按官方默认提示词发送）。**只替换
+`base_instructions` 无效**——2026-10-09 实测 qoder 会话仍发出 19,754 字符官方提示词，与
+模板长度一致；五个适配器因此统一在**合成条目时**把 `base_instructions` 与
+`model_messages.instructions_template` 一并替换为各自的 `agentSystemPrompt`（共享helper
+`src/catalog.ts` 的 `withAgentSystemPrompt`），替换随目录缓存落盘，`/v1/models` 侧只读合并、
+不重建条目。Codex 从 `/v1/models?client_version=…` 或 `config.toml` 的 `model_catalog_json`
+缓存文件读到条目后，按官方客户端提示词发送。OpenCode Zen 同时保留转发路的门禁模板注入：
+客户端送来的首条 system 已完整包含待注入模板时（目录下发即如此），`injectZenFingerprintBody`
+不再重复注入，避免同一段提示词出现两遍。
 codebuddy 适配器的 `workbuddy/*` 条目**沿用同一份 CodeBuddy 主提示词**（本机无 WorkBuddy IDE
 与其产品配置；未做 `CODEBUDDY_BRAND_NAME` 品牌名替换——真实 WorkBuddy 客户端是把同一模板的
 CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一起改错，需拿到 WorkBuddy 产品
 配置后再按原样替换，见技术债）。
+
+### 客户端缓存时序（改提示词后的必做动作）
+
+只重启网关不会让 Codex 重拉目录：客户端 `/v1/models` 结果有本地缓存，按设计只有 config
+写盘或 `models --sync` 会主动失效（`src/cli.ts` 的 `invalidateModelsCache` 调用点）。更新
+`agentSystemPrompt` 后必须跑 `codex-cliproxy models --sync`（或重启 Codex）并**新开会话**
+验证——`~/.codex/sessions/**/rollout-*.jsonl` 的 `session_meta.base_instructions.text`
+是该会话实际使用的系统提示词，与 `provenance.model` 一起可直接核对。注意 Codex 保存自己的
+`models_cache.json` 时会剥掉 `base_instructions`、只保留 `instructions_template`，所以客户
+端侧核对以模板为准。
 
 ## 模板变量剥离方法（codebuddy Jinja / agy Go template 通用）
 
@@ -138,6 +152,14 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
     Schema，未随包发布，要严格对齐需再抓一次真实请求体。
   - GA 标头集新增 `x-opencode-session-id`/`X-Session-Id`/`x-opencode-parent-session-id`，网关未跟随
     （现有标头集实测仍过门禁）；W3C 追踪头实测当前非必需，保留无碍。
+  - **目录与端点（双文件缓存）**：store 维护两个磁盘文件——`opencode-zen-metadata.json` 存原始
+    数据（动态 ids + 官方元数据 + 探针裁决；ids 按 10 分钟 TTL 刷新，元数据按 6 小时 TTL
+    刷新，裁决 24 小时），`opencode-zen-catalog.json` 存由上述数据生成的**成品目录**
+    （`base_instructions` 与 `model_messages` 模板已在生成时替换）。每次元数据刷新后两个
+    文件同步重写；`/v1/models` 只读合并 catalog.json，不在运行时重建条目。转发上游 baseURL
+    由元数据 `provider.api` 确认（全 provider 共享一份，与客户端同源），元数据缺失或非
+    http(s) 时回退 `ZEN_DEFAULT_ENDPOINT`；端点路径仍按模型 `provider.npm` 映射的协议拼接
+    （`protocolFromNpm`；`@ai-sdk/mistral` 等 OpenAI 兼容 SDK 走缺省 chat）。
 - **更新方法（两条路）**：
   1. **包内提取（首选，不必运行客户端）**：`curl https://registry.npmjs.org/-/package/@opencode/cli/dist-tags`
      取 `latest` 版本号 → 从 `@opencode/core@<ver>` 的 `dist/chunks` 找 `src/session/runner/prompt/system.txt`
@@ -161,3 +183,6 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
 | 2026-10-09 | 全部 | codebuddy/agy 提示词按「模板变量剥离方法」去变量（12,223 / 454 字符）；四个适配器 `catalog()` 把目录条目 `base_instructions` 直接替换为各自官方提示词，Codex 据此发送系统提示词；workbuddy/* 按用户决策沿用 CodeBuddy 提示词（未做品牌名替换） |
 | 2026-10-09 | opencode-zen | 同步 GA：发布线 `@opencode-ai/cli@beta` → `@opencode/cli@latest`（2.0.26），UA 三段改 `opencode/latest/2.0.26/cli`；agent 模板换 GA 渲染版（17,717 → 1,474 字符），标题模板与工具集不变；本文件补「包内提取」取值方法 |
 | 2026-10-09 | opencode-zen | 目录条目 `base_instructions` 直接替换为官方 agent 提示词（与其它适配器一致），转发路对「已含模板」的 system 不再重复注入 |
+| 2026-10-09 | 全部 | 系统提示词改在**合成期**替换：`base_instructions` 与 `model_messages.instructions_template` 一并替换（客户端按模板渲染，只改 base_instructions 无效——实测 qoder 会话仍发 19,754 字符官方提示词）；替换点从 serve 期下移到各适配器合成/落盘处，缓存即成品；zen 补下发模板 |
+| 2026-10-09 | opencode-zen | 磁盘缓存拆双文件：`opencode-zen-metadata.json`（ids + 元数据 + 探针裁决，ids 10 分钟 / 元数据 6 小时 TTL）与 `opencode-zen-catalog.json`（成品目录，每次刷新元数据后重新生成，`/v1/models` 直接合并）；转发上游 baseURL 改由元数据 `provider.api` 确认，缺失回退缺省端点 |
+| 2026-10-09 | 全部 | 运维约束：Codex Desktop picker 的 `model/list` 只取第一页（`limit:100`，不跟随 cursor），适配器模型按 priority 排在目录尾部——上游 `selectedModels` 勾选过多会把 agy/zen 等挤出首页（实测 124 条时 zen 位于第 114-124 位、首页 0 条）。上游选择需控制目录总数 ≤ 100，恢复原选择可查 `gateway.log` 的 `config changed by models --sync` 审计行 |

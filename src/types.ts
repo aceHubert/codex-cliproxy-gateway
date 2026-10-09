@@ -40,6 +40,11 @@ export interface GatewayConfig {
   /** 每类日志保留的最大文件数；0 表示不限制。 */
   maxRequestLogs?: number;
   /**
+   * 是否开启调试转储：上游错误时把完整请求体落盘到日志目录（当前覆盖 agy
+   * 上游 400 的 agy-debug-400.json）。与 requestLogging 互相独立，默认关闭。
+   */
+  debug?: boolean;
+  /**
    * 网关进程日志 gateway.log 的最大字节数，超出时把当前内容复制为时间戳备份并原地清空
    * （copy-truncate，进程持有的句柄不受影响）；设置上限同时约束该文件中请求摘要与配置
    * 审计的可追溯深度；0 表示不限制。
@@ -67,6 +72,12 @@ export interface GatewayConfig {
   qoder?: boolean;
   /** 是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录。upstreamOnly 为 true 时按禁用处理。 */
   agy?: boolean;
+  /**
+   * 是否启用 OpenCode Zen（opencode-zen/）Chat Completions 入口；默认关闭，经指纹
+   * 转发消费 Zen 免费模型（公共鉴权 Bearer public，可选 OPENCODE_API_KEY）。
+   * upstreamOnly 为 true 时按禁用处理。
+   */
+  opencodeZen?: boolean;
 }
 
 /**
@@ -101,6 +112,12 @@ export interface ResolvedPaths {
   launchAgent: string;
   /** Web UI 的 LaunchAgent（默认不加载运行，`codex-cliproxy web` 按需启动）。 */
   webUiLaunchAgent: string;
+  /**
+   * launchd 服务身份后缀：默认实例（主目录即 ~/.codex-cliproxy-gateway）为空串，
+   * 保持历史 label 与 plist 文件名；其他实例为主目录哈希后缀，label/plist 文件名/
+   * Keychain 服务名随之派生，多实例互不冲突。
+   */
+  instanceSuffix: string;
 }
 
 export type CliOptions = Record<string, string | true>;

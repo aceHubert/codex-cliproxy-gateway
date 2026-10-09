@@ -387,6 +387,23 @@ function prefixModel(source: ModelEntry, prefix: string, priority: number): Mode
   return model;
 }
 
+/**
+ * 适配器目录条目的系统提示词接线：base_instructions 与 model_messages.instructions_template
+ * 必须同时替换。Codex 客户端优先用 instructions_template 渲染系统提示词，只改
+ * base_instructions 时客户端仍按快照基底的官方模板（"You are Codex…"）发送
+ * （2026-10-09 实测：qoder 会话发出 19,754 字符官方提示词而非替换值）。在合成条目
+ * （buildXxxCatalog / publishServedCatalog）时调用，随目录缓存落盘，serve 路径不再改写。
+ */
+export function withAgentSystemPrompt(entry: ModelEntry, prompt: string): ModelEntry {
+  const modelMessages = entry.model_messages;
+  if (!modelMessages || typeof modelMessages !== "object") return { ...entry, base_instructions: prompt };
+  return {
+    ...entry,
+    base_instructions: prompt,
+    model_messages: { ...modelMessages, instructions_template: prompt },
+  };
+}
+
 function findMatchingRule(slug: string, rules: ModelOverrideRule[]): ModelOverrideRule | undefined {
   const lower = slug.toLowerCase();
   return rules.find((rule) =>

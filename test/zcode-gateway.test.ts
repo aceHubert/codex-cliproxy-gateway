@@ -83,6 +83,8 @@ async function fixture(run: (context: {
             : { configCache: currentCache }),
         fetch: options.fetch ?? (async () => upstream()),
         ...(options.codexModelsCacheFile ? { codexModelsCacheFile: options.codexModelsCacheFile } : {}),
+        // 自管目录文件（zcode-catalog.json 等）注入到测试目录；生产缺省为运行主目录。
+        cacheDirectory: directory,
         // 默认禁用端点重映射：既有用例断言上游 URL 与调用次数，重映射行为由专属用例覆盖。
         endpointRouting: options.endpointRouting ?? null,
       });
@@ -262,6 +264,11 @@ test("ZCode 基础模型列表按 API provider 前缀并标记 owned_by zcode", 
       const codexModels = (codex.models as Json[]).filter((item) => String(item.slug).startsWith(`zcode-${family}-test/`));
       assert.equal(codexModels.length, 2);
       assert.ok(codexModels.every((item) => item.base_instructions === ZCODE_AGENT_SYSTEM_PROMPT));
+      // zcode 合成条目本就不带 model_messages；若带模板必须一并替换（客户端优先按模板渲染）。
+      assert.ok(codexModels.every((item) => {
+        const template = (item.model_messages as { instructions_template?: string } | undefined)?.instructions_template;
+        return template === undefined || template === ZCODE_AGENT_SYSTEM_PROMPT;
+      }));
     }
   });
 });
@@ -608,10 +615,19 @@ test("ZCode 请求日志沿用缺省日志目录", async () => {
   await fixture(async ({ config, directory, create }) => {
     config.requestLogging = true;
     delete config.logDir;
-    const handler = create();
-    await (await handler(request("zcode/glm-5.3"))).text();
-    const files = fs.readdirSync(path.join(directory, "logs"));
-    assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
+    // 缺省日志目录回退运行主目录（不再从 catalogPath 倒推）；用环境变量钉住测试位置。
+    const envHome = path.join(directory, "env-home");
+    const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+    process.env.CODEX_CLIPROXY_HOME = envHome;
+    try {
+      const handler = create();
+      await (await handler(request("zcode/glm-5.3"))).text();
+      const files = fs.readdirSync(path.join(envHome, "logs"));
+      assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
+    } finally {
+      if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+      else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    }
   });
 });
 

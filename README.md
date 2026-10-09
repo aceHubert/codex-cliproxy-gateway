@@ -177,6 +177,7 @@ codex-cliproxy config --log off
 | 参数 | 用途 |
 | --- | --- |
 | `--log on\|off` | 开关请求日志，默认关闭。 |
+| `--debug on\|off` | 开关调试日志，默认关闭。 |
 | `--max-request-logs N` | 请求日志目录最多保留的文件数，`0` 表示不限。 |
 | `--max-log-size SIZE` | 主日志大小上限，支持 `512KB`、`10MB`、`1M`；`0` 表示不限。 |
 | `--zcode on\|off` | 开关 ZCode 模型，默认关闭。 |
@@ -198,6 +199,42 @@ codex-cliproxy config --log off
 
 请求日志数量限制作用于整个目录，正在写入的文件可能使数量暂时超出上限。
 主日志达到大小上限后轮换，保留最近 5 份备份。
+
+### 运行主目录与环境变量
+
+网关自管的全部数据（config.json、state、各适配器目录缓存、请求日志、调试转储、
+凭据文件后端）默认落在 `~/.codex-cliproxy-gateway`，统一由运行主目录派生，
+不从 catalogPath 等文件位置倒推；目录不存在时随首次写入自动创建。
+
+运行主目录的优先级：`serve --config` 的配置所在目录 > `CODEX_CLIPROXY_HOME`
+环境变量 > 默认目录。环境变量必须是绝对路径（支持 `~/…` 展开，相对路径直接报错）。
+带变量运行的所有命令（`config`、`restart`、`status`、`web` 等）都只操作该变量
+指向的实例，不会误碰默认安装。
+
+```bash
+# 前台多实例 / 容器与 CI
+CODEX_CLIPROXY_HOME=/tmp/ccp-instance codex-cliproxy serve --config /tmp/ccp-instance/config.json
+```
+
+多实例的后台服务支持：
+
+- `install` / `web --daemon` 写入 plist 时会嵌入该环境变量，launchd 拉起的网关与
+  Web UI 和安装时的 CLI 解析到同一主目录；普通 `config`、`restart` 只重启对应
+  实例、不重写 plist。电脑重启后仍按 plist 登记的目录读取已保存的配置。
+- 非默认实例的 LaunchAgent 文件名与 label 会加主目录哈希后缀
+  （如 `codex-cliproxy-gateway-3f2a9c1d`），plist 仍在 `~/Library/LaunchAgents/`
+  （launchd 登录只扫描该目录），与默认服务互不冲突；默认实例完全不变。
+- 上游 API key 的 Keychain 槽位使用同一后缀隔离，非默认实例不回退读取默认密钥。
+- 非默认实例安装时不托管 `~/.codex/config.toml`（多实例会争用受管键）：
+  需要 `--manual-codex-config`，或为该实例设置独立的 `CODEX_HOME`——
+  `CODEX_CLIPROXY_HOME` 不隔离 Codex 自身配置。
+  托管安装会校验客户端目录归属，并将其记录到安装状态；后续管理命令即使没有
+  设置 `CODEX_HOME`，也使用原目录。显式指定不同目录会报错，不能静默切换。
+
+健康检查会校验网关与 Web UI 的实例标记。无标记的旧进程需要更新到新版后重启；
+其他实例或占用端口的其他服务不能作为本实例的健康响应。
+
+同一主目录不支持多份不同配置同时运行；前台 `serve` 实例修改配置后需自行重启该进程。
 
 ### 使用 ZCode 模型
 

@@ -1,9 +1,10 @@
 import path from "node:path";
 import { isIP } from "node:net";
 import { atomicWrite } from "../toml.ts";
+import { resolvePaths } from "../paths.ts";
 import { agyTokenStale, loadAgyCredentials, AgyCredentialError, defaultAgyCredentialFile } from "./credentials.ts";
 import type { AgyCredentials } from "./credentials.ts";
-import { createAgyTransport, AgyTransportError, AGY_AGENT_SYSTEM_PROMPT } from "./transport.ts";
+import { createAgyTransport, AgyTransportError } from "./transport.ts";
 import {
   AGY_PREFIX,
   agyUpstreamModel,
@@ -15,7 +16,7 @@ import {
 import type { AgyModelFamily } from "./catalog.ts";
 import { translateAgyRequest, AgyRequestError } from "./request.ts";
 import { createAgyResponse } from "./response.ts";
-import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
+import { localTime, logExchange, logGroupFromPath, requestLogDir } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
 import { logGatewayError, logRequestSummary } from "../process-log.ts";
 import type { GatewayConfig, ModelCatalog, ModelEntry, ProcessLogTarget } from "../types.ts";
@@ -112,14 +113,16 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
     }
   };
   const transport = createAgyTransport({ endpoint: dependencies.endpoint, fetch: dependencies.fetch });
+  // 请求日志与调试转储共用同一目录解析规则；两者开关（requestLogging / debug）互相独立。
+  const logDir = requestLogDir(config);
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    dir: logDir,
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
   const store = enabled
     ? createAgyCatalogStore({
-      cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
+      cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
       credentials: loadCredentials,
       codexModelsCacheFile: dependencies.codexModelsCacheFile,
       endpoint: dependencies.endpoint,
@@ -158,8 +161,8 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
   return {
     async catalog(): Promise<ModelCatalog> {
       if (!store || closed) return { models: [] };
-      // 目录条目的 base_instructions 直接替换为 Antigravity 内置提示词：Codex 按此字段发送系统提示词。
-      return { models: ((await loadCatalogMeta()) ?? []).map((entry) => ({ ...entry, base_instructions: AGY_AGENT_SYSTEM_PROMPT })) };
+      // 系统提示词已在 buildAgyCatalog 合成时替换（含 model_messages 模板），缓存即成品。
+      return { models: (await loadCatalogMeta()) ?? [] };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
@@ -306,12 +309,13 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
         if (error instanceof AgyCredentialError) return fail(401, error.message, "authentication_error");
         if (error instanceof AgyTransportError) {
           const safe = safeAgyUpstreamError(error.status, error.body);
-          // 上游 400 时把原始请求完整落盘到本机调试文件（含提示词，仅用于离线重放验收，
-          // 绝不进请求日志/外部），下一次同类失败可直接用真实载荷复现。
-          if (error.status === 400) {
+          // 上游 400 且 debug 开启时，把原始请求完整落盘到日志目录的本机调试文件
+          // （含提示词，仅用于离线重放验收，绝不进请求日志/外部），下一次同类失败
+          // 可直接用真实载荷复现。
+          if (error.status === 400 && config.debug === true) {
             try {
               atomicWrite(
-                path.join(path.dirname(config.catalogPath), "agy-debug-400.json"),
+                path.join(logDir, "agy-debug-400.json"),
                 `${JSON.stringify({
                   captured_at: new Date().toISOString(),
                   model: input.model,

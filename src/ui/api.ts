@@ -41,6 +41,8 @@ export interface UiConfig {
     codebuddy: boolean;
     qoder: boolean;
     agy: boolean;
+    /** OpenCode Zen 免费模型入口（公共鉴权，无本机凭据依赖）。 */
+    opencodeZen: boolean;
     requestLogging: boolean;
     logDir: string;
     maxRequestLogs: number;
@@ -90,6 +92,7 @@ export interface UiConfigChanges {
   codebuddy?: boolean;
   qoder?: boolean;
   agy?: boolean;
+  opencodeZen?: boolean;
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;

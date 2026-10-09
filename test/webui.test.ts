@@ -10,6 +10,8 @@ import * as childProcess from "node:child_process";
 import { startGateway } from "../src/gateway.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
 import { runCli } from "../src/cli.ts";
+import { instanceMarker, resolvePaths, runWithInstancePaths } from "../src/paths.ts";
+import { requestLogDir } from "../src/request-log.ts";
 import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../src/webui.ts";
 import type { WebUiContext } from "../src/webui.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
@@ -67,6 +69,7 @@ function makePaths(home: string): ResolvedPaths {
     credentialsFile: path.join(runtimeHome, "credentials.json"),
     launchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-gateway.plist"),
     webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
+    instanceSuffix: "",
   };
 }
 
@@ -469,12 +472,14 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
   try {
     const absent = await (await handler(authedRequest("/ui/api/config"))).json() as {
       detected: { zcode: boolean; codebuddy: boolean; agy: boolean };
-      editable: { agy: boolean };
+      editable: { agy: boolean; opencodeZen: boolean };
     };
     assert.equal(absent.detected.zcode, false, "无 ~/.zcode 时不显示 ZCode 开关");
     assert.equal(absent.detected.codebuddy, false, "无 .info 时不显示 CodeBuddy 开关");
     assert.equal(absent.detected.agy, false, "无凭据文件时不显示 Antigravity 开关");
     assert.equal(absent.editable.agy, false, "agy 开关缺省为关闭");
+    // OpenCode Zen 无本机凭据依赖：开关值始终随配置返回（缺省关闭），不参与探测显隐。
+    assert.equal(absent.editable.opencodeZen, false, "opencodeZen 开关缺省为关闭");
 
     fs.writeFileSync(agyCredentialFile, JSON.stringify({ token: { access_token: "ya29.fake" } }));
     const agyPresent = await (await handler(authedRequest("/ui/api/config"))).json() as {
@@ -578,6 +583,7 @@ test("POST /ui/api/config applies supported fields, syncs state, and writes an a
       json: {
         zcode: true,
         codebuddy: true,
+        opencodeZen: true,
         maxRequestLogs: "5",
         maxGatewayLogBytes: "10MB",
       },
@@ -585,12 +591,12 @@ test("POST /ui/api/config applies supported fields, syncs state, and writes an a
     assert.equal(response.status, 200);
     const payload = await response.json() as { restarting: boolean; applied: string[] };
     // 临时目录里没有 LaunchAgent，因此只写配置不触发重启调度。
-    assert.equal(payload.restarting, false);
-    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "maxRequestLogs", "maxGatewayLogBytes"]);
+    assert.deepEqual(payload.applied, ["zcode", "codebuddy", "opencodeZen", "maxRequestLogs", "maxGatewayLogBytes"]);
 
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, unknown>;
     assert.equal(saved.zcode, true);
     assert.equal(saved.codebuddy, true);
+    assert.equal(saved.opencodeZen, true);
     assert.equal(saved.maxRequestLogs, 5);
     assert.equal(saved.maxGatewayLogBytes, 10 * 1024 * 1024);
 
@@ -634,6 +640,7 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       { json: { maxGatewayLogBytes: "abc" }, message: /byte size/ },
       { json: { zcode: "yes" }, message: /boolean/ },
       { json: { codebuddy: "on" }, message: /boolean/ },
+      { json: { opencodeZen: "on" }, message: /boolean/ },
       // 账号选择只在 CLI：UI 提交 codebuddyAccount 一律按不支持字段拒绝。
       { json: { codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }, message: /Unsupported field/ },
       { json: { codebuddyRegion: "cn" }, message: /Unsupported field/ },
@@ -1220,8 +1227,11 @@ test("webUiContextForInstance keeps the full config path and never manages the d
     const sibling = path.join(paths.runtimeHome, "test.json");
     const siblingContext = webUiContextForInstance(sibling, paths);
     assert.equal(siblingContext.instanceOnly, true);
-    assert.equal(siblingContext.paths.gatewayConfig, sibling);
+    // 临时目录祖先可能经过 /var → /private/var 软链；配置文件名仍须完整保留。
+    assert.equal(siblingContext.paths.gatewayConfig, path.join(fs.realpathSync(home), ".codex-cliproxy-gateway", "test.json"));
     assert.notEqual(siblingContext.paths.gatewayConfig, paths.gatewayConfig);
+    assert.equal(siblingContext.paths.home, paths.home);
+    assert.equal(siblingContext.paths.codexHome, paths.codexHome);
 
     // $HOME 下的配置：派生 LaunchAgent 绝不命中默认服务路径。
     const homeContext = webUiContextForInstance(path.join(home, "config.json"), paths);
@@ -1255,6 +1265,88 @@ test("webUiContextForInstance keeps the full config path and never manages the d
     assert.notEqual(dirLinkSibling.paths.gatewayConfig, paths.gatewayConfig);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("temporary UI log display, listing, content and config backfill stay in its own instance", async () => {
+  const { config, paths, home, uiHtmlPath } = await makeFixture();
+  try {
+    const fileA = "cliproxy-v1-responses-http-20261009120000.log";
+    const fileB = "cliproxy-v1-responses-http-20261009120001.log";
+    fs.writeFileSync(path.join(paths.logDir, fileA), "instance A\n");
+    const configBPath = path.join(home, "instance-b", "custom.json");
+    const ctx = { ...webUiContextForInstance(configBPath, paths), uiHtmlPath };
+    fs.mkdirSync(ctx.paths.logDir, { recursive: true });
+    fs.writeFileSync(ctx.paths.uiTokenFile, `${TOKEN}\n`);
+    const configB = makeConfig(ctx.paths, { logDir: undefined });
+    fs.writeFileSync(configBPath, JSON.stringify(configB));
+    fs.writeFileSync(path.join(ctx.paths.logDir, fileB), "instance B\n");
+    const request = (pathname: string, options: Parameters<typeof authedRequest>[1] = {}) =>
+      runWithInstancePaths(paths, () => handleWebUiRequest(authedRequest(pathname, options), configB, ctx, config.port));
+
+    const display = await request("/ui/api/config");
+    assert.equal(display.status, 200);
+    assert.equal((await display.json() as { editable: { logDir: string } }).editable.logDir, ctx.paths.logDir);
+    const listing = await request("/ui/api/logs/requests");
+    assert.deepEqual((await listing.json() as { files: Array<{ name: string }> }).files.map(({ name }) => name), [fileB]);
+    const content = await request(`/ui/api/logs/requests/${fileB}`);
+    assert.equal((await content.json() as { text: string }).text, "instance B\n");
+    assert.equal((await request(`/ui/api/logs/requests/${fileA}`)).status, 404);
+
+    const configABefore = fs.readFileSync(paths.gatewayConfig, "utf8");
+    assert.equal((await request("/ui/api/config", { json: { requestLogging: false } })).status, 200);
+    assert.equal((await request("/ui/api/config", { json: { requestLogging: true } })).status, 200);
+    const saved = JSON.parse(fs.readFileSync(configBPath, "utf8")) as GatewayConfig;
+    assert.equal(saved.logDir, ctx.paths.logDir);
+    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), configABefore);
+    assert.equal(requestLogDir({ ...saved, logDir: paths.logDir }, ctx.paths), paths.logDir);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("UI instance headers and async upstream lookups use request context while preserving authentication", async () => {
+  const fixtureA = await makeFixture();
+  const fixtureB = await makeFixture();
+  const upstream = await startFakeUpstream((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ data: [{ id: "instance-test-model" }] }));
+  });
+  try {
+    const seen: string[] = [];
+    const handle = (fixture: Fixture, pathname: string, options: Parameters<typeof authedRequest>[1] = {}) => {
+      const config = { ...fixture.config, upstreamType: "newapi" as const, upstreamBaseUrl: upstream.url };
+      return handleWebUiRequest(authedRequest(pathname, options), config, {
+        paths: fixture.paths,
+        uiHtmlPath: fixture.uiHtmlPath,
+        upstreamDeps: {
+          readKey: () => {
+            seen.push(resolvePaths().runtimeHome);
+            return "";
+          },
+        },
+      }, fixture.config.port);
+    };
+    const [modelsA, modelsB] = await runWithInstancePaths(fixtureA.paths, () => Promise.all([
+      handle(fixtureA, "/ui/api/upstream/models"),
+      handle(fixtureB, "/ui/api/upstream/models"),
+    ]));
+    assert.equal(modelsA.status, 200);
+    assert.equal(modelsB.status, 200);
+    assert.deepEqual(seen.sort(), [fixtureA.paths.runtimeHome, fixtureB.paths.runtimeHome].sort());
+    assert.equal(modelsA.headers.get("x-ccp-instance"), instanceMarker(fixtureA.paths.runtimeHome));
+    assert.equal(modelsB.headers.get("x-ccp-instance"), instanceMarker(fixtureB.paths.runtimeHome));
+    const uiB = await handle(fixtureB, "/ui");
+    const statusB = await handle(fixtureB, "/ui/api/status");
+    assert.equal(uiB.headers.get("x-ccp-instance"), instanceMarker(fixtureB.paths.runtimeHome));
+    assert.equal(statusB.headers.get("x-ccp-instance"), instanceMarker(fixtureB.paths.runtimeHome));
+    assert.equal((await handle(fixtureB, "/ui/api/status", { token: null })).status, 401);
+    assert.equal((await handle(fixtureB, "/ui/api/status", { headers: { host: "attacker.example:8320" } })).status, 404);
+    assert.equal((await handle(fixtureB, "/ui/api/status", { headers: { origin: "http://attacker.example" } })).status, 404);
+  } finally {
+    await upstream.close();
+    fs.rmSync(fixtureA.home, { recursive: true, force: true });
+    fs.rmSync(fixtureB.home, { recursive: true, force: true });
   }
 });
 
@@ -1369,6 +1461,7 @@ test("the web ui launch agent stays off by default (no RunAtLoad, no KeepAlive)"
     cliPath: "/usr/local/lib/codex-cliproxy/index.js",
     codexHome: "/home/u/.codex",
     logPath: "/home/u/.codex-cliproxy-gateway/webui.log",
+    label: WEBUI_LAUNCHD_LABEL,
   });
   assert.match(plist, new RegExp(`<string>${WEBUI_LAUNCHD_LABEL}</string>`));
   assert.match(plist, /<key>RunAtLoad<\/key>\s*<false\/>/);
@@ -1433,13 +1526,14 @@ test("web service mode runs without installation state or a gateway and exits on
 
 test("web opens the ui in the browser instead of failing when it is already running", { timeout: 15000, skip: process.platform !== "darwin" }, async () => {
   // UI 端口固定为网关端口 + 1（webUiPort），先成对占用两个相邻空闲端口。
+  let marker = "";
   const gatewayHandler = (_req: http.IncomingMessage, res: http.ServerResponse) => {
-    res.writeHead(200, { "content-type": "text/plain" });
+    res.writeHead(200, { "content-type": "text/plain", "x-ccp-instance": marker });
     res.end("ok");
   };
   const uiHandler = (req: http.IncomingMessage, res: http.ServerResponse) => {
     if (req.url === "/ui" || req.url?.startsWith("/ui?")) {
-      res.writeHead(200, { "content-type": "text/html" });
+      res.writeHead(200, { "content-type": "text/html", "x-ccp-instance": marker });
       res.end("<!doctype html>");
     } else {
       res.writeHead(404);
@@ -1481,6 +1575,7 @@ test("web opens the ui in the browser instead of failing when it is already runn
     delete process.env.CODEX_CLIPROXY_UI_SERVICE;
     delete process.env.CODEX_CLIPROXY_UI_DEV;
     const paths = makePaths(home);
+    marker = instanceMarker(paths.runtimeHome);
     fs.mkdirSync(paths.runtimeHome, { recursive: true });
     fs.mkdirSync(paths.logDir, { recursive: true });
     fs.writeFileSync(paths.uiTokenFile, `${TOKEN}\n`, { mode: 0o600 });

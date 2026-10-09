@@ -309,7 +309,7 @@ test("dedupeCodebuddyCatalog 同名免费条目胜过付费条目", () => {
 
 test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改即重建", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-"));
-  const cacheFile = path.join(directory, "codebuddy-intl-catalog.json");
+  const cacheFile = path.join(directory, "codebuddy-catalog.json");
   const codexCache = path.join(directory, "models_cache.json");
   fs.writeFileSync(codexCache, JSON.stringify({ fetched_at: new Date().toISOString(), client_version: "1.0.0", models: [{ slug: "x" }] }));
   let fetched = 0;
@@ -324,7 +324,7 @@ test("目录存储：指纹与 TTL 命中不拉取，key 变化或内容被改�
     let catalog = await store.catalog();
     assert.equal(fetched, 1);
     assert.deepEqual(catalog.models.map((model) => model.slug), ["codebuddy-intl/a", "codebuddy-intl/b"]);
-    assert.ok(fs.existsSync(cacheFile), "缓存按产品×地域命名落盘");
+    assert.ok(fs.existsSync(cacheFile), "缓存按产品命名落盘");
     // 重建目录改变了 Codex 可见模型：它自己的缓存必须被过期。
     assert.equal(JSON.parse(fs.readFileSync(codexCache, "utf8")).client_version, "0.0.0");
     // 双指纹命中：不再拉取。
@@ -373,8 +373,8 @@ test("目录存储：双产品接口各拉各的目录并合并两个前缀族",
     const catalog = await store.catalog();
     assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/a", "workbuddy-intl/w1"]);
     assert.deepEqual([...fetched].sort(), ["https://www.codebuddy.ai/v3/config", "https://www.workbuddy.ai/v3/config"]);
-    assert.ok(fs.existsSync(path.join(directory, "codebuddy-intl-catalog.json")));
-    assert.ok(fs.existsSync(path.join(directory, "workbuddy-intl-catalog.json")));
+    assert.ok(fs.existsSync(path.join(directory, "codebuddy-catalog.json")));
+    assert.ok(fs.existsSync(path.join(directory, "workbuddy-catalog.json")));
     // display_name 带产品×地域标签：cli 族 CB-INTL、work 族 WB-INTL，同名模型据此区分。
     assert.match(catalog.models.find((model) => model.slug === "codebuddy-intl/a")!.display_name!, /^CB-INTL\//);
     assert.match(catalog.models.find((model) => model.slug === "workbuddy-intl/w1")!.display_name!, /^WB-INTL\//);
@@ -383,19 +383,137 @@ test("目录存储：双产品接口各拉各的目录并合并两个前缀族",
   }
 });
 
-test("codebuddyModelProduct 按前缀映射产品；缓存文件按产品×地域命名", () => {
+test("目录存储：写入产品命名缓存时清理旧的产品×地域文件", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-legacy-"));
+  const legacyFiles = ["codebuddy-cn-catalog.json", "codebuddy-intl-catalog.json", "workbuddy-cn-catalog.json", "workbuddy-intl-catalog.json"];
+  try {
+    for (const legacy of legacyFiles) fs.writeFileSync(path.join(directory, legacy), "{}");
+    const store = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => [credential("intl-cli"), credential("intl-work")],
+      fetch: async (url) => url.startsWith("https://www.workbuddy.ai")
+        ? Response.json({ code: 0, data: { models: [fixtureModel("w1")], agents: [{ tags: ["default"], models: ["w1"] }] } })
+        : Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) }),
+    });
+    await store.catalog();
+    assert.ok(fs.existsSync(path.join(directory, "codebuddy-catalog.json")));
+    assert.ok(fs.existsSync(path.join(directory, "workbuddy-catalog.json")));
+    for (const legacy of legacyFiles) {
+      assert.ok(!fs.existsSync(path.join(directory, legacy)), `${legacy} 已不再读写，应在写入新产品文件时清理`);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("目录存储：旧文件清理失败仍清理其余地域文件，不触碰另一产品与用户文件", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-cleanup-"));
+  const blocked = path.join(directory, "codebuddy-cn-catalog.json");
+  const preserved = ["workbuddy-cn-catalog.json", "workbuddy-intl-catalog.json", "notes.json"];
+  try {
+    // 用目录模拟不可删除的旧文件，避免依赖当前用户权限或 mock 全局文件系统。
+    fs.mkdirSync(blocked);
+    fs.writeFileSync(path.join(blocked, "keep.txt"), "keep");
+    fs.writeFileSync(path.join(directory, "codebuddy-intl-catalog.json"), "{}");
+    for (const name of preserved) fs.writeFileSync(path.join(directory, name), "keep");
+    const store = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => [credential("intl-cli")],
+      fetch: async () => Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) }),
+    });
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
+    assert.ok(fs.existsSync(path.join(directory, "codebuddy-catalog.json")));
+    assert.equal(fs.existsSync(path.join(directory, "codebuddy-intl-catalog.json")), false);
+    assert.equal(fs.readFileSync(path.join(blocked, "keep.txt"), "utf8"), "keep");
+    for (const name of preserved) assert.equal(fs.readFileSync(path.join(directory, name), "utf8"), "keep");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("目录存储：产品缓存原子写入失败时保留旧地域文件并正常返回目录", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-write-failure-"));
+  const legacyFiles = ["codebuddy-cn-catalog.json", "codebuddy-intl-catalog.json"];
+  try {
+    fs.mkdirSync(path.join(directory, "codebuddy-catalog.json"));
+    for (const name of legacyFiles) fs.writeFileSync(path.join(directory, name), "keep");
+    const store = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => [credential("intl-cli")],
+      fetch: async () => Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) }),
+    });
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), ["codebuddy-intl/a"]);
+    for (const name of legacyFiles) assert.equal(fs.readFileSync(path.join(directory, name), "utf8"), "keep");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("目录存储：同地域切换账号后拉取失败，不复用旧账号的内存或产品文件缓存", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-account-"));
+  let account = credential("intl-cli");
+  let failing = false;
+  const storeOptions = {
+    cacheDirectory: directory,
+    credentials: async () => [account],
+    fetch: async () => {
+      if (failing) throw new Error("network down");
+      return Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) });
+    },
+  };
+  try {
+    const store = createCodebuddyCatalogStore(storeOptions);
+    await store.catalog();
+    const original = fs.readFileSync(path.join(directory, "codebuddy-catalog.json"), "utf8");
+    account = { ...account, accountUid: "uid-2" };
+    failing = true;
+    await assert.rejects(store.catalog(), /没有可用的本地缓存/);
+    await assert.rejects(createCodebuddyCatalogStore(storeOptions).catalog(), /没有可用的本地缓存/);
+    assert.equal(fs.readFileSync(path.join(directory, "codebuddy-catalog.json"), "utf8"), original);
+    failing = false;
+    await store.refresh();
+    assert.notEqual(JSON.parse(fs.readFileSync(path.join(directory, "codebuddy-catalog.json"), "utf8")).cache_key,
+      JSON.parse(original).cache_key, "同地域的新账号也必须重建产品文件");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("目录存储：账号地域切换重写同一产品文件，不产生地域命名文件", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-switch-"));
+  try {
+    let fetched = 0;
+    const cn = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => [credential("cn-cli")],
+      fetch: async () => { fetched++; return Response.json({ code: 0, data: cliConfig([fixtureModel("a")], ["a"]) }); },
+    });
+    assert.deepEqual((await cn.catalog()).models.map((model) => model.slug), ["codebuddy-cn/a"]);
+    // 切到 intl 账号（模拟重启后的新 store）：cache_key 变化 → 重建并重写同一文件。
+    const intl = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => [credential("intl-cli")],
+      fetch: async () => { fetched++; return Response.json({ code: 0, data: cliConfig([fixtureModel("b")], ["b"]) }); },
+    });
+    assert.deepEqual((await intl.catalog()).models.map((model) => model.slug), ["codebuddy-intl/b"]);
+    assert.equal(fetched, 2, "地域切换不复用旧地域缓存");
+    assert.deepEqual(fs.readdirSync(directory).filter((name) => name.endsWith("-catalog.json")), ["codebuddy-catalog.json"]);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("codebuddyModelProduct 按前缀映射产品；缓存文件按产品命名（地域不进文件名）", () => {
   assert.equal(codebuddyModelProduct("codebuddy-intl/gpt-5.6-luna"), "cli");
   assert.equal(codebuddyModelProduct("workbuddy-cn/w1"), "work");
   assert.equal(codebuddyModelProduct("gpt-5.6-luna"), undefined);
-  assert.equal(codebuddyCatalogFileName("intl-cli"), "codebuddy-intl-catalog.json");
-  assert.equal(codebuddyCatalogFileName("cn-cli"), "codebuddy-cn-catalog.json");
-  assert.equal(codebuddyCatalogFileName("intl-work"), "workbuddy-intl-catalog.json");
-  assert.equal(codebuddyCatalogFileName("cn-work"), "workbuddy-cn-catalog.json");
+  assert.equal(codebuddyCatalogFileName("cli"), "codebuddy-catalog.json");
+  assert.equal(codebuddyCatalogFileName("work"), "workbuddy-catalog.json");
 });
 
 test("目录存储：旧缓存键（含已移除的结构版本字段）不再命中并重建", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-catalog-version-"));
-  const cacheFile = path.join(directory, "codebuddy-intl-catalog.json");
+  const cacheFile = path.join(directory, "codebuddy-catalog.json");
   const account = credential("intl-cli");
   const time = 1_000_000;
   const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");

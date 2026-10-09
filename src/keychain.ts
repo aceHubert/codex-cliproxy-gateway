@@ -6,6 +6,15 @@ import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "./
 
 export const KEYCHAIN_SERVICE = "codex-cliproxy-gateway";
 
+/**
+ * 上游 API key 的 Keychain 服务名：默认实例沿用历史槽位（存量安装零迁移），
+ * 其他实例加与 launchd label 相同的主目录哈希后缀——不同实例的密钥互不覆盖，
+ * 非默认实例也绝不回退读取默认槽位。
+ */
+export function keychainService(): string {
+  return KEYCHAIN_SERVICE + resolvePaths().instanceSuffix;
+}
+
 export function keychainAccount(): string {
   return process.env.USER || os.userInfo().username;
 }
@@ -17,46 +26,46 @@ function security(args: string[], stdio: StdioOptions = ["ignore", "pipe", "pipe
   }).trim();
 }
 
-function saveApiKeyInKeychain(apiKey: string): void {
-  security([
+function saveApiKeyInKeychain(apiKey: string, account: string, service: string, execute: KeychainExecutor): void {
+  execute([
     "add-generic-password",
     "-U",
     "-a",
-    keychainAccount(),
+    account,
     "-s",
-    KEYCHAIN_SERVICE,
+    service,
     "-w",
     apiKey,
   ]);
 }
 
-function readApiKeyFromKeychain(optional = false): string {
+function readApiKeyFromKeychain(optional: boolean, account: string, service: string, execute: KeychainExecutor): string {
   try {
-    return security([
+    return execute([
       "find-generic-password",
       "-a",
-      keychainAccount(),
+      account,
       "-s",
-      KEYCHAIN_SERVICE,
+      service,
       "-w",
     ]);
   } catch {
     if (optional) return "";
-    throw new Error("Upstream API key was not found in macOS Keychain");
+    throw new Error(`Upstream API key was not found in macOS Keychain (service: ${service})`);
   }
 }
 
-function deleteApiKeyFromKeychain(): void {
+function deleteApiKeyFromKeychain(account: string, service: string, execute: KeychainExecutor): void {
   try {
-    security([
+    execute([
       "delete-generic-password",
       "-a",
-      keychainAccount(),
+      account,
       "-s",
-      KEYCHAIN_SERVICE,
+      service,
     ]);
   } catch {
-    // Idempotent uninstall.
+    // 卸载可重复执行，槽位已不存在时无需报错。
   }
 }
 
@@ -67,20 +76,27 @@ export interface ApiKeyStore {
   delete(): void;
 }
 
+/** 可注入的 Keychain 执行器，供测试记录调用而不接触系统凭据。 */
+export type KeychainExecutor = (args: string[]) => string;
+
 /**
  * 平台分派工厂：darwin 走 macOS Keychain，其余平台（linux 等）走 credentials.json 文件后端。
- * platform 与 credentialsFile 可注入，保证在 macOS 开发机上也能覆盖文件后端分支；
+ * platform、credentialsFile 与 Keychain 执行器可注入，测试不必触碰系统凭据；
  * 生产调用方统一走下方的 saveApiKey/readApiKey/deleteApiKey 便捷包装。
  */
 export function createApiKeyStore(
   platform: NodeJS.Platform = process.platform,
   credentialsFile: string = resolvePaths().credentialsFile,
+  executeKeychain: KeychainExecutor = security,
 ): ApiKeyStore {
   if (platform === "darwin") {
+    // 存储对象创建时固定槽位，后续异步调用切换实例或用户环境也不会串槽。
+    const account = keychainAccount();
+    const service = keychainService();
     return {
-      save: saveApiKeyInKeychain,
-      read: readApiKeyFromKeychain,
-      delete: deleteApiKeyFromKeychain,
+      save: (apiKey) => saveApiKeyInKeychain(apiKey, account, service, executeKeychain),
+      read: (optional = false) => readApiKeyFromKeychain(optional, account, service, executeKeychain),
+      delete: () => deleteApiKeyFromKeychain(account, service, executeKeychain),
     };
   }
   return {

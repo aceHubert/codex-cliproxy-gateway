@@ -2,7 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
-import { invalidateModelsCache, parseCodexCatalog } from "../catalog.ts";
+import { invalidateModelsCache, parseCodexCatalog, withAgentSystemPrompt } from "../catalog.ts";
+import { QODER_AGENT_SYSTEM_PROMPT } from "./transport.ts";
 import { atomicWrite } from "../toml.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
 import type { QoderCredentials, QoderRegion } from "./credentials.ts";
@@ -138,7 +139,7 @@ export function parseQoderCatalogData(value: unknown): QoderCatalogModel[] {
   return models;
 }
 
-/** Codex 行为字段使用现有快照基底，模型名与能力仅由当前账号目录决定。 */
+/** Codex 行为字段使用现有快照基底，模型名与能力仅由当前账号目录决定；系统提示词在合成时替换为 Qoder CLI 内置提示词并随缓存落盘。 */
 export function buildQoderCatalog(models: QoderCatalogModel[], region: QoderRegion = "intl"): ModelCatalog {
   if (!BASE) throw new Error("Codex 模型快照缺少 gpt-5.5 基底条目");
   const prefix = region === "cn" ? QODER_CN_PREFIX : QODER_INTL_PREFIX;
@@ -192,7 +193,7 @@ export function buildQoderCatalog(models: QoderCatalogModel[], region: QoderRegi
     if (entry.context_config !== undefined) model.qoder_context_config = structuredClone(entry.context_config);
     if (entry.thinking_config !== undefined) model.qoder_thinking_config = structuredClone(entry.thinking_config);
     if (entry.price_factor !== undefined) model.qoder_price_factor = entry.price_factor;
-    return model;
+    return withAgentSystemPrompt(model, QODER_AGENT_SYSTEM_PROMPT);
   }) };
 }
 

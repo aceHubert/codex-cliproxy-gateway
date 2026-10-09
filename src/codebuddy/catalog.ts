@@ -3,16 +3,18 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
 import { atomicWrite } from "../toml.ts";
-import { invalidateModelsCache, parseCodexCatalog } from "../catalog.ts";
+import { invalidateModelsCache, parseCodexCatalog, withAgentSystemPrompt } from "../catalog.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
 import { profileProduct, profileRegion } from "./credentials.ts";
-import { buildCodebuddyCatalogHeaders, catalogRevision } from "./request-context.ts";
+import { buildCodebuddyCatalogHeaders, catalogRevision, CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 
 /**
  * CodeBuddy/WorkBuddy 官方目录：`GET {endpoint}/v3/config` 拉取，按 serves scope
  * 交集筛选后合成为 Codex 目录条目。缓存键带 profile + 版本修订 + 账号身份，双指纹
  * （source_hash + content_hash）任一不符或超过 TTL 即重建；缓存文件不含任何凭据。
+ * 缓存文件按产品命名（`codebuddy-catalog.json` / `workbuddy-catalog.json`）：单账号设计
+ * 下地域不进文件名，切换账号（cache_key 变化）即重建并重写同一文件。
  */
 
 export const CODEBUDDY_PREFIX = "codebuddy/";
@@ -59,10 +61,20 @@ export function codebuddyModelRegion(model: unknown): "cn" | "intl" | undefined 
   return codebuddyModelRoute(model)?.region;
 }
 
-/** 目录缓存文件按产品×地域命名：`codebuddy-intl-catalog.json`、`workbuddy-cn-catalog.json` 等。 */
-export function codebuddyCatalogFileName(profile: CodebuddyProfile): string {
-  const product = profileProduct(profile) === "work" ? "workbuddy" : "codebuddy";
-  return `${product}-${profileRegion(profile)}-catalog.json`;
+/** 目录缓存文件按产品命名：`codebuddy-catalog.json`、`workbuddy-catalog.json`（单账号设计，地域不进文件名）。 */
+export function codebuddyCatalogFileName(product: "cli" | "work"): string {
+  return `${catalogProductStem(product)}-catalog.json`;
+}
+
+/** 产品 → 缓存文件主名（codebuddy/workbuddy）。 */
+function catalogProductStem(product: "cli" | "work"): string {
+  return product === "work" ? "workbuddy" : "codebuddy";
+}
+
+/** 旧版按产品×地域命名的缓存文件；单账号改造后不再读写，写入新产品文件时清理残留。 */
+function legacyCodebuddyCatalogFileNames(product: "cli" | "work"): string[] {
+  const stem = catalogProductStem(product);
+  return ["cn", "intl"].map((region) => `${stem}-${region}-catalog.json`);
 }
 
 /** 前缀族 → 裸模型 ID；档位模型原样透传，不做本地展开。 */
@@ -221,7 +233,8 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
   // 基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
   model.prefer_websockets = false;
   model.priority = priority;
-  return model;
+  // 系统提示词在合成时替换（含 model_messages 模板），随目录缓存落盘；workbuddy 条目沿用同一份主提示词。
+  return withAgentSystemPrompt(model, CODEBUDDY_AGENT_SYSTEM_PROMPT);
 }
 
 /** ①~④ 字段映射（见执行计划决策记录）：改名直用 + 结构 reshape + Codex 行为基底 + CB 特有字段。 */
@@ -357,7 +370,7 @@ interface CacheFile {
 }
 
 export interface CodebuddyCatalogStoreOptions {
-  /** 缓存目录；每个产品×地域接口各写一个 `{codebuddy|workbuddy}-{cn|intl}-catalog.json`。 */
+  /** 缓存目录；每个产品接口各写一个 `{codebuddy|workbuddy}-catalog.json`（旧 `{product}-{cn|intl}-catalog.json` 写入时清理）。 */
   cacheDirectory: string;
   /** 每个可用产品接口的凭据清单（按前缀产品选出的接口凭据，含同地域回退）。 */
   credentials: () => Promise<CodebuddyCredential[]>;
@@ -381,8 +394,9 @@ interface CatalogFamily {
 }
 
 /**
- * 目录存储：每个产品×地域接口独立的双指纹磁盘缓存 + TTL + 单飞刷新；拉取失败回退
- * 该接口的 last-good 缓存，单个接口失败不拖垮其余接口的目录族。
+ * 目录存储：每个产品接口独立的双指纹磁盘缓存 + TTL + 单飞刷新；缓存文件按产品命名
+ * （单账号设计下地域不进文件名，切换账号即重写同一文件，cache_key 不符按未命中重建）；
+ * 拉取失败回退该接口的 last-good 缓存，单个接口失败不拖垮其余接口的目录族。
  */
 export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOptions) {
   const fetchUpstream = options.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
@@ -405,7 +419,7 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
   }
 
   function cacheFile(profile: CodebuddyProfile): string {
-    return path.join(options.cacheDirectory, codebuddyCatalogFileName(profile));
+    return path.join(options.cacheDirectory, codebuddyCatalogFileName(profileProduct(profile)));
   }
 
   function readDisk(profile: CodebuddyProfile, key: string): CachedCatalog | undefined {
@@ -427,6 +441,12 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
         content_hash: digest(value.models),
         models: value.models,
       }, null, 2)}\n`);
+      // 旧产品×地域命名文件已不再读写：新文件落盘后清理残留，运行目录只保留产品文件。
+      for (const legacy of legacyCodebuddyCatalogFileNames(profileProduct(profile))) {
+        try {
+          fs.rmSync(path.join(options.cacheDirectory, legacy), { force: true });
+        } catch { /* 单个旧文件清理失败不影响其他文件或本次目录返回。 */ }
+      }
     } catch { /* 缓存写失败不影响本次目录返回。 */ }
     if (previous === undefined || digest(previous) !== digest(value.models)) {
       // 目录内容变化会改变 Codex 能看到的模型列表：过期它自己的目录缓存。

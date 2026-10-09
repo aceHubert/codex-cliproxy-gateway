@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isIP } from "node:net";
+import { resolvePaths } from "../paths.ts";
 import {
   CodebuddyCredentialError,
   createCodebuddyCredentialCache,
@@ -21,7 +22,7 @@ import { translateCodebuddyRequest, CodebuddyRequestError } from "./request.ts";
 import { createCodebuddyResponse } from "./response.ts";
 import { buildCodebuddyChatHeaders, createCodebuddyContexts, CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import { isZcodeRecord } from "../zcode/wire.ts";
-import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
+import { localTime, logExchange, logGroupFromPath, requestLogDir } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
 import { logGatewayError, logRequestSummary } from "../process-log.ts";
 import type { GatewayConfig, ModelCatalog, ProcessLogTarget } from "../types.ts";
@@ -35,7 +36,7 @@ export interface CodebuddyDependencies {
   /** 认证目录（内含各产品独立的 .info 凭据）；缺省取平台默认目录。 */
   authDirectory?: string;
   credentialCache?: CodebuddyCredentialCache;
-  /** 目录缓存目录（每个产品×地域接口各一个 `{codebuddy|workbuddy}-{cn|intl}-catalog.json`）；缺省取 catalogPath 同目录。 */
+  /** 目录缓存目录（每个产品接口各一个 `{codebuddy|workbuddy}-catalog.json`）；缺省取 catalogPath 同目录。 */
   cacheDirectory?: string;
   /** Codex 自己的目录缓存；目录内容变化时过期它。 */
   codexModelsCacheFile?: string;
@@ -104,7 +105,7 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const catalogStore = enabled
     ? createCodebuddyCatalogStore({
-      cacheDirectory: dependencies.cacheDirectory ?? path.dirname(config.catalogPath),
+      cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
       // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
       // 请求路由则始终以带地域 slug 为准。
       credentials: async () => {
@@ -138,7 +139,7 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   const contexts = createCodebuddyContexts();
   const activeRequests = new Set<AbortController>();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    dir: requestLogDir(config),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
@@ -157,9 +158,9 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
           const region = codebuddyModelRegion(entry.slug);
           return region ? [region] : [];
         }));
-        // 目录条目的 base_instructions 直接替换为官方 CLI 主提示词：Codex 按此字段发送系统提示词。
+        // 系统提示词已在 cloneCodexBase 合成时替换（含 model_messages 模板），缓存即成品；
         // workbuddy/* 沿用同一份（本机无 WorkBuddy IDE 与其产品配置，未做 CODEBUDDY_BRAND_NAME 品牌名替换，见技术债）。
-        return { models: catalog.models.map((entry) => ({ ...entry, base_instructions: CODEBUDDY_AGENT_SYSTEM_PROMPT })) };
+        return { models: catalog.models };
       } catch { return { models: [] }; }
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {

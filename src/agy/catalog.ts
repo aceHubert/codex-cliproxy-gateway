@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
-import { invalidateModelsCache, parseCodexCatalog } from "../catalog.ts";
+import { invalidateModelsCache, parseCodexCatalog, withAgentSystemPrompt } from "../catalog.ts";
 import { atomicWrite } from "../toml.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
-import { AGY_ENDPOINT } from "./transport.ts";
+import { AGY_AGENT_SYSTEM_PROMPT, AGY_ENDPOINT } from "./transport.ts";
 import { THINKING_LEVELS } from "./request.ts";
 import type { AgyCredentials } from "./credentials.ts";
 
@@ -22,8 +22,9 @@ export const AGY_PREFIX = "agy/";
 export const AGY_DISPLAY_PREFIX = "AGY/";
 /** 目录缓存修订号：合成规则变化时递增，避免复用旧结构的磁盘缓存
  *  （v2：档位家族合并；v3：levels 按实际档位重建；v4：删 web_search_tool_type；
- *  v5：v3/v4 的字段删除改为保留字段置中性值——缺字段疑似导致 Codex 弃用目录）。 */
-const CACHE_REVISION = 5;
+ *  v5：v3/v4 的字段删除改为保留字段置中性值——缺字段疑似导致 Codex 弃用目录；
+ *  v6：系统提示词在合成时替换（base_instructions + model_messages 模板））。 */
+const CACHE_REVISION = 6;
 const CATALOG_TTL_MS = 6 * 60 * 1000;
 const FAILURE_COOLDOWN_MS = 30_000;
 const BASE = parseCodexCatalog(codexClientModels).models.find((entry) => entry.slug === "gpt-5.5");
@@ -266,7 +267,7 @@ export function buildAgyCatalog(data: AgyCatalogData): ModelCatalog {
       delete model.max_context_window;
       delete model.effective_context_window_percent;
     }
-    return model;
+    return withAgentSystemPrompt(model, AGY_AGENT_SYSTEM_PROMPT);
   };
   const emitted = new Set<AgyModelFamily>();
   const models: ModelEntry[] = [];

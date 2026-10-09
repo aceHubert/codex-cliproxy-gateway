@@ -110,9 +110,11 @@ test("launchd preserves custom CODEX_HOME for the provider snapshot", () => {
     configPath: "/tmp/gateway.json",
     codexHome: "/tmp/codex<&>",
     logPath: "/tmp/gateway.log",
+    label: "codex-cliproxy-gateway",
   });
   assert.match(plist, /<key>CODEX_HOME<\/key>/);
   assert.match(plist, /<string>\/tmp\/codex&lt;&amp;&gt;<\/string>/);
+  assert.doesNotMatch(plist, /CODEX_CLIPROXY_HOME/);
   // stdout 与 stderr 合并到同一个进程日志：不再有独立的 gateway.error.log。
   assert.equal(plist.match(/<key>Standard(?:Out|Error)Path<\/key>\n  <string>\/tmp\/gateway\.log<\/string>/g)?.length, 2);
 });
@@ -504,6 +506,16 @@ test("HTTP-only model families are refused locally on every bridged socket", () 
     checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "cliproxy", "cliproxy/"),
     { kind: "reject", model: "agy/gemini-3.8-flash-high", family: "agy" },
     "agy frame must not leak to the CLIProxy upstream either",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"opencode-zen/nemotron-3.5-lightning-free"}', "official", "cliproxy/"),
+    { kind: "reject", model: "opencode-zen/nemotron-3.5-lightning-free", family: "opencode-zen" },
+    "opencode-zen frame on an official socket must never reach the ChatGPT backend",
+  );
+  assert.deepEqual(
+    checkFrameRouting('{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}', "cliproxy", "cliproxy/"),
+    { kind: "reject", model: "OPENCODE-ZEN/exo-free", family: "opencode-zen" },
+    "opencode-zen frames must not leak to the CLIProxy upstream either, and detection is case-insensitive",
   );
   assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/"),

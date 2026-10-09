@@ -1,7 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import type { ProcessLogTarget } from "./types.ts";
+import { resolvePaths } from "./paths.ts";
+import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
+
+/**
+ * 请求日志与调试转储的实际落盘目录：显式 logDir 优先，缺省回退到运行主目录
+ * （`~/.codex-cliproxy-gateway` 或 `CODEX_CLIPROXY_HOME`）下的 logs/。运行时各 sink
+ * 与 CLI/Web UI 的目录提示、logDir 回填必须共用这一条规则；不得从 catalogPath 等
+ * 文件位置倒推目录，否则自定义 catalogPath 时提示与实际写入会分叉。
+ */
+export function requestLogDir(config: GatewayConfig, paths: ResolvedPaths = resolvePaths()): string {
+  return config.logDir || paths.logDir;
+}
 
 export interface RequestLogSink {
   dir: string;
@@ -15,7 +26,7 @@ export interface RequestLogSink {
 }
 
 const LOG_PREFIX = "cliproxy";
-export type LogNamespace = "cliproxy" | "zcode" | "bigmodel" | "codebuddy" | "workbuddy" | "qoder" | "agy";
+export type LogNamespace = "cliproxy" | "zcode" | "bigmodel" | "codebuddy" | "workbuddy" | "qoder" | "agy" | "opencode-zen";
 
 const SENSITIVE_HEADERS = new Set([
   "authorization",
@@ -89,7 +100,7 @@ export function websocketLogFile(group: string, sessionId?: string): LogFileRef 
  * 绝不能被请求日志的保留计数删掉。
  * `error-` 形仍被识别，是为了让旧的错误摘要文件按同一保留策略自然老化，而不是永远留下。
  */
-const REQUEST_LOG_NAME = /^(?:cliproxy|zcode|bigmodel|codebuddy|workbuddy|qoder|agy)-(?:error-\d{14}|.+-(?:http|ws)-[^/]+)\.log$/;
+const REQUEST_LOG_NAME = /^(?:cliproxy|zcode|bigmodel|codebuddy|workbuddy|qoder|agy|opencode-zen)-(?:error-\d{14}|.+-(?:http|ws)-[^/]+)\.log$/;
 
 export function isRequestLogName(name: string): boolean {
   return REQUEST_LOG_NAME.test(name);

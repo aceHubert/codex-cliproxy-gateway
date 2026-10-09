@@ -12,9 +12,9 @@ import {
   readGatewayConfigFile,
   sanitizeUrlValue,
 } from "./config-update.ts";
-import { restartLaunchAgent } from "./launchd.ts";
-import { realPathOrResolve, resolvePaths } from "./paths.ts";
-import { isRequestLogName, safeLogPath } from "./request-log.ts";
+import { gatewayServiceLabel, restartLaunchAgent } from "./launchd.ts";
+import { instanceMarker, realPathOrResolve, resolvePaths, runWithInstancePaths } from "./paths.ts";
+import { isRequestLogName, requestLogDir, safeLogPath } from "./request-log.ts";
 import { atomicWrite, readRootTomlString } from "./toml.ts";
 import { codebuddyAccountLabel, codebuddyCredentialsPresent, defaultAuthDirectory } from "./codebuddy/credentials.ts";
 import { agyCredentialsPresent, defaultAgyCredentialFile } from "./agy/credentials.ts";
@@ -109,7 +109,10 @@ export function webUiContextForInstance(configPath: string, defaultPaths: Resolv
   const resolved = realPathOrResolve(configPath);
   if (resolved === realPathOrResolve(defaultPaths.gatewayConfig)) return { paths: defaultPaths };
   return {
-    paths: { ...resolvePaths(process.env, path.dirname(resolved)), gatewayConfig: resolved },
+    paths: {
+      ...resolvePaths({ HOME: defaultPaths.home, CODEX_HOME: defaultPaths.codexHome }, path.dirname(resolved)),
+      gatewayConfig: resolved,
+    },
     instanceOnly: true,
   };
 }
@@ -204,16 +207,13 @@ function tailFile(file: string, maxBytes: number): { text: string; truncated: bo
   }
 }
 
-function requestLogDir(config: GatewayConfig): string {
-  return config.logDir || path.join(path.dirname(config.catalogPath), "logs");
-}
-
 function defaultScheduleRestart(paths: ResolvedPaths): void {
   setTimeout(() => {
     try {
-      restartLaunchAgent(paths.launchAgent);
+      // 重启的是本实例的 LaunchAgent：label 按实例后缀派生，绝不触碰其他实例。
+      restartLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
     } catch {
-      // kickstart 失败时 pendingRestart 仍置位，下一次 CLI 命令会补重启。
+      // kickstart 失败 pendingRestart 仍置位，下一次 CLI 命令会补重启。
     }
   }, RESTART_DELAY_MS);
 }
@@ -242,10 +242,10 @@ export function webUiPort(config: GatewayConfig): number {
 export function startWebUiServer(config: GatewayConfig, ctx: WebUiContext): Bun.Server<undefined> | undefined {
   if (!isLoopbackHost(config.host)) return undefined;
   const port = webUiPort(config);
-  return Bun.serve({
+  return runWithInstancePaths(ctx.paths, () => Bun.serve({
     hostname: "127.0.0.1",
     port,
-    fetch: (request) => {
+    fetch: (request) => runWithInstancePaths(ctx.paths, () => {
       let live = config;
       try {
         live = readGatewayConfigFile(ctx.paths.gatewayConfig);
@@ -253,8 +253,8 @@ export function startWebUiServer(config: GatewayConfig, ctx: WebUiContext): Bun.
         // 配置暂时不可读（重启窗口等）时用启动快照继续服务。
       }
       return handleWebUiRequest(request, live, ctx, port);
-    },
-  });
+    }),
+  }));
 }
 
 function uiHtmlResponse(ctx: WebUiContext): Response {
@@ -412,8 +412,10 @@ function configResponse(
       codebuddy: live.codebuddy === true,
       qoder: live.qoder === true,
       agy: live.agy === true,
+      opencodeZen: live.opencodeZen === true,
       requestLogging: live.requestLogging === true,
-      logDir: live.logDir || path.join(path.dirname(live.catalogPath), "logs"),
+      // 展示目录取实例上下文（临时实例 = 其主目录），不按 Web UI 进程自身的 env 解析。
+      logDir: requestLogDir(live, paths),
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
@@ -481,7 +483,7 @@ function gatewayLogResponse(paths: ResolvedPaths): Response {
 /** 请求日志目录：mtime 倒序（最新在前）+ 分页（offset/limit），返回 total 供前端算页数。
  * requestLogging 关闭时不列目录（前端只显示「未开启」提示）——历史文件不再被浏览，
  * 避免给出「日志还在记录」的误导。 */
-function requestLogsResponse(config: GatewayConfig, url: URL): Response {
+function requestLogsResponse(config: GatewayConfig, paths: ResolvedPaths, url: URL): Response {
   const logging = config.requestLogging === true;
   const empty = Response.json({
     files: [],
@@ -491,7 +493,7 @@ function requestLogsResponse(config: GatewayConfig, url: URL): Response {
     logging,
   });
   if (!logging) return empty;
-  const dir = requestLogDir(config);
+  const dir = requestLogDir(config, paths);
   let names: string[];
   try {
     names = fs.readdirSync(dir);
@@ -530,9 +532,9 @@ function requestLogsResponse(config: GatewayConfig, url: URL): Response {
   });
 }
 
-function requestLogContentResponse(config: GatewayConfig, name: string): Response {
+function requestLogContentResponse(config: GatewayConfig, paths: ResolvedPaths, name: string): Response {
   if (!name || !isRequestLogName(name)) return notFound();
-  const target = safeLogPath(requestLogDir(config), name);
+  const target = safeLogPath(requestLogDir(config, paths), name);
   if (!target) return badRequest("Invalid log file name");
   const tail = tailFile(target, REQUEST_LOG_TAIL_BYTES);
   if (!tail) return notFound();
@@ -542,6 +544,15 @@ function requestLogContentResponse(config: GatewayConfig, name: string): Respons
 /** 处理 UI 端口上的 /ui、/ui/* 与浏览器随 /ui 自动请求的 /favicon.ico；port 是 UI
  * 服务自己的监听端口（Host 头白名单按它校验）。任何情况下都返回 Response。 */
 export async function handleWebUiRequest(request: Request, config: GatewayConfig, ctx: WebUiContext, port: number): Promise<Response> {
+  return runWithInstancePaths(ctx.paths, async () => {
+    const response = await handleWebUiRequestCore(request, config, ctx, port);
+    // 标记只包含主目录哈希；保留原响应流与认证门禁，不读取或缓存响应正文。
+    response.headers.set("x-ccp-instance", instanceMarker(ctx.paths.runtimeHome));
+    return response;
+  });
+}
+
+async function handleWebUiRequestCore(request: Request, config: GatewayConfig, ctx: WebUiContext, port: number): Promise<Response> {
   // 网关被配置到非回环地址时不提供 UI——它是本机管理入口，不是远程面板。
   if (!isLoopbackHost(config.host)) return notFound();
   // HTTP/1.1 必带 Host；直接构造 Request 调用 handler（测试）时缺失，回退用 URL host。
@@ -691,11 +702,11 @@ export async function handleWebUiRequest(request: Request, config: GatewayConfig
 
   if (route === "logs/gateway" && request.method === "GET") return gatewayLogResponse(ctx.paths);
   if (route === "logs/requests" && request.method === "GET") {
-    return requestLogsResponse(config, new URL(request.url));
+    return requestLogsResponse(config, ctx.paths, new URL(request.url));
   }
   if (route.startsWith("logs/requests/") && request.method === "GET") {
     const name = decodeURIComponent(route.slice("logs/requests/".length));
-    return requestLogContentResponse(config, name);
+    return requestLogContentResponse(config, ctx.paths, name);
   }
   return notFound();
 }

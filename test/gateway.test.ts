@@ -17,7 +17,7 @@ import {
 import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../src/toml.ts";
 import { capGatewayLog } from "../src/process-log.ts";
 import { httpLogFile, websocketLogFile } from "../src/request-log.ts";
-import { LEGACY_STDERR_LOG, resolvePaths } from "../src/paths.ts";
+import { LEGACY_STDERR_LOG, instanceMarker, resolvePaths } from "../src/paths.ts";
 import type { GatewayConfig } from "../src/types.ts";
 import {
   compileModelOverrides,
@@ -40,6 +40,7 @@ import {
   removeManagedRuntimeFiles,
   runCli,
   syncGatewayConfigFile,
+  waitForHealth,
 } from "../src/cli.ts";
 import {
   applyModelPickerKey,
@@ -282,6 +283,16 @@ test("model catalog toml accepts any managed catalog file and repoints to the ac
     assert.equal(previousCatalog, newapiCatalog);
     assert.equal(readRootTomlString(patchedToml, "model_catalog_json"), paths.catalogFile);
 
+    for (const product of ["codebuddy", "workbuddy"]) {
+      const productCatalog = path.join(paths.runtimeHome, `${product}-catalog.json`);
+      const productSource = `model_catalog_json = "${productCatalog}"\n`;
+      const repointed = applyModelCatalogToml(productSource, true, paths, paths.catalogFile);
+      assert.equal(repointed.previousCatalog, productCatalog);
+      assert.equal(readRootTomlString(repointed.patchedToml, "model_catalog_json"), paths.catalogFile);
+      const split = applyModelCatalogToml(productSource, false, paths, paths.catalogFile);
+      assert.equal(readRootTomlString(split.patchedToml, "model_catalog_json"), undefined);
+    }
+
     assert.throws(
       () => applyModelCatalogToml('model_catalog_json = "/Users/test/my-catalog.json"\n', true, paths, paths.catalogFile),
       /Refusing to replace unmanaged model_catalog_json/,
@@ -484,6 +495,8 @@ test("runtime cleanup preserves user files", () => {
     paths.stateFile,
     paths.catalogFile,
     path.join(paths.runtimeHome, "newapi-catalog.json"),
+    path.join(paths.runtimeHome, "codebuddy-catalog.json"),
+    path.join(paths.runtimeHome, "workbuddy-catalog.json"),
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
     paths.stdoutLog,
@@ -500,6 +513,8 @@ test("runtime cleanup preserves user files", () => {
     assert.equal(fs.existsSync(paths.stateFile), false);
     assert.equal(fs.existsSync(paths.catalogFile), false);
     assert.equal(fs.existsSync(path.join(paths.runtimeHome, "newapi-catalog.json")), false);
+    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "codebuddy-catalog.json")), false);
+    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "workbuddy-catalog.json")), false);
     assert.equal(fs.existsSync(path.join(paths.runtimeHome, "catalog-metadata.json")), false);
     assert.equal(fs.existsSync(paths.modelMergeFile), false);
     assert.equal(fs.existsSync(userFile), true);
@@ -1135,6 +1150,8 @@ test("isRequestLogName recognizes request logs and spares process logs", () => {
   assert.equal(isRequestLogName("zcode-error-20260101000001.log"), true);
   assert.equal(isRequestLogName("zai-error-20260101000001.log"), false);
   assert.equal(isRequestLogName("qoder-v1-responses-http-20260101000001.log"), true);
+  assert.equal(isRequestLogName("opencode-zen-v1-chat-http-20260101000001.log"), true);
+  assert.equal(isRequestLogName("opencode-zen-error-20260101000001.log"), true);
   // 进程日志由 launchd 持有句柄，历史审计文件只有一份，都不能被保留计数删掉。
   assert.equal(isRequestLogName("gateway.log"), false);
   assert.equal(isRequestLogName("gateway.error.log"), false);
@@ -1507,6 +1524,287 @@ test("config --max-log-size persists, audits, and caps the gateway log", async (
     if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodexHome;
     fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config --debug persists, audits, and defaults to off", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-config-debug-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    host: "127.0.0.1",
+    port: 8320,
+    mountPath: "/v1",
+    prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/codex",
+    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: paths.catalogFile,
+    configVersion: GATEWAY_CONFIG_VERSION,
+  }));
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    // 发布 schema 同步声明 debug：可选布尔、默认关闭（配置字段与 schema 必须同步）。
+    const schema = JSON.parse(fs.readFileSync(
+      path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+    ));
+    assert.equal(schema.required.includes("debug"), false);
+    assert.equal(schema.properties.debug.type, "boolean");
+    assert.equal(schema.properties.debug.default, false);
+
+    // 未配置时缺省关闭。
+    await runCli(["config"]);
+    assert.match(printed.join("\n"), /"debug": false/);
+
+    await runCli(["config", "--debug", "on"]);
+    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
+    assert.equal(saved.debug, true);
+    // debug 不回填 logDir：落盘目录由运行时按请求日志规则解析。
+    assert.equal(saved.logDir, undefined);
+    assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /debug: null -> true/);
+    assert.match(printed.join("\n"), /Debug dump enabled/);
+
+    await runCli(["config", "--debug", "off"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).debug, false);
+    assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /debug: true -> false/);
+
+    // 与其他 on/off 开关一致：非法值在写盘前拒绝，配置不被破坏。
+    await assert.rejects(runCli(["config", "--debug", "true"]), /--debug/);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).debug, false);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config 日志目录提示与运行时回退规则一致（自定义 catalogPath、省略 logDir）", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-config-logdir-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  delete process.env.CODEX_CLIPROXY_HOME;
+  const paths = resolvePaths();
+  fs.mkdirSync(paths.runtimeHome, { recursive: true });
+  // catalogPath 指向 runtimeHome 之外的自定义目录，logDir 省略：
+  // 日志目录一律回退运行主目录的 logs/，不再从 catalogPath 位置倒推。
+  const customCatalog = path.join(home, "custom", "catalog.json");
+  fs.mkdirSync(path.dirname(customCatalog), { recursive: true });
+  const writeConfig = (catalog: string): void => {
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://official.example/codex",
+      upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+      catalogPath: catalog,
+      configVersion: GATEWAY_CONFIG_VERSION,
+    }));
+  };
+  writeConfig(customCatalog);
+  const defaultLogDir = path.join(home, ".codex-cliproxy-gateway", "logs");
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    // 无参数输出报运行主目录的 logs，绝不跟随 catalogPath。
+    await runCli(["config"]);
+    assert.equal(JSON.parse(printed[printed.length - 1]).logDir, defaultLogDir);
+
+    // --debug 提示与运行时（agy 调试转储、请求日志 sink）使用同一条回退规则。
+    await runCli(["config", "--debug", "on"]);
+    assert.ok(printed.join("\n").includes(`go to: ${defaultLogDir}`));
+    assert.equal(printed.join("\n").includes(`go to: ${path.join(home, "custom", "logs")}`), false);
+
+    // --log on 的回填持久化运行主目录的 logs，不把日志挪去 catalog 同目录。
+    await runCli(["config", "--log", "on"]);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).logDir, defaultLogDir);
+
+    // CODEX_CLIPROXY_HOME 重定向运行主目录后，config 命令读写与目录回退一并跟随。
+    const envHome = path.join(home, "env-home");
+    process.env.CODEX_CLIPROXY_HOME = envHome;
+    fs.mkdirSync(envHome, { recursive: true });
+    fs.writeFileSync(path.join(envHome, "config.json"), JSON.stringify({
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://official.example/codex",
+      upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+      catalogPath: customCatalog,
+      configVersion: GATEWAY_CONFIG_VERSION,
+    }));
+    await runCli(["config", "--debug", "on"]);
+    assert.ok(printed.join("\n").includes(`go to: ${path.join(envHome, "logs")}`));
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("install 拒绝非默认实例托管 ~/.codex/config.toml（需手动模式或独立 CODEX_HOME）", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-install-env-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  process.env.CODEX_CLIPROXY_HOME = path.join(home, "instance-a");
+  const originalLog = console.log;
+  console.log = () => {};
+  try {
+    // 多实例的受管键会争用 config.toml：直接 install 必须在写任何文件之前拒绝。
+    await assert.rejects(runCli(["install"]), /manual-codex-config|CODEX_HOME/);
+    assert.equal(fs.existsSync(path.join(home, "instance-a")), false);
+    assert.equal(fs.existsSync(path.join(home, ".codex-cliproxy-gateway")), false);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config 按实例分派：实例未安装时不触碰默认服务", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-instance-bind-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const instanceA = path.join(home, "instance-a");
+  process.env.CODEX_CLIPROXY_HOME = instanceA;
+  fs.mkdirSync(path.join(home, ".codex-cliproxy-gateway"), { recursive: true });
+  fs.mkdirSync(instanceA, { recursive: true });
+  fs.writeFileSync(path.join(instanceA, "config.json"), JSON.stringify({
+    host: "127.0.0.1", port: 8399, mountPath: "/v1", prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: path.join(instanceA, "catalog.json"), configVersion: GATEWAY_CONFIG_VERSION,
+  }));
+  // 默认服务的 plist 存在（内容为假 plist）：旧实现会因它存在而重启默认服务。
+  const defaultPlistDir = path.join(home, "Library", "LaunchAgents");
+  fs.mkdirSync(defaultPlistDir, { recursive: true });
+  fs.writeFileSync(path.join(defaultPlistDir, "codex-cliproxy-gateway.plist"), "default-service-plist");
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    // A 未安装（无后缀 plist）：只保存配置并提示未自动重启，默认 plist 原样保留。
+    await runCli(["config", "--debug", "on"]);
+    assert.match(printed.join("\n"), /LaunchAgent is not installed; configuration saved without restart/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(instanceA, "config.json"), "utf8")).debug, true);
+    assert.equal(fs.readFileSync(path.join(defaultPlistDir, "codex-cliproxy-gateway.plist"), "utf8"),
+      "default-service-plist");
+    // 默认实例的配置目录未被写入。
+    assert.equal(fs.existsSync(path.join(home, ".codex-cliproxy-gateway", "config.json")), false);
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("config 按实例分派：实例已安装时重启自己的 plist，不动默认 label", async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-instance-restart-"));
+  const previousHome = process.env.HOME;
+  const previousCodexHome = process.env.CODEX_HOME;
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.HOME = home;
+  delete process.env.CODEX_HOME;
+  const instanceA = path.join(home, "instance-a");
+  process.env.CODEX_CLIPROXY_HOME = instanceA;
+  fs.mkdirSync(instanceA, { recursive: true });
+  fs.writeFileSync(path.join(instanceA, "config.json"), JSON.stringify({
+    host: "127.0.0.1", port: 8399, mountPath: "/v1", prefix: "cliproxy/",
+    officialBaseUrl: "https://official.example/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
+    catalogPath: path.join(instanceA, "catalog.json"), configVersion: GATEWAY_CONFIG_VERSION,
+  }));
+  const suffix = instanceMarker(instanceA);
+  const plistDir = path.join(home, "Library", "LaunchAgents");
+  fs.mkdirSync(plistDir, { recursive: true });
+  // A 已安装：带后缀的 plist 存在（假内容，bootstrap 会失败——只要证明操作打的是
+  // A 的 plist/label 而不是默认服务即可）；默认 plist 同样在场且内容必须原样保留。
+  const instancePlist = path.join(plistDir, `codex-cliproxy-gateway-${suffix}.plist`);
+  fs.writeFileSync(instancePlist, "instance-a-plist-not-loadable");
+  fs.writeFileSync(path.join(plistDir, "codex-cliproxy-gateway.plist"), "default-service-plist");
+  const originalLog = console.log;
+  const printed: string[] = [];
+  console.log = (line?: unknown) => { printed.push(String(line)); };
+  try {
+    // 重启走 A 的 plist：launchctl 对假 plist 的报错里必须出现后缀 plist 路径，
+    // 证明没有触碰默认 label；默认 plist 内容原样保留。
+    await assert.rejects(
+      runCli(["config", "--debug", "on"]),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes(`codex-cliproxy-gateway-${suffix}.plist`)
+          || message.includes(`codex-cliproxy-gateway-${suffix}`);
+      },
+    );
+    assert.equal(fs.readFileSync(path.join(plistDir, "codex-cliproxy-gateway.plist"), "utf8"),
+      "default-service-plist");
+  } finally {
+    console.log = originalLog;
+    process.env.HOME = previousHome;
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("healthz 携带实例标记，waitForHealth 拒绝别的实例顶包", async () => {
+  // 端口被另一个 codex-cliproxy 实例占用时，它的健康响应不能算作本实例启动成功。
+  const intruder = Bun.serve({
+    port: 0,
+    fetch: () => new Response("ok", { headers: { "x-ccp-instance": "deadbeef" } }),
+  });
+  try {
+    await assert.rejects(
+      waitForHealth(`http://127.0.0.1:${intruder.port}/healthz`, 2, "cafef00d"),
+      /different codex-cliproxy instance/,
+    );
+  } finally {
+    intruder.stop(true);
+  }
+  // 无标记的旧进程或其他服务不能证明实例归属。
+  const legacy = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+  try {
+    await assert.rejects(waitForHealth(`http://127.0.0.1:${legacy.port}/healthz`, 2, "cafef00d"), /no .*instance marker/);
+  } finally {
+    legacy.stop(true);
+  }
+
+  // 网关自身的 healthz 输出本进程实例标记（运行主目录哈希）。
+  const handler = createGatewayHandler(logTestConfig("/tmp/ccp-healthz-logs"));
+  try {
+    const response = await handler(new Request("http://127.0.0.1:8320/healthz"));
+    assert.equal(response.headers.get("x-ccp-instance"), instanceMarker(resolvePaths().runtimeHome));
+  } finally {
+    handler.close();
   }
 });
 

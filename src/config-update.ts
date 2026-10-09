@@ -3,10 +3,12 @@ import bytes from "bytes";
 import { atomicWrite } from "./toml.ts";
 import { gatewayConfigWarnings, isJsonObject, migrateLegacyConfig } from "./config.ts";
 import { logConfigChange, type ConfigChange } from "./process-log.ts";
+import { requestLogDir } from "./request-log.ts";
 import { validateZcodeConfig } from "./zcode/index.ts";
 import { validateCodebuddyConfig } from "./codebuddy/index.ts";
 import { validateQoderConfig } from "./qoder/index.ts";
 import { validateAgyConfig } from "./agy/index.ts";
+import { validateZenConfig } from "./opencode/index.ts";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
@@ -76,6 +78,7 @@ export interface WebUiConfigPatch {
   codebuddy?: unknown;
   qoder?: unknown;
   agy?: unknown;
+  opencodeZen?: unknown;
   requestLogging?: unknown;
   maxRequestLogs?: unknown;
   maxGatewayLogBytes?: unknown;
@@ -86,6 +89,7 @@ const SUPPORTED_PATCH_FIELDS = new Set([
   "codebuddy",
   "qoder",
   "agy",
+  "opencodeZen",
   "requestLogging",
   "maxRequestLogs",
   "maxGatewayLogBytes",
@@ -125,6 +129,7 @@ export function applySelectedModelsPatch(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
+  validateZenConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
@@ -181,11 +186,18 @@ export function applyWebUiConfigPatch(
     if (config.agy !== patch.agy) change("agy", patch.agy);
     config.agy = patch.agy;
   }
+  if (patch.opencodeZen !== undefined) {
+    if (typeof patch.opencodeZen !== "boolean") throw new Error("opencodeZen expects a boolean");
+    if (config.opencodeZen !== patch.opencodeZen) change("opencodeZen", patch.opencodeZen);
+    config.opencodeZen = patch.opencodeZen;
+  }
   if (patch.requestLogging !== undefined) {
     if (typeof patch.requestLogging !== "boolean") throw new Error("requestLogging expects a boolean");
     if (config.requestLogging !== patch.requestLogging) change("requestLogging", patch.requestLogging);
     config.requestLogging = patch.requestLogging;
-    if (config.requestLogging) config.logDir ||= paths.logDir;
+    // 回填运行时实际会用的目录（与 CLI config --log on 同一规则），自定义 catalogPath
+    // 时不因回填把日志目录挪到默认安装目录。
+    if (config.requestLogging) config.logDir ||= requestLogDir(config, paths);
   }
   if (patch.maxRequestLogs !== undefined) {
     const value = typeof patch.maxRequestLogs === "number"
@@ -216,6 +228,7 @@ export function applyWebUiConfigPatch(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
+  validateZenConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

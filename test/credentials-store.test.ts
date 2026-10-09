@@ -3,8 +3,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createApiKeyStore } from "../src/keychain.ts";
+import { createApiKeyStore, keychainService, KEYCHAIN_SERVICE } from "../src/keychain.ts";
 import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "../src/credentials-store.ts";
+import { resolvePaths, runWithInstancePaths } from "../src/paths.ts";
 
 /** 测试用占位 key：运行时拼接生成，避免源码里出现「凭据字段名 + 明文值」的硬编码形状。 */
 function sampleKey(label: string): string {
@@ -184,5 +185,74 @@ test("install 回滚语义：save 覆盖可恢复旧 key，previous 为空时 de
     // previousApiKey 为空（此前是无 key 安装）时回滚走 delete。
     deleteUpstreamApiKey(file);
     assert.equal(readUpstreamApiKey(file, true), "");
+  });
+});
+
+test("Keychain 服务名按实例隔离：默认槽位沿用历史名，非默认实例加主目录哈希后缀", () => {
+  const previousHome = process.env.HOME;
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  try {
+    process.env.HOME = "/tmp/ccp-keychain-home";
+    delete process.env.CODEX_CLIPROXY_HOME;
+    // 默认实例：存量安装的密钥都在历史服务名下，必须原样读取。
+    assert.equal(keychainService(), KEYCHAIN_SERVICE);
+    // 非默认实例：与 launchd label 同款后缀，互相不覆盖；find 只查本实例槽位，
+    // 结构上不存在回退读默认密钥的路径。
+    process.env.CODEX_CLIPROXY_HOME = "/tmp/ccp-keychain-instance-a";
+    const suffixed = keychainService();
+    assert.match(suffixed, /^codex-cliproxy-gateway-[0-9a-f]{8}$/);
+    assert.notEqual(suffixed, KEYCHAIN_SERVICE);
+  } finally {
+    process.env.HOME = previousHome;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+  }
+});
+
+test("Keychain 存储对象固定创建时的实例和账户，切换上下文后仍访问原槽位", () => {
+  const instanceA = resolvePaths({ HOME: "/tmp/ccp-keychain-capture", CODEX_CLIPROXY_HOME: "/tmp/ccp-keychain-capture-a" });
+  const instanceB = resolvePaths({ HOME: "/tmp/ccp-keychain-capture", CODEX_CLIPROXY_HOME: "/tmp/ccp-keychain-capture-b" });
+  const previousUser = process.env.USER;
+  const calls: string[][] = [];
+  const mockSecurity = (args: string[]): string => {
+    calls.push([...args]);
+    return sampleKey("mock-read");
+  };
+  try {
+    process.env.USER = "ccp-test-original";
+    const store = runWithInstancePaths(instanceA, () => createApiKeyStore("darwin", undefined, mockSecurity));
+    process.env.USER = "ccp-test-other";
+    runWithInstancePaths(instanceB, () => {
+      store.save(sampleKey("captured"));
+      assert.equal(store.read(), sampleKey("mock-read"));
+      store.delete();
+      assert.equal(keychainService(), KEYCHAIN_SERVICE + instanceB.instanceSuffix);
+    });
+    assert.deepEqual(calls.map((args) => args[0]), ["add-generic-password", "find-generic-password", "delete-generic-password"]);
+    for (const args of calls) {
+      assert.equal(args[args.indexOf("-a") + 1], "ccp-test-original");
+      assert.equal(args[args.indexOf("-s") + 1], KEYCHAIN_SERVICE + instanceA.instanceSuffix);
+    }
+  } finally {
+    if (previousUser === undefined) delete process.env.USER;
+    else process.env.USER = previousUser;
+  }
+});
+
+test("Keychain 缺失错误保留创建时服务名，optional 与重复删除行为保持不变", () => {
+  const instanceA = resolvePaths({ HOME: "/tmp/ccp-keychain-error" }, "/tmp/ccp-keychain-error-a");
+  const instanceB = resolvePaths({ HOME: "/tmp/ccp-keychain-error" }, "/tmp/ccp-keychain-error-b");
+  const store = runWithInstancePaths(instanceA, () => createApiKeyStore("darwin", undefined, () => {
+    throw new Error("模拟缺失槽位");
+  }));
+  runWithInstancePaths(instanceB, () => {
+    assert.equal(store.read(true), "");
+    assert.throws(() => store.read(), (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.ok(error.message.includes(KEYCHAIN_SERVICE + instanceA.instanceSuffix));
+      assert.ok(!error.message.includes(KEYCHAIN_SERVICE + instanceB.instanceSuffix));
+      return true;
+    });
+    assert.doesNotThrow(() => store.delete());
   });
 });
