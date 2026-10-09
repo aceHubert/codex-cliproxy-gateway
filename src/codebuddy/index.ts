@@ -19,7 +19,7 @@ import {
 } from "./catalog.ts";
 import { translateCodebuddyRequest, CodebuddyRequestError } from "./request.ts";
 import { createCodebuddyResponse } from "./response.ts";
-import { buildCodebuddyChatHeaders, createCodebuddyContexts } from "./request-context.ts";
+import { buildCodebuddyChatHeaders, createCodebuddyContexts, CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import { isZcodeRecord } from "../zcode/wire.ts";
 import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
@@ -157,7 +157,9 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
           const region = codebuddyModelRegion(entry.slug);
           return region ? [region] : [];
         }));
-        return catalog;
+        // 目录条目的 base_instructions 直接替换为官方 CLI 主提示词：Codex 按此字段发送系统提示词。
+        // workbuddy/* 沿用同一份（本机无 WorkBuddy IDE 与其产品配置，未做 CODEBUDDY_BRAND_NAME 品牌名替换，见技术债）。
+        return { models: catalog.models.map((entry) => ({ ...entry, base_instructions: CODEBUDDY_AGENT_SYSTEM_PROMPT })) };
       } catch { return { models: [] }; }
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {

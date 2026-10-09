@@ -1,16 +1,33 @@
 import { createHash, randomUUID } from "node:crypto";
+import fingerprintData from "./fingerprint-data.json";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
 import { profileProduct, profileRegion } from "./credentials.ts";
 
 /**
  * CLI 与 WorkBuddy 身份头：两套产品使用各自的 UA/IDE 头，鉴权字段共享。
- * 语义对齐 codebuddy2api 的 client_profiles.py；版本号集中在此，单一来源。
+ * 语义对齐 codebuddy2api 的 client_profiles.py；版本号集中在
+ * `fingerprint-data.json`（按本机安装的官方客户端分析校准），单一来源。
  */
+interface CodebuddyFingerprint {
+  cliVersion: string;
+  workbuddyVersion: string;
+  workbuddyCliVersion: string;
+  /** 主代理（cli/general-purpose）系统提示词：product.json prompts 的 cli-agent-prompt 模板原文（Jinja）。 */
+  agentSystemPrompt: string;
+  /** 身份行：base-agent-instructions 模板（24 字符）。 */
+  agentSystemPromptBase: string;
+  /** 终端标题生成器：terminal-title-generator-instructions 模板。 */
+  titleSystemPrompt: string;
+}
+const FINGERPRINT = fingerprintData as CodebuddyFingerprint;
+
+/** CodeBuddy CLI 主代理系统提示词（product.json 模板剥离变量后），供 codebuddy/* 目录条目的 base_instructions 使用。 */
+export const CODEBUDDY_AGENT_SYSTEM_PROMPT = FINGERPRINT.agentSystemPrompt;
 
 /** 伪装的 CLI 版本；与本机 `@tencent-ai/codebuddy-code` 保持一致，目录缓存键也会带上。 */
-export const CODEBUDDY_CLI_VERSION = "2.151.0";
-export const CODEBUDDY_WORKBUDDY_VERSION = "5.5.2";
-export const CODEBUDDY_WORKBUDDY_CLI_VERSION = "2.137.1";
+export const CODEBUDDY_CLI_VERSION = FINGERPRINT.cliVersion;
+export const CODEBUDDY_WORKBUDDY_VERSION = FINGERPRINT.workbuddyVersion;
+export const CODEBUDDY_WORKBUDDY_CLI_VERSION = FINGERPRINT.workbuddyCliVersion;
 
 /** OpenAI JS SDK 随请求发送的 x-stainless 系列与通用代理意图头（对齐真实 CLI 流量）。 */
 const SDK_HEADERS: Record<string, string> = {

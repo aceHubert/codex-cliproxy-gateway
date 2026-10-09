@@ -6,6 +6,7 @@ import path from "node:path";
 import { createGatewayHandler, isZcodeResponsesWebSocket, responsesWebSocketTarget } from "../src/gateway.ts";
 import { ZcodeConfigError, type ZcodeProviderSnapshot, type ZcodeFamily, type ZcodeSelection } from "../src/zcode/config.ts";
 import { ZcodeEndpointRouting } from "../src/zcode/endpoint-routing.ts";
+import { ZCODE_AGENT_SYSTEM_PROMPT } from "../src/zcode/request-context.ts";
 import type { ZcodeIdentity } from "../src/zcode/request-context.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
@@ -256,6 +257,11 @@ test("ZCode 基础模型列表按 API provider 前缀并标记 owned_by zcode", 
       const models = list.data.filter((item: Json) => item.id.startsWith(`zcode-${family}-test/`));
       assert.equal(models.length, 2);
       assert.ok(models.every((item: Json) => item.owned_by === "zcode"));
+      // Codex 形态目录原样透出 base_instructions：Codex 按此字段发送系统提示词。
+      const codex = await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json;
+      const codexModels = (codex.models as Json[]).filter((item) => String(item.slug).startsWith(`zcode-${family}-test/`));
+      assert.equal(codexModels.length, 2);
+      assert.ok(codexModels.every((item) => item.base_instructions === ZCODE_AGENT_SYSTEM_PROMPT));
     }
   });
 });
@@ -637,7 +643,7 @@ for (const family of ["zai", "bigmodel"] as const) {
           assert.equal(call.url, `${selected.baseURL}/v1/messages`);
           assert.equal(call.headers.get("authorization"), `Bearer ${selected.apiKey}`);
           assert.equal(call.headers.get("x-api-key"), selected.apiKey);
-          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+ ai-sdk\/anthropic\/3\.0\.81$/);
+          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+$/);
           assert.equal(call.headers.get("http-referer"), "https://zcode.z.ai");
           assert.equal(call.headers.get("x-title"), "Z Code@cli");
           assert.equal(call.headers.get("x-zcode-agent"), "glm");

@@ -8,7 +8,7 @@ import { createQoderAdapter, qoderEnabled, safeQoderUpstreamError, validateQoder
 import type { QoderDependencies } from "../src/qoder/index.ts";
 import { QoderCredentialError } from "../src/qoder/credentials.ts";
 import type { QoderCredentials } from "../src/qoder/credentials.ts";
-import { decodeQoderBody } from "../src/qoder/transport.ts";
+import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT } from "../src/qoder/transport.ts";
 import type { QoderInferPayload } from "../src/qoder/transport.ts";
 import { checkFrameRouting } from "../src/realtime.ts";
 import type { GatewayConfig } from "../src/types.ts";
@@ -284,6 +284,8 @@ test("Qoder 国内版使用独立授权与端点生成 Qoder-CN 目录并完成�
     assert.ok(cnFlash, "国内版模型进入目录");
     assert.equal(cnFlash.display_name, "Qoder-CN/Qwen3.8-Flash (free)");
     assert.ok(intlFlash, "国际版目录保持并存");
+    assert.equal(cnFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
+    assert.equal(intlFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT);
     const response = await handler(request("qoder-cn/qfmodel", { stream: false }));
     assert.equal(response.status, 200);
     const payload = await response.json() as Json;

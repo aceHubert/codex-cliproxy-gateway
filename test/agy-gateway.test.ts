@@ -6,6 +6,8 @@ import test from "node:test";
 import { createGatewayHandler, isAgyResponsesWebSocket } from "../src/gateway.ts";
 import { agyEnabled, safeAgyUpstreamError, validateAgyConfig } from "../src/agy/index.ts";
 import type { AgyDependencies } from "../src/agy/index.ts";
+import fingerprintData from "../src/agy/fingerprint-data.json";
+import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "../src/agy/transport.ts";
 import type { AgyCredentials } from "../src/agy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
@@ -174,6 +176,7 @@ test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async (
     assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
     assert.equal(flash.prefer_websockets, false);
     assert.equal(flash.context_window, 1_000_000);
+    assert.equal(flash.base_instructions, AGY_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
   });
 });
 
@@ -362,4 +365,23 @@ test("agy 工具调用往返：Responses 工具声明映射并还原 function_ca
     const declarations = inferBodies.at(-1)!.request.tools[0].functionDeclarations;
     assert.equal(declarations[0].name, "shell");
   });
+});
+
+test("Antigravity UA 与内置提示词取自本模块指纹数据文件，版本和 changelist 成对", () => {
+  const data = fingerprintData as {
+    version: string; changelist: string;
+    agentSystemPrompt: string; agentSystemPromptVariant: string; titleSystemPrompt: string;
+  };
+  assert.ok(AGY_USER_AGENT.startsWith(`antigravity/cli/${data.version} (`), "UA 版本段必须取数据文件");
+  assert.ok(AGY_USER_AGENT.includes(`cl=${data.changelist}`), "UA changelist 必须与版本成对");
+  assert.ok(AGY_USER_AGENT.endsWith("auth_method=consumer)"));
+  assert.match(data.version, /^\d+\.\d+\.\d+$/);
+  assert.match(data.changelist, /^\d+$/);
+  // 内置提示词按二进制内嵌原文提取：agent 主模板（Go text/template 原文）/ 短身份行 / 标题生成。
+  assert.ok(data.agentSystemPrompt.startsWith("You are Antigravity, a powerful agentic AI coding assistant"));
+  assert.ok(!data.agentSystemPrompt.includes("{{") && !data.agentSystemPrompt.includes("{%"), "Go 模板变量已剥离");
+  assert.ok(data.agentSystemPrompt.includes("You are pair programming with a USER"), "if/else 保留 else（默认）分支");
+  assert.ok(!data.agentSystemPrompt.includes("Work autonomously"), "autonomous 守卫块整块删除");
+  assert.ok(data.agentSystemPromptVariant.startsWith("You are Antigravity Agent,"));
+  assert.ok(data.titleSystemPrompt.startsWith("You are a conversation title generator."));
 });

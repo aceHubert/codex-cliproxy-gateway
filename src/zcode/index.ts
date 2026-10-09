@@ -19,7 +19,7 @@ import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
 import { isZcodeRecord } from "./wire.ts";
-import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
+import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
 import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
@@ -265,7 +265,8 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       // 所有套餐都失效且从未发布过目录时，撤下 Codex 缓存里的遗留 ZCode 条目。
       if (neverPublished && !planRoutes.some((route) => route.snapshot)) dropCachedZcodeModels();
       republishFromPlans();
-      return servedCatalog;
+      // 目录条目的 base_instructions 直接替换为 ZCode 官方客户端内置提示词：Codex 按此字段发送系统提示词。
+      return { models: servedCatalog.models.map((entry) => ({ ...entry, base_instructions: ZCODE_AGENT_SYSTEM_PROMPT })) };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();

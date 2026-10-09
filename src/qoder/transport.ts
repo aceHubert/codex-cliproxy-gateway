@@ -1,7 +1,30 @@
 import { createHash, randomUUID } from "node:crypto";
+import fingerprintData from "./fingerprint-data.json";
 import type { QoderCredentials, QoderRegion } from "./credentials.ts";
 
 export type { QoderRegion } from "./credentials.ts";
+
+/**
+ * Qoder 客户端指纹（`fingerprint-data.json`，按本机 qodercli-1.1.65 二进制
+ * 常量表与内嵌提示词分析提取）：协议版本与产品身份随 CLI 发行轮换；
+ * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
+ */
+interface QoderFingerprint {
+  version: string;
+  commit: string;
+  profiles: { cli: QoderClientProfile; desktop: QoderClientProfile };
+  agentSystemPrompt: string;
+  desktopAgentSystemPrompt: string;
+}
+interface QoderClientProfile {
+  product: string;
+  clientType: string;
+  sessionType: string;
+}
+const FINGERPRINT = fingerprintData as QoderFingerprint;
+
+/** Qoder CLI 内置系统提示词（二进制提取），供目录条目的 base_instructions 使用。 */
+export const QODER_AGENT_SYSTEM_PROMPT = FINGERPRINT.agentSystemPrompt;
 
 export interface QoderRegionProfile {
   region: QoderRegion;
@@ -17,7 +40,8 @@ export const QODER_REGIONS: Record<QoderRegion, QoderRegionProfile> = {
 
 export const QODER_INTL_INFER_ENDPOINT = QODER_REGIONS.intl.inferEndpoint;
 export const QODER_CN_INFER_ENDPOINT = QODER_REGIONS.cn.inferEndpoint;
-export const QODER_PROTOCOL_VERSION = "1.1.65";
+/** 官方 CLI 协议版本（随 qodercli 发行轮换，见 fingerprint-data.json）。 */
+export const QODER_PROTOCOL_VERSION = FINGERPRINT.version;
 const CATALOG_PATH = "/api/v2/model/list";
 const INFER_PATH = "/api/v2/service/pro/sse/agent_chat_generation";
 const ALPHABET = "_doRTgHZBKcGVjlvpC,@aFSx#DPuNJme&i*MzLOEn)sUrthbf%Y^w.(kIQyXqWA!";
@@ -57,10 +81,7 @@ export interface QoderInferPayload {
 }
 
 /** 凭据来源客户端对应的上游产品标识；实测算法网关两种标识均接受 COSY 签名。 */
-const QODER_CLIENT_PROFILES: Record<QoderCredentials["clientProfile"], { product: string; clientType: string; sessionType: string }> = {
-  cli: { product: "cli", clientType: "5", sessionType: "qodercli" },
-  desktop: { product: "app", clientType: "10", sessionType: "app" },
-};
+const QODER_CLIENT_PROFILES: Record<QoderCredentials["clientProfile"], { product: string; clientType: string; sessionType: string }> = FINGERPRINT.profiles;
 
 export type QoderFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
 

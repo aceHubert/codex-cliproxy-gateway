@@ -1,7 +1,30 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
+import fingerprintData from "./fingerprint-data.json";
 import type { ZcodeProviderSnapshot } from "./config.ts";
+
+/**
+ * ZCode 客户端指纹（`fingerprint-data.json`，按本机 ZCode.app 3.14.5 与真实
+ * 会话流量分析提取）：UA 模板的 `{version}` 由运行时读取的本机版本填充；
+ * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
+ */
+interface ZcodeFingerprint {
+  userAgentTemplate: string;
+  title: string;
+  agent: string;
+  releaseChannel: string;
+  referer: string;
+  /** 分析时的客户端版本快照；运行时以本机 Info.plist 为准。 */
+  appVersion: string;
+  agentSystemPrompt: string;
+  titleSystemPrompt: string;
+  webSearchSystemPrompt: string;
+}
+const FINGERPRINT = fingerprintData as ZcodeFingerprint;
+
+/** ZCode 客户端内置 agent 系统提示词（真实会话流量提取），供目录条目的 base_instructions 使用。 */
+export const ZCODE_AGENT_SYSTEM_PROMPT = FINGERPRINT.agentSystemPrompt;
 
 export type ZcodePlan = "coding-plan" | "start-plan" | "api-key";
 
@@ -79,10 +102,10 @@ export function buildZcodeSourceHeaders(identity: ZcodeIdentity): Headers {
   const appVersion = printable(identity.appVersion);
   const platform = printable(identity.platform);
   const headers = new Headers({
-    "HTTP-Referer": "https://zcode.z.ai",
-    "User-Agent": `ZCode/${appVersion} ai-sdk/anthropic/3.0.81`,
-    "X-Title": "Z Code@cli",
-    "X-Release-Channel": "production",
+    "HTTP-Referer": FINGERPRINT.referer,
+    "User-Agent": FINGERPRINT.userAgentTemplate.replace("{version}", appVersion),
+    "X-Title": FINGERPRINT.title,
+    "X-Release-Channel": FINGERPRINT.releaseChannel,
     "X-Client-Language": printable(identity.language),
     "X-Client-Timezone": printable(identity.timezone),
     "X-Platform": `${platform}-${printable(identity.arch)}`,
@@ -90,7 +113,7 @@ export function buildZcodeSourceHeaders(identity: ZcodeIdentity): Headers {
     "X-Os-Version": printable(identity.osVersion),
   });
   if (appVersion !== "unknown") headers.set("X-ZCode-App-Version", appVersion);
-  headers.set("X-ZCode-Agent", "glm");
+  headers.set("X-ZCode-Agent", FINGERPRINT.agent);
   return headers;
 }
 

@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { atomicWrite } from "../toml.ts";
 import { agyTokenStale, loadAgyCredentials, AgyCredentialError, defaultAgyCredentialFile } from "./credentials.ts";
 import type { AgyCredentials } from "./credentials.ts";
-import { createAgyTransport, AgyTransportError } from "./transport.ts";
+import { createAgyTransport, AgyTransportError, AGY_AGENT_SYSTEM_PROMPT } from "./transport.ts";
 import {
   AGY_PREFIX,
   agyUpstreamModel,
@@ -158,7 +158,8 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
   return {
     async catalog(): Promise<ModelCatalog> {
       if (!store || closed) return { models: [] };
-      return { models: (await loadCatalogMeta()) ?? [] };
+      // 目录条目的 base_instructions 直接替换为 Antigravity 内置提示词：Codex 按此字段发送系统提示词。
+      return { models: ((await loadCatalogMeta()) ?? []).map((entry) => ({ ...entry, base_instructions: AGY_AGENT_SYSTEM_PROMPT })) };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();

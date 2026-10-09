@@ -2,7 +2,7 @@ import path from "node:path";
 import { isIP } from "node:net";
 import { loadQoderCredentials, QoderCredentialError, QODER_REGION_LABELS } from "./credentials.ts";
 import type { QoderCredentials, QoderRegion } from "./credentials.ts";
-import { createQoderTransport, QoderTransportError } from "./transport.ts";
+import { createQoderTransport, QoderTransportError, QODER_AGENT_SYSTEM_PROMPT } from "./transport.ts";
 import type { QoderInferPayload } from "./transport.ts";
 import { createQoderCatalogStore, qoderModelConfig, qoderModelSlug } from "./catalog.ts";
 import { translateQoderRequest, QoderRequestError } from "./request.ts";
@@ -176,7 +176,8 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
           });
         }
       }
-      return { models };
+      // 目录条目的 base_instructions 直接替换为 Qoder CLI 内置提示词：Codex 按此字段发送系统提示词。
+      return { models: models.map((entry) => ({ ...entry, base_instructions: QODER_AGENT_SYSTEM_PROMPT })) };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       if (!regions.length || closed) return qoderError(404, "Qoder 适配器未启用");
