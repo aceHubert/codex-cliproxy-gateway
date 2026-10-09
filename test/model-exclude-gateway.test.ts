@@ -79,63 +79,43 @@ function responsesRequest(model: string): Request {
   });
 }
 
-test("excludedModels filters the merged catalog behind /v1/models in both response shapes", TIMEOUT, async () => {
+test("out-of-scope exclusion rules never filter upstream or official models from /v1/models", TIMEOUT, async () => {
   await gatewayFixture(async ({ create }) => {
-    const handler = create({ excludedModels: ["cliproxy/gamma", "cliproxy/nothing-else"] });
-    // Codex 形态（client_version）：直接返回合并目录，被排除模型必须消失。
+    // 排除仅对本地兼容端生效：上游 cliproxy/* 与官方模型的可选性由 selectedModels
+    // 与 Codex 自身管理，历史规则点名它们也不参与过滤。
+    const handler = create({ excludedModels: ["cliproxy/gamma", "gpt-native", "cliproxy/*"] });
     const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
     const models = ((await codex.json()) as Json).models as Json[];
-    assert.deepEqual(models.map((model) => model.slug).sort(), ["cliproxy/test-cpa", "gpt-native"]);
-    // OpenAI list 形态同样过滤。
+    assert.deepEqual(models.map((model) => model.slug).sort(), ["cliproxy/gamma", "cliproxy/test-cpa", "gpt-native"]);
     const list = await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const data = ((await list.json()) as Json).data as Json[];
-    assert.deepEqual(data.map((item) => item.id).sort(), ["cliproxy/test-cpa", "gpt-native"]);
-    // 不配置排除规则时目录保持完整。
-    const full = create();
-    const untouchedResponse = await full(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
-    const untouched = (((await untouchedResponse.json()) as Json).models as Json[])
-      .map((model) => model.slug).sort();
-    assert.deepEqual(untouched, ["cliproxy/gamma", "cliproxy/test-cpa", "gpt-native"]);
+    assert.deepEqual(data.map((item) => item.id).sort(), ["cliproxy/gamma", "cliproxy/test-cpa", "gpt-native"]);
   });
 });
 
-test("requests naming an excluded model are rejected with 404 before any upstream call", TIMEOUT, async () => {
+test("out-of-scope exclusion rules never block upstream or official inference requests", TIMEOUT, async () => {
   await gatewayFixture(async ({ create, upstreamCalls }) => {
-    const handler = create({ excludedModels: ["cliproxy/gamma"] });
-    const blocked = await handler(responsesRequest("cliproxy/gamma"));
-    assert.equal(blocked.status, 404);
-    assert.equal(blocked.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
-    assert.match(JSON.stringify(await blocked.json()), /excludedModels/);
-    assert.equal(upstreamCalls.length, 0);
-
-    // 未被排除的模型照常路由到上游。
-    const allowed = await handler(responsesRequest("cliproxy/test-cpa"));
-    assert.equal(allowed.status, 200);
+    const handler = create({ excludedModels: ["cliproxy/gamma", "gpt-native"] });
+    const upstream = await handler(responsesRequest("cliproxy/gamma"));
+    assert.equal(upstream.status, 200);
     assert.equal(upstreamCalls.length, 1);
     assert.match(upstreamCalls[0], /cpa\.invalid/);
+    const official = await handler(responsesRequest("gpt-native"));
+    assert.equal(official.status, 200);
+    assert.equal(upstreamCalls.length, 2);
   });
 });
 
-test("excluded native models are intercepted on the official route too", TIMEOUT, async () => {
+test("upstream-only mode leaves the catalog and requests untouched by exclusion rules", TIMEOUT, async () => {
   await gatewayFixture(async ({ create, upstreamCalls }) => {
-    const handler = create({ excludedModels: ["gpt-native"] });
-    const blocked = await handler(responsesRequest("gpt-native"));
-    assert.equal(blocked.status, 404);
-    assert.equal(upstreamCalls.length, 0);
-  });
-});
-
-test("upstream-only mode filters the catalog and intercepts excluded inference requests", TIMEOUT, async () => {
-  await gatewayFixture(async ({ create, upstreamCalls }) => {
-    const handler = create({ upstreamOnly: true, excludedModels: ["gamma"] });
+    // upstream-only 没有本地兼容端：排除规则整体不生效。
+    const handler = create({ upstreamOnly: true, excludedModels: ["gamma", "test-cpa", "agy/x"] });
     const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
     const models = ((await codex.json()) as Json).models as Json[];
-    assert.deepEqual(models.map((model) => model.slug), ["test-cpa"]);
-    const blocked = await handler(responsesRequest("gamma"));
-    assert.equal(blocked.status, 404);
-    assert.equal(upstreamCalls.length, 0);
-    const allowed = await handler(responsesRequest("test-cpa"));
-    assert.equal(allowed.status, 200);
+    assert.deepEqual(models.map((model) => model.slug).sort(), ["gamma", "test-cpa"]);
+    const response = await handler(responsesRequest("gamma"));
+    assert.equal(response.status, 200);
+    assert.equal(upstreamCalls.length, 1);
   });
 });
 
@@ -156,7 +136,7 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-agy-"));
   const config: GatewayConfig = {
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
-    excludedModels: [AGY_MODEL],
+    excludedModels: [AGY_MODEL, "cliproxy/gamma"],
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
@@ -191,7 +171,7 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
       undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
       undefined, undefined, agyDependencies);
     try {
-      // 合并目录过滤：agy 条目被排除，上游与官方条目保留。
+      // 合并目录过滤：agy 条目被排除；作用域外规则（cliproxy/gamma）不影响上游条目。
       const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
       const models = ((await codex.json()) as Json).models as Json[];
       assert.deepEqual(models.map((model) => model.slug).sort(), ["cliproxy/gamma", "cliproxy/test-cpa", "gpt-native"]);
@@ -241,7 +221,7 @@ function webUiFixture(): { handler: (request: Request) => Promise<Response>; pat
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: paths.catalogFile,
-    excludedModels: ["qoder-cn/*"],
+    excludedModels: ["qoder-cn/qoder-code", "zcode-team-coding-plan/glm-5.3"],
   };
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify(config, null, 2));
   fs.writeFileSync(paths.uiTokenFile, `${UI_TOKEN}\n`, { mode: 0o600 });
@@ -267,32 +247,44 @@ function uiRequest(pathname: string, options: { method?: string; json?: unknown 
   });
 }
 
-test("web ui config api reads and writes excludedModels and invalidates the codex cache", async () => {
+test("web ui config api splits excluded rules into prefix groups and expands them on save", async () => {
   const { handler, paths, home } = webUiFixture();
   try {
     const read = await handler(uiRequest("/ui/api/config"));
     assert.equal(read.status, 200);
     const editable = ((await read.json()) as Json).editable as Json;
-    assert.deepEqual(editable.excludedModels, ["qoder-cn/*"]);
+    // 分组定义：按用户可感知的产品归一（5 组），全部保存为产品级家族通配。
+    const groups = editable.excludedGroups as Json[];
+    assert.equal(groups.length, 5);
+    assert.deepEqual(groups.map((group) => group.key), ["zcode", "codebuddy", "workbuddy", "qoder", "agy"]);
+    assert.deepEqual(editable.excludedEntries, {
+      zcode: ["glm-5.3"], codebuddy: [], workbuddy: [], qoder: ["qoder-code"], agy: [],
+    });
 
+    // 保存：分组条目由服务端补前缀，整组替换 excludedModels（产品级家族通配）。
     const posted = await handler(uiRequest("/ui/api/config", {
-      json: { excludedModels: ["qoder-cn/*", "  ", "codebuddy-intl/"] },
+      json: {
+        excludedModelGroups: { qoder: ["qoder-code-x", "  "], agy: ["gemini-2.5-flash"], zcode: ["glm-5.3"] },
+      },
     }));
     assert.equal(posted.status, 200);
     const payload = (await posted.json()) as Json;
     assert.deepEqual(payload.applied, ["excludedModels"]);
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as GatewayConfig;
-    assert.deepEqual(saved.excludedModels, ["qoder-cn/*", "codebuddy-intl/"]);
+    assert.deepEqual(saved.excludedModels, ["qoder-*/qoder-code-x", "agy/gemini-2.5-flash", "zcode*/glm-5.3"]);
     // 排除规则改变目录内容：Codex 目录缓存被重置，下一次 /models 立即反映。
     const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as { fetched_at: string };
     assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
 
-    // 非法规则被拒绝且不落盘。
-    const rejected = await handler(uiRequest("/ui/api/config", { json: { excludedModels: ["*"] } }));
+    // 非法条目被拒绝且不落盘：裸 *、上游分组不存在。
+    const rejected = await handler(uiRequest("/ui/api/config", { json: { excludedModelGroups: { agy: ["*"] } } }));
     assert.equal(rejected.status, 400);
-    assert.match(JSON.stringify(await rejected.json()), /would exclude every model/);
+    assert.match(JSON.stringify(await rejected.json()), /would exclude every model of this group/);
+    const noUpstream = await handler(uiRequest("/ui/api/config", { json: { excludedModelGroups: { upstream: ["alpha"] } } }));
+    assert.equal(noUpstream.status, 400);
+    assert.match(JSON.stringify(await noUpstream.json()), /Unknown excluded model group/);
     const after = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as GatewayConfig;
-    assert.deepEqual(after.excludedModels, ["qoder-cn/*", "codebuddy-intl/"]);
+    assert.deepEqual(after.excludedModels, ["qoder-*/qoder-code-x", "agy/gemini-2.5-flash", "zcode*/glm-5.3"]);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

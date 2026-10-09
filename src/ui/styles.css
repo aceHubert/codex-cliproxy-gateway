@@ -562,6 +562,31 @@ input:checked + .slider:before {
   cursor: not-allowed;
 }
 
+/* 排除模型分组输入：挂在各兼容端开关下方，自适应多列排布 */
+.excluded-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+  max-width: 560px;
+}
+.excluded-groups .field-desc {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.excluded-group {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+}
+.excluded-group-label {
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.excluded-group .input-textarea {
+  max-width: none;
+}
+
 .log-size-control {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 76px;

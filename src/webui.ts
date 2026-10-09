@@ -7,10 +7,12 @@ import { GATEWAY_CONFIG_VERSION } from "./config.ts";
 import {
   applySelectedModelsPatch,
   applyWebUiConfigPatch,
+  excludedModelGroupsFor,
   markPendingRestart,
   parseSelectedModels,
   readGatewayConfigFile,
   sanitizeUrlValue,
+  splitExcludedModelsByGroup,
 } from "./config-update.ts";
 import { restartLaunchAgent } from "./launchd.ts";
 import { realPathOrResolve, resolvePaths } from "./paths.ts";
@@ -406,6 +408,13 @@ function configResponse(
     cnDesktopDir: providerDeps?.qoderCnDesktopDir,
     home: paths.home,
   });
+  // 排除模型按兼容端分组下发：条目不带前缀（保存时网关补全），前缀只在分组定义里
+  // 出现；归不进分组的规则放 other 原样回传，保证往返不丢。
+  const excludedGroups = excludedModelGroupsFor(live);
+  const { entries: excludedEntries, other: excludedOther } = splitExcludedModelsByGroup(
+    Array.isArray(live.excludedModels) ? live.excludedModels : [],
+    excludedGroups,
+  );
   return Response.json({
     editable: {
       zcode: live.zcode === true,
@@ -417,7 +426,9 @@ function configResponse(
       maxRequestLogs: live.maxRequestLogs ?? 0,
       maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
       selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
-      excludedModels: Array.isArray(live.excludedModels) ? live.excludedModels : [],
+      excludedGroups,
+      excludedEntries,
+      excludedOther,
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
     // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是

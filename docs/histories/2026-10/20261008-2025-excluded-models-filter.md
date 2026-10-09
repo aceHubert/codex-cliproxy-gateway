@@ -75,3 +75,59 @@
 4. **主仓库残留**：删除主工作区 `docs/exec-plans/active/excluded-models-filter.md` 未跟踪副本（归档版已在分支 `completed/` 下）；`.omo/`、`.zcodeignore`、`active/openai-chat-completions-endpoint.md` 属其他在途工作，未触碰。
 
 新增测试后全量 `bun run check` 仍全绿（690 tests）。
+
+### 🔁 需求迭代（同日第三轮，未提交）
+
+用户调整 Web 端排除模型的编辑形态，改动保留在工作区（按要求未 commit）：
+
+1. **Web 不感知前缀**：删除全局多行文本框，改为「每个兼容端开关下方按前缀分组的输入框」（ZCode 1 组、CodeBuddy 4 组、Qoder 2 组、Agy 1 组、上游 1 组）；用户只填模型名，保存时由网关自动补全该组前缀（`excludedModelGroupsFor` + `expandExcludedModelGroups`，上游组动态路由用 `config.prefix`、upstream-only 用空串）。GET `/ui/api/config` 下发 `excludedGroups/excludedEntries/excludedOther`（`splitExcludedModelsByGroup` 剥前缀；整族与未知前缀规则进 `other` 原样往返），POST 接受 `excludedModelGroups` + `excludedModelOther` 整组替换。
+2. **禁止整族排除**：`parseExcludedModels` 严格拒绝裸 `*`、`prefix/` 与 `prefix/*`（提示改用对应端开关）；分组条目拒绝裸 `*` 与「自带前缀的粘贴」；`normalizeExcludedModels` 宽松归一存量整族规则（运行期引擎仍识别），CLI `--exclude` 的 current/merge 走宽松、新输入走严格，存量规则不阻塞编辑。
+3. **CLI 同步收紧**：`models --exclude qoder-cn/*` / `qoder-cn/` 现在显式报错；usage 与 README 的规则表重写（整族形态标记为写入拒绝，指向端开关）。
+4. **测试**：新增/更新分组 split/expand、upstream-only 裸 ID、非法条目（裸 *、粘贴前缀、未知分组、互斥字段）、存量整族规则兼容（CLI 追加不丢、Web other 往返）等用例；全量 `bun run check` 全绿（696 tests）。
+
+### 🔁 需求迭代二（同日第四轮，未提交）
+
+用户明确排除的作用域：**仅对本地兼容转发有效**。上游（cliproxy/new-api）模型的出现与否由 `models --sync` 的 selectedModels 管理，官方原生模型不参与排除。
+
+- **作用域谓词**：`config-update.ts` 新增 `isLocalAdapterModel`（复用各适配器权威 `is*Model` 谓词，覆盖 `zcode-team-coding-plan/` 套餐前缀与 `codebuddy/`、`qoder/` 旧前缀）与 `isLocalAdapterExclusionPattern`（字面量探测，覆盖 `zcode/glm*`、`zcode-*` 等通配写法、拒绝前导 `*`）。
+- **网关**：`filterExcludedModels` 增加 scope 参数，`/models` 过滤与推理 POST 拦截都以 `isLocalAdapterModel` 划界——作用域外（上游/官方）的历史规则不再过滤目录、不再拦截请求；upstream-only 模式下排除整体不生效。
+- **写入校验**：`parseExcludedModels` 对作用域外规则（`cliproxy/…`、官方 ID）显式拒绝并指引去 `models --sync`；分组条目额外拒绝含 `/` 的写法（防止 zcode 套餐前缀误拼）。存量作用域外规则走宽松归一，保留在配置与 Web「其他排除规则」中但不生效。
+- **分组/交互**：删除上游分组（8 个适配器分组）；CLI 交互勾选列表只收集本地适配器模型（`collectCompatibleModels` 支持 `includeUpstream: false`），TTY 检查提前；usage/README/Schema 同步改为作用域表述。
+- **测试**：作用域谓词、分组 8 项、上游规则不过滤不拦截、upstream-only 不受影响、agy 场景下作用域外规则不误伤、CLI 交互仅列本地模型（注入 agy 适配器依赖）等用例更新/新增；全量 `bun run check` 全绿（698 tests）。
+
+### 🔁 需求迭代三（同日第五轮，未提交）
+
+「其他排除规则」框原先仅在 other 非空时渲染，导致 Web 没有任何入口新增分组框表达不了的规则（如 `zcode-team-coding-plan/…` 套餐前缀）。修正：
+
+- **框常驻渲染**（不再依赖 `excludedOther.length > 0`），成为 Web 的完整规则输入口；
+- **other 校验收紧到与 CLI 一致**：`expandExcludedModelGroups` 的 other 路径改走 `parseExcludedModels`——拒绝裸 `*`、整族形态与作用域外规则；存量此类规则会在保存时被明确拒绝并指出具体行，需删除（整族改用端开关）后才能保存；
+- i18n 文案改为「完整规则输入口」表述；测试同步更新（套餐前缀经 other 往返、整族/作用域外在 other 被拒）；全量 `bun run check` 全绿（698 tests）。
+
+### 🔁 需求迭代四（2026-10-09，未提交）
+
+用户要求排除输入框「一直保留，清空后可继续添加」——补齐最后一个会消失的场景：端行因「未检测到本地配置且开关关闭」整体隐藏时，其分组输入框随之消失。修正：隐藏端的分组输入框以独立行（标签「排除模型（未启用的端）」）常驻渲染，规则可预先添加、端启用后即生效。至此所有排除输入框（8 个分组框 + 完整规则框）均不依赖规则内容、目录状态或端检测而消失，仅在保存/重启进行中短暂禁用。全量 `bun run check` 全绿（698 tests）。
+
+### 🔁 需求迭代五（2026-10-09，未提交）
+
+用户定界：不存在无前缀的排除场景——排除只处理本地代理兼容，每条规则都必须带**确定的适配器前缀**，官方模型与 cliproxy 完全不参与。据此取消「其他排除规则」框（无前缀兜底概念），改为**分组即前缀权威清单**：
+
+- 适配器导出权威前缀清单（`zcodeStaticModelPrefixes`：zcode/ + 个人/团队/免费套餐前缀；`codebuddyModelPrefixes`：产品×地域 4 前缀；qoder 国际/国内；agy），分组从 8 个扩展到 11 个，zcode 套餐模型在自己分组内编辑、无需完整规则输入口。
+- 写入校验收紧为「必须以完整适配器前缀开始」：`zcode-*`（不完整前缀）、`gpt-*`、裸模型名、作用域外一律拒绝；通配只允许出现在前缀之后；zcode 的动态 provider 前缀（`zcode-<id>/`）按段内无通配的完整形态接受；旧前缀 `codebuddy/`、`workbuddy/`、`qoder/` 属确定前缀，予以接受。
+- `excludedModelOther` 从 Web patch API 移除（分组整组替换 excludedModels，归不进分组的存量规则随保存移除）；GET 的 `excludedOther` 保留仅作诊断，UI 不再渲染。
+- UI 删除 other 框与相关表单态，新增 zcode 三档套餐分组文案；README/Schema/usage 同步为「完整前缀必须」表述。全量 `bun run check` 全绿（698 tests）。
+
+### 🔁 需求迭代六（2026-10-09，未提交）
+
+用户确认 Web 保存形态：zcode 不逐档列举套餐前缀，整族收成一个框，保存为 `zcode*/模型名` 的家族通配（一条 glob 同时命中 zcode/、各套餐前缀与动态 provider 前缀；引擎的 glob 匹配天然支持，仅写入校验此前拒绝）。实现：`ExcludedModelGroupDefinition` 增加 `matchPrefixes`（回显拆分识别全部家族前缀，保存统一归一为家族通配形态）；分组回到 8 个；`isLocalAdapterExclusionPattern` 接受 `zcode*/…`（整族形态 `zcode*/` 本身仍被拒）；cn/intl 等用户可感知区分保持独立分组。README/Schema/usage 同步；全量 `bun run check` 全绿（698 tests）。
+
+### 🔁 需求迭代七（2026-10-09，未提交）
+
+用户裁决：Web 用户没有可输入的前缀，cn/intl 地域不可感知（凭据地域跟登录走）——分组按「用户可感知的产品」归一，与 zcode 套餐同一逻辑：**5 个分组框**（ZCode、CodeBuddy、WorkBuddy、Qoder、Antigravity），全部保存为产品级家族通配（`zcode*/`、`codebuddy-*/`、`workbuddy-*/`、`qoder-*/`、`agy/`），`matchPrefixes` 收编各产品的地域/套餐/旧前缀做回显归一。CLI 精确前缀规则仍可写，但 Web 保存会将其归一为产品级通配（保存面放宽为产品粒度，属已接受的设计取舍）。README/Schema/usage/引擎测试（产品通配不越界到其他产品）同步；全量 `bun run check` 全绿（698 tests）。
+
+### 📊 迭代二至七合计变更统计
+
+> 数据来自 `git diff --numstat HEAD`（相对已提交的 4758ec5）。
+
+- Files changed: 17
+- Insertions: +916 / Deletions: -186
+- 核心面：`src/config-update.ts`（分组归一/作用域/校验）、`src/catalog.ts`（filter scope）、`src/gateway.ts`（作用域拦截）、`src/cli.ts`（CLI 收紧与收集）、`src/webui.ts` + `src/ui/*`（分组编辑 UI）、`README.md`、`schemas/gateway-config.schema.json`、两个测试文件与历史/技术债文档。

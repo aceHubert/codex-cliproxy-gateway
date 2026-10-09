@@ -80,7 +80,7 @@
       "uniqueItems": true
     },
     "excludedModels": {
-      "description": "排除模型规则：网关在所有适配器与上游目录合并后统一过滤 /models，命中模型的推理请求返回 404。每项为完整模型 ID（如 agy/gemini-2.5-flash）、以 / 结尾的前缀族（如 codebuddy-cn/）或含 * 的通配符（如 qoder-cn/*），大小写不敏感；默认空数组。",
+      "description": "排除模型规则：仅对本地兼容端生效——网关在所有适配器与上游目录合并后统一过滤 /models，命中模型的推理请求返回 404；上游 cliproxy/new-api 模型的可选性由 selectedModels（models --sync）管理，官方原生模型不参与排除。每条规则必须以确定的适配器前缀开始（zcode/、zcode-<plan>/、codebuddy-intl|cn/、workbuddy-intl|cn/、qoder-intl|cn/、agy/，含 codebuddy/、workbuddy/、qoder/ 旧前缀），另接受产品级家族通配 zcode*/、codebuddy-*/、workbuddy-*/、qoder-*/ 加模型名（各覆盖该产品的全部套餐/地域/旧前缀，Web 分组即保存此形态）；通配只允许出现在前缀之后，大小写不敏感。整族形态（prefix/ 或 prefix/*）、裸 *、无/不完整前缀与作用域外规则会被写入路径拒绝（运行期对存量值宽松：整族仍被识别，作用域外规则被忽略，Web 分组保存会移除归不进分组的存量规则）；Web UI 按兼容端分组编辑，前缀由网关保存时补全；默认空数组。",
       "type": "array",
       "items": {
         "type": "string",

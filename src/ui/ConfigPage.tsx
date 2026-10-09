@@ -12,9 +12,19 @@ import {
 } from "./api.ts";
 import { Header } from "./Header.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
-import { useI18n } from "./i18n.tsx";
+import { useI18n, type I18nKey } from "./i18n.tsx";
+import type { ExcludedModelGroup } from "./api.ts";
 import { joinExcludedLines, splitExcludedLines } from "./excluded-models-field.ts";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
+
+/** 分组 key → 文案键的静态映射（i18n 键是字面量联合类型，模板字符串无法直接索引）。 */
+const EXCLUDED_GROUP_LABELS: Record<string, I18nKey> = {
+  zcode: "excludedGroup_zcode",
+  codebuddy: "excludedGroup_codebuddy",
+  workbuddy: "excludedGroup_workbuddy",
+  qoder: "excludedGroup_qoder",
+  agy: "excludedGroup_agy",
+};
 
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。
  * CodeBuddy 账号不在表单内：UI 只读展示实时解析标签，切换走 CLI。 */
@@ -29,8 +39,8 @@ interface FormState {
   maxGatewayLogUnit: LogSizeUnit;
   /** 当前勾选的上游模型；与 config.editable.selectedModels 按集合比较。 */
   selectedModels: string[];
-  /** 排除模型规则的多行文本（每行一条）；提交时按行拆分为 excludedModels 数组。 */
-  excludedModelsText: string;
+  /** 排除模型分组 key → 多行文本（每行一个模型名，不带前缀；保存时服务端补全）。 */
+  excludedEntries: Record<string, string>;
 }
 
 type SavePhase = "idle" | "confirm" | "saving" | "restarting" | "failed";
@@ -42,6 +52,16 @@ interface CodexNotice {
 
 function sameSelection(left: string[], right: string[]): boolean {
   return [...left].sort().join("\u0000") === [...right].sort().join("\u0000");
+}
+
+/** 排除分组条目 ↔ 多行文本的统一比较：两侧都归一为「行数组」后再拼接。 */
+function excludedEntriesChanged(
+  formEntries: Record<string, string>,
+  groups: ExcludedModelGroup[],
+  savedEntries: Record<string, string[]>,
+): boolean {
+  return groups.some((group) =>
+    splitExcludedLines(formEntries[group.key] ?? "").join("\n") !== (savedEntries[group.key] ?? []).join("\n"));
 }
 
 function CopyButton({ text, title }: { text: string; title: string }) {
@@ -82,6 +102,27 @@ function ReadonlyRow({
   );
 }
 
+/** 排除模型的单分组输入框：只填模型名，前缀由网关在保存时补全。 */
+function ExcludedGroupInput({
+  label, value, disabled, onChange,
+}: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
+  const { t } = useI18n();
+  return (
+    <label className="excluded-group">
+      <span className="excluded-group-label">{label}</span>
+      <textarea
+        className="input-textarea"
+        rows={2}
+        spellCheck={false}
+        placeholder={t("excludedGroupPlaceholder")}
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
+  );
+}
+
 export function ConfigPage({
   status, onStatusChange, onAuthExpired,
 }: {
@@ -101,6 +142,10 @@ export function ConfigPage({
     setLoadError(null);
     void getUiConfig().then((next) => {
       const logSize = splitLogSize(next.editable.maxGatewayLogBytes ?? 0);
+      const excludedEntries: Record<string, string> = {};
+      for (const group of next.editable.excludedGroups) {
+        excludedEntries[group.key] = joinExcludedLines(next.editable.excludedEntries[group.key]);
+      }
       setConfig(next);
       setForm({
         zcode: next.editable.zcode,
@@ -112,7 +157,7 @@ export function ConfigPage({
         maxGatewayLogBytes: logSize.value,
         maxGatewayLogUnit: logSize.unit,
         selectedModels: next.editable.selectedModels,
-        excludedModelsText: joinExcludedLines(next.editable.excludedModels),
+        excludedEntries,
       });
     }).catch((cause: unknown) => {
       if (cause instanceof ApiError && cause.status === 401) {
@@ -138,7 +183,7 @@ export function ConfigPage({
       || form.requestLogging !== config.editable.requestLogging
       || form.maxRequestLogs !== String(config.editable.maxRequestLogs ?? 0)
       || parseLogSizeField(form.maxGatewayLogBytes, form.maxGatewayLogUnit)?.bytes !== (config.editable.maxGatewayLogBytes ?? 0)
-      || splitExcludedLines(form.excludedModelsText).join("\n") !== (config.editable.excludedModels ?? []).join("\n");
+      || excludedEntriesChanged(form.excludedEntries, config.editable.excludedGroups, config.editable.excludedEntries);
   }, [config, form]);
   const dirty = modelsDirty || genericDirty;
   const upstreamOnly = config?.readonly.upstreamOnly === true;
@@ -150,6 +195,32 @@ export function ConfigPage({
   const showAgy = Boolean(config && (config.detected.agy || config.editable.agy));
   // 兼容旧后端返回结构：仅接受数组形式的生效来源，避免升级窗口期内渲染报错。
   const qoderSources = Array.isArray(config?.detected.qoderSources) ? config.detected.qoderSources : [];
+  /** 各兼容端下按前缀分组的排除模型输入框；条目只填模型名，前缀由网关保存时补全。 */
+  const excludedDisabled = phase === "saving" || phase === "restarting" || phase === "confirm";
+  const renderExcludedGroups = (endpoint: ExcludedModelGroup["endpoint"]): React.ReactNode => {
+    if (!config || !form) return null;
+    const groups = config.editable.excludedGroups.filter((group) => group.endpoint === endpoint);
+    if (groups.length === 0) return null;
+    return (
+      <div className="excluded-groups">
+        {groups.map((group) => {
+          const labelKey = EXCLUDED_GROUP_LABELS[group.key];
+          return (
+            <ExcludedGroupInput
+              key={group.key}
+              label={labelKey ? t(labelKey) : group.key}
+              value={form.excludedEntries[group.key] ?? ""}
+              disabled={excludedDisabled}
+              onChange={(value) => setForm((current) => current
+                ? { ...current, excludedEntries: { ...current.excludedEntries, [group.key]: value } }
+                : current)}
+            />
+          );
+        })}
+        <p className="field-desc">{t("descExcludedGroup")}</p>
+      </div>
+    );
+  };
 
   /** 网关重启完成后恢复：刷新配置与状态并提示已生效。 */
   useEffect(() => {
@@ -214,9 +285,13 @@ export function ConfigPage({
       if (logSize.bytes !== (config.editable.maxGatewayLogBytes ?? 0)) {
         changes.maxGatewayLogBytes = logSize.payload;
       }
-      const excludedLines = splitExcludedLines(formSnapshot.excludedModelsText);
-      if (excludedLines.join("\n") !== (config.editable.excludedModels ?? []).join("\n")) {
-        changes.excludedModels = excludedLines;
+      if (excludedEntriesChanged(formSnapshot.excludedEntries, config.editable.excludedGroups, config.editable.excludedEntries)) {
+        // 整体提交所有分组（含当前未渲染的端，保证隐藏组的存量条目不丢）；前缀由服务端补全。
+        const groups: Record<string, string[]> = {};
+        for (const group of config.editable.excludedGroups) {
+          groups[group.key] = splitExcludedLines(formSnapshot.excludedEntries[group.key] ?? "");
+        }
+        changes.excludedModelGroups = groups;
       }
       if (Object.keys(changes).length === 0) return "done";
       const result = await postUiConfig(changes);
@@ -386,25 +461,6 @@ export function ConfigPage({
                     />
                   </div>
                 </div>
-                <div className="field-row">
-                  <div className="field-label-group">
-                    <span className="field-label">{t("labelExcludedModels")}</span>
-                    <span className="field-keyname">excludedModels</span>
-                  </div>
-                  <div className="field-control-area">
-                    <textarea
-                      className="input-textarea"
-                      rows={4}
-                      spellCheck={false}
-                      aria-label={t("labelExcludedModels")}
-                      placeholder={"codebuddy-cn/*\nqoder-cn/*\nagy/gemini-2.5-flash"}
-                      value={form.excludedModelsText}
-                      disabled={phase === "saving" || phase === "restarting" || phase === "confirm"}
-                      onChange={(event) => setForm({ ...form, excludedModelsText: event.target.value })}
-                    />
-                    <p className="field-desc">{t("descExcludedModels")}</p>
-                  </div>
-                </div>
                 {showZcode && (
                   <div className="field-row">
                     <div className="field-label-group">
@@ -430,6 +486,7 @@ export function ConfigPage({
                       {!config.detected.zcode && (
                         <p className="field-desc zcode-disabled-hint">{t("zcodeMissingHint")}</p>
                       )}
+                      {renderExcludedGroups("zcode")}
                     </div>
                   </div>
                 )}
@@ -466,6 +523,7 @@ export function ConfigPage({
                       {!config.detected.codebuddy && (
                         <p className="field-desc zcode-disabled-hint">{t("codebuddyMissingHint")}</p>
                       )}
+                      {renderExcludedGroups("codebuddy")}
                     </div>
                   </div>
                 )}
@@ -510,6 +568,7 @@ export function ConfigPage({
                       {!config.detected.qoder && (
                         <p className="field-desc zcode-disabled-hint">{t("qoderMissingHint")}</p>
                       )}
+                      {renderExcludedGroups("qoder")}
                     </div>
                   </div>
                 )}
@@ -538,9 +597,28 @@ export function ConfigPage({
                       {!config.detected.agy && (
                         <p className="field-desc zcode-disabled-hint">{t("agyMissingHint")}</p>
                       )}
+                      {renderExcludedGroups("agy")}
                     </div>
                   </div>
                 )}
+                {/* 排除输入框常驻：端行因「未检测且未启用」隐藏时，该端的分组输入框
+                    仍要保留——规则可以预先添加，端启用后即生效；不与任何目录/内容状态联动。 */}
+                {(["zcode", "codebuddy", "qoder", "agy"] as const)
+                  .filter((endpoint) => !(endpoint === "zcode" ? showZcode
+                    : endpoint === "codebuddy" ? showCodebuddy
+                    : endpoint === "qoder" ? showQoder
+                    : showAgy))
+                  .map((endpoint) => (
+                    <div className="field-row" key={endpoint}>
+                      <div className="field-label-group">
+                        <span className="field-label">{t("labelExcludedModels")}</span>
+                        <span className="field-keyname">{endpoint}</span>
+                      </div>
+                      <div className="field-control-area">
+                        {renderExcludedGroups(endpoint)}
+                      </div>
+                    </div>
+                  ))}
               </>
             )}
           </div>

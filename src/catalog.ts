@@ -456,14 +456,23 @@ export function compileModelFilter(patterns: readonly string[] | undefined): Mod
   };
 }
 
-/** 合并目录输出的最后一步：剔除所有命中 excludedModels 的条目。空规则原样返回。 */
+/**
+ * 合并目录输出的最后一步：剔除所有命中 excludedModels 的条目。空规则原样返回。
+ * scope 限定排除的作用域（本地兼容端模型）：作用域外的条目——官方原生与上游
+ * cliproxy/ 模型——即使被历史规则点名也一律保留，它们的选择由 selectedModels
+ * 与 Codex 自身管理。
+ */
 export function filterExcludedModels(
   catalog: ModelCatalog,
   patterns: readonly string[] | undefined,
+  scope?: (slug: string) => boolean,
 ): ModelCatalog {
   const filter = compileModelFilter(patterns);
   if (filter.isEmpty) return catalog;
-  return { models: catalog.models.filter((model) => !filter.isExcluded(model.slug)) };
+  return {
+    models: catalog.models.filter((model) =>
+      (scope ? !scope(model.slug) : false) || !filter.isExcluded(model.slug)),
+  };
 }
 
 interface SyncCatalogOptions {

@@ -30,6 +30,7 @@ import {
 } from "./realtime.ts";
 import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
 import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { isLocalAdapterModel } from "./config-update.ts";
 import { atomicWrite } from "./toml.ts";
 import {
   logExchange,
@@ -923,9 +924,10 @@ async function catalogModelsResponse(
     if (codebuddyCatalog) merged = mergeCodebuddyCatalog(merged, codebuddyCatalog);
     if (qoderCatalog) merged = mergeQoderCatalog(merged, qoderCatalog);
     if (agyCatalog) merged = mergeAgyCatalog(merged, agyCatalog);
-    // 所有适配器与上游目录合并完成后统一按 excludedModels 过滤：无论命中哪个来源，
-    // /models（含 client_version 的 Codex 原始目录形态）都不再暴露被排除模型。
-    merged = filterExcludedModels(merged, config.excludedModels);
+    // 所有适配器与上游目录合并完成后统一按 excludedModels 过滤（仅本地兼容端模型，
+    // 官方与上游模型不受影响）：无论命中哪个来源，/models（含 client_version 的
+    // Codex 原始目录形态）都不再暴露被排除模型。
+    merged = filterExcludedModels(merged, config.excludedModels, isLocalAdapterModel);
     return modelCatalogResponse(merged, clientVersion, owner, config.prefix, Boolean(zcodeCatalog));
   };
   if (config.upstreamOnly === true) {
@@ -1115,7 +1117,8 @@ export function createGatewayHandler(
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
-      if (typeof model === "string" && modelExclusion.isExcluded(model)) {
+      // 排除拦截仅作用于本地兼容端模型；上游/官方命名即使撞上历史规则也照常路由。
+      if (typeof model === "string" && isLocalAdapterModel(model) && modelExclusion.isExcluded(model)) {
         return excludedModelResponse(model);
       }
       if (zcodeEnabled(config) && isZcodeModel(model)) {
@@ -1271,10 +1274,12 @@ export function createGatewayHandler(
       );
     }
     // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
-    // 模型已从 /models 撤下，继续转发只会把请求送向未启用的上游。
+    // 模型已从 /models 撤下，继续转发只会把请求送向未启用的上游。仅本地兼容端
+    // 模型参与排除，上游与官方模型不受历史规则影响。
     if (request.method === "POST") {
       const requestedModel = typeof json?.model === "string" ? json.model : hinted;
-      if (typeof requestedModel === "string" && modelExclusion.isExcluded(requestedModel)) {
+      if (typeof requestedModel === "string" && isLocalAdapterModel(requestedModel)
+        && modelExclusion.isExcluded(requestedModel)) {
         return excludedModelResponse(requestedModel);
       }
     }

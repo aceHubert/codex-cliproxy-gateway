@@ -127,39 +127,66 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo
 
 ### 排除模型（excludedModels）
 
-多个兼容入口（ZCode、CodeBuddy/WorkBuddy、Qoder、Antigravity、上游）全部开启时，
+多个兼容入口（ZCode、CodeBuddy/WorkBuddy、Qoder、Antigravity）全部开启时，
 合并目录可达上百条，Codex 的模型下拉菜单会非常臃肿。`excludedModels` 在网关
 **合并所有目录之后**统一过滤：命中的模型不再出现在 `/models`（含
 `?client_version=` 的 Codex 原始目录形态），对这些模型的推理请求也会被网关以
-404 拦截，不会转发到任何上游。规则以带厂商前缀的完整模型 ID 为核心键，
-彻底区分 `codebuddy-intl/` 与 `codebuddy-cn/` 等同名异地模型。
+404 拦截，不会转发到任何上游。
+
+**作用域仅限本地兼容端**（`zcode/`、`codebuddy-*/`、`workbuddy-*/`、`qoder-*/`、
+`agy/`，含 `zcode-team-coding-plan/` 等套餐前缀与 `codebuddy/`、`qoder/` 等旧
+前缀）：上游（CLIProxy/new-api）模型出现与否由 `models --sync` 的
+**selectedModels** 选择管理，官方原生模型不受排除影响——即使配置里存在指向上游
+或官方模型的历史规则，网关也会忽略它们。
+
+**Web 配置界面**按兼容端分组编辑：每个端的开关下方有独立的排除输入框，只填
+模型名（不带前缀），保存时网关自动补全该组前缀，界面不出现任何前缀。分组按
+**用户可感知的产品**归一（共 5 框：ZCode、CodeBuddy、WorkBuddy、Qoder、
+Antigravity），保存为产品级家族通配——`zcode*/模型名`（覆盖 `zcode/`、各套餐
+前缀与动态 provider 前缀）、`codebuddy-*/模型名`、`workbuddy-*/模型名`、
+`qoder-*/模型名`（各覆盖其 cn/intl 地域与旧前缀）、`agy/模型名`。套餐档位与
+凭据地域都跟登录/订阅走，Web 用户感知不到也不逐条列举；CodeBuddy 与
+WorkBuddy 是两个产品的直接感知，保持独立。CLI 仍可用地域/套餐前缀写精确规则，
+但 Web 保存会把它们归一成产品级通配。端未启用时分组的输入框仍保留，可预先
+添加规则。
+
+**命令行**使用带完整前缀的规则：
 
 ```bash
-# 终端交互勾选：列出当前全部兼容模型（完整 ID + 显示名），
+# 终端交互勾选：列出当前全部本地兼容模型（完整 ID + 显示名），
 # 空格切换排除、回车保存；已排除的精确 ID 会预勾选
 codex-cliproxy models --exclude
 
 # 直接追加排除规则（逗号或空格分隔，支持多条）
-codex-cliproxy models --exclude "codebuddy-cn/*, qoder-intl/"
+codex-cliproxy models --exclude "codebuddy-intl/gpt-4o, agy/gemini-2.5-flash"
+
+# 含字面量的通配（匹配 qoder-cn/ 下的 qoder-code 系列等）
+codex-cliproxy models --exclude "qoder-cn/qoder-*"
 
 # 清空排除列表
 codex-cliproxy models --exclude none
 ```
 
-每条规则支持三种写法（大小写不敏感）：
+规则约束（CLI 与 Web 写入路径一致，大小写不敏感）：
 
-| 规则形态 | 示例 | 命中范围 |
+| 规则形态 | 示例 | 说明 |
 | --- | --- | --- |
-| 精确模型 ID | `agy/gemini-2.5-flash` | 仅该模型 |
-| 前缀族（以 `/` 结尾） | `codebuddy-intl/` | 该前缀下全部模型 |
-| 通配符（含 `*`） | `qoder-cn/*`、`zcode*` | 按 glob 匹配 |
+| 完整模型 ID | `agy/gemini-2.5-flash`、`zcode-team-coding-plan/glm-5.3` | 必须带确定的适配器前缀 |
+| 产品级家族通配 | `zcode*/glm-5.3`、`codebuddy-*/gpt-4o`、`qoder-*/qwen-3.8-flash` | 一条覆盖该产品的全部套餐/地域/旧前缀（Web 各产品框即存此形态） |
+| 前缀后的通配 | `qoder-cn/qoder-*`、`zcode/glm*` | `*` 只允许出现在完整前缀之后 |
+| ~~整族形态~~ | ~~`qoder-cn/`、`qoder-cn/*`~~ | **写入时拒绝**：排除整个端请关闭对应开关（`config --qoder off` 等） |
+| ~~无前缀/不完整前缀~~ | ~~`gpt-*`、`zcode-*`、裸模型名~~ | **写入时拒绝**：必须从完整适配器前缀开始 |
+| ~~作用域外规则~~ | ~~`cliproxy/…`、官方模型 ID~~ | **写入时拒绝**：上游模型用 `models --sync` 选择；官方模型不可排除 |
 
-裸 `*`（会排除全部模型）会被拒绝并提示改用厂商前缀。排除配置保存在
-`~/.codex-cliproxy-gateway/config.json` 的 `excludedModels` 数组中
-（[配置格式](schemas/gateway-config.schema.json)），也可在 Web 配置界面用
-多行文本框编辑（每行一条规则）。每次变更都会记录配置审计、失效 Codex 的
-`models_cache.json` 并热重启网关；`--exclude` 同样支持 `--restart-codex`。
-不带参数的 `codex-cliproxy models` 会在末尾打印当前生效的排除规则清单。
+裸 `*` 同样被拒绝（zcode 的 API Key 多 provider 前缀 `zcode-<id>/…` 属于确定
+前缀，予以接受）。早期版本写入的整族规则在运行期仍会被识别与过滤，指向上游或
+官方模型的历史规则则被网关忽略（不再生效）；通过 Web 保存时归不进分组的存量
+规则（旧整族、动态 provider 前缀）会随保存移除。`config` 回显与配置审计里可以
+完整看到存量规则。排除配置保存在 `~/.codex-cliproxy-gateway/config.json` 的
+`excludedModels` 数组中（[配置格式](schemas/gateway-config.schema.json)）。每次
+变更都会记录配置审计、失效 Codex 的 `models_cache.json` 并热重启网关；
+`--exclude` 同样支持 `--restart-codex`。不带参数的 `codex-cliproxy models` 会在
+末尾打印当前生效的排除规则清单。
 
 ### 何时需要重启 Codex
 
@@ -184,8 +211,8 @@ codex-cliproxy web
 `http://127.0.0.1:8321/ui`；自定义网关端口时，界面端口为网关端口加 1。
 按 `Ctrl-C` 停止前台界面服务，网关继续运行。
 
-界面支持修改配置、选择上游模型、编辑排除模型规则（`excludedModels`，每行一条）、
-查看日志及中英文切换。
+界面支持修改配置、选择上游模型、按兼容端分组编辑排除模型（`excludedModels`，
+只填模型名、前缀自动补全）、查看日志及中英文切换。
 保存后按页面提示应用设置或重启 Codex。
 
 | 命令 | 用途 |

@@ -33,7 +33,7 @@ import {
 } from "./upstream-catalog.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
-import { clearPendingRestart, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
+import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
 import { validateZcodeConfig, zcodeEnabled, createZcodeAdapter, type ZcodeDependencies } from "./zcode/index.ts";
 import {
@@ -181,13 +181,22 @@ Models:
   models --sync --upstream-only
                         switch to a static upstream-only catalog with original model IDs
   --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
-  --exclude [PATTERNS]  manage excluded models applied after every catalog
-                        merge; with patterns (comma/space separated IDs,
-                        vendor prefixes like codebuddy-intl/, or globs like
-                        qoder-cn/*) they are appended to the exclusion list;
+  --exclude [PATTERNS]  manage excluded models for the local compatibility
+                        endpoints; every rule must start with a full adapter
+                        prefix (zcode/, zcode-<plan>/, codebuddy-intl|cn/,
+                        workbuddy-intl|cn/, qoder-intl|cn/, agy/; the
+                        product family globs zcode*/, codebuddy-*/,
+                        workbuddy-*/, qoder-*\/ cover every plan/region
+                        prefix at once) and wildcards may only follow it
+                        (e.g. codebuddy-intl/gpt-4o, qoder-cn/qoder-*);
+                        upstream models are selected via
+                        models --sync and official models are not excludable;
+                        family-wide patterns (prefix/ or prefix/*) are
+                        rejected — turn that endpoint off instead;
                         --exclude none (or "") clears it; without a value an
-                        interactive checkbox picker lists every compatible
-                        model (space toggles exclusion, enter saves)
+                        interactive checkbox picker lists every local
+                        compatibility model (space toggles exclusion, enter
+                        saves)
   --model-merge-json URL  update the cached models.json override
   --restart-codex       stop Codex app-server after sync or exclusion changes
                         to refresh the model picker; active tasks may error
@@ -1209,22 +1218,26 @@ export interface CompatibleModelsSnapshot {
  * 收集当前启用的所有兼容模型：上游目录读 catalogPath 落盘文件（models --sync 的
  * 产物，动态路由按配置补 prefix），各适配器按网关同一入口拉取（带本地缓存）。
  * 与网关 /models 的合并口径一致，但不做 excludedModels 过滤——排除配置的勾选与
- * 展示需要看到完整目录。
+ * 展示需要看到完整目录。`includeUpstream: false` 时只收集本地适配器模型：排除
+ * 仅作用于本地兼容转发，上游模型的选择由 `models --sync`（selectedModels）管理。
  */
 export async function collectCompatibleModels(
   config: GatewayConfig,
   dependencies: CompatibleModelsDependencies = {},
+  { includeUpstream = true }: { includeUpstream?: boolean } = {},
 ): Promise<CompatibleModelsSnapshot> {
   const entries: ModelEntry[] = [];
   const failures: string[] = [];
 
-  try {
-    const proxy = JSON.parse(fs.readFileSync(config.catalogPath, "utf8")) as ModelCatalog;
-    if (!Array.isArray(proxy.models)) throw new Error("catalog file does not contain a models array");
-    const prefix = config.upstreamOnly === true ? "" : config.prefix;
-    entries.push(...proxy.models.map((model) => ({ ...model, slug: `${prefix}${model.slug}` })));
-  } catch {
-    failures.push(upstreamLabel(config));
+  if (includeUpstream) {
+    try {
+      const proxy = JSON.parse(fs.readFileSync(config.catalogPath, "utf8")) as ModelCatalog;
+      if (!Array.isArray(proxy.models)) throw new Error("catalog file does not contain a models array");
+      const prefix = config.upstreamOnly === true ? "" : config.prefix;
+      entries.push(...proxy.models.map((model) => ({ ...model, slug: `${prefix}${model.slug}` })));
+    } catch {
+      failures.push(upstreamLabel(config));
+    }
   }
 
   const collect = async (
@@ -1298,14 +1311,24 @@ export async function excludeModels(
   dependencies: ExcludeModelsDependencies = {},
 ): Promise<void> {
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
-  const current = parseExcludedModels(Array.isArray(config.excludedModels) ? config.excludedModels : []);
+  // 存量规则宽松归一（早期版本的整族规则仍被引擎识别，不能把用户锁在配置外）；
+  // 只有本次新输入走 parseExcludedModels 的严格校验（拒绝整族形态）。
+  const current = normalizeExcludedModels(Array.isArray(config.excludedModels) ? config.excludedModels : []);
   let appliedLine: string;
   let next: string[];
 
   if (option === true) {
-    const { entries, failures } = await collectCompatibleModels(config, dependencies);
+    const input = dependencies.input ?? process.stdin;
+    const output = dependencies.output ?? process.stdout;
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error(
+        "models --exclude requires an interactive terminal; pass patterns directly, e.g. models --exclude codebuddy-intl/gpt-4o",
+      );
+    }
+    // 排除仅作用于本地兼容端：勾选列表不含上游目录（其选择由 models --sync 管理）。
+    const { entries, failures } = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
     if (entries.length === 0) {
-      throw new Error("No compatible models to list; enable an adapter or run models --sync first");
+      throw new Error("No local compatibility models to list; enable an adapter (config --zcode on, …) first");
     }
     for (const failure of failures) {
       console.log(`WARNING: ${failure} catalog unavailable; its models are not listed.`);
@@ -1315,22 +1338,15 @@ export async function excludeModels(
     const listedLower = new Set(entries.map((model) => model.slug.toLowerCase()));
     const preselected = current.filter((pattern) => listedLower.has(pattern.toLowerCase()));
     const preserved = current.filter((pattern) => !listedLower.has(pattern.toLowerCase()));
-    const input = dependencies.input ?? process.stdin;
-    const output = dependencies.output ?? process.stdout;
-    if (!input.isTTY || !output.isTTY) {
-      throw new Error(
-        "models --exclude requires an interactive terminal; pass patterns directly, e.g. models --exclude codebuddy-cn/*",
-      );
-    }
     const selected = await chooseModels({
       availableModels: entries,
       currentSelection: preselected,
       requireNonEmpty: false,
       input,
       output,
-      title: "Compatible models - space marks exclusion",
+      title: "Local compatibility models - space marks exclusion",
     });
-    next = parseExcludedModels([...preserved, ...selected]);
+    next = normalizeExcludedModels([...preserved, ...selected]);
     appliedLine = `Exclusion rules saved from selection: ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
   } else {
     const trimmed = option.trim();
@@ -1339,7 +1355,7 @@ export async function excludeModels(
       appliedLine = "Excluded models cleared.";
     } else {
       const incoming = parseExcludedModels(trimmed.split(/[\s,]+/));
-      next = parseExcludedModels([...current, ...incoming]);
+      next = normalizeExcludedModels([...current, ...incoming]);
       const added = next.length - current.length;
       appliedLine = `Exclusion rules updated: ${added} added, ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
     }
