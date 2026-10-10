@@ -1,6 +1,6 @@
 import { handleUniversalStreamRequest, translateBetweenProviders } from "llm-bridge";
 import type { ProviderType } from "llm-bridge";
-import type { ZenModelProtocol } from "./catalog.ts";
+import type { OpencodeZenModelProtocol } from "./catalog.ts";
 
 /**
  * OpenCode Zen 多协议转换层。
@@ -17,10 +17,10 @@ import type { ZenModelProtocol } from "./catalog.ts";
  */
 
 /** 网关面向客户端的协议面：chat completions 与 responses 两个入口。 */
-export type ZenClientProtocol = "chat" | "responses";
+export type OpencodeZenClientProtocol = "chat" | "responses";
 
 /** llm-bridge 协议名映射（chat = OpenAI 家族 chat completions）。 */
-const BRIDGE_PROTOCOL: Record<ZenModelProtocol, ProviderType> = {
+const BRIDGE_PROTOCOL: Record<OpencodeZenModelProtocol, ProviderType> = {
   chat: "openai",
   responses: "openai-responses",
   anthropic: "anthropic",
@@ -149,9 +149,9 @@ export function responsesToChatBody(input: Record<string, unknown>): Record<stri
  * 请求体转换：客户端协议 → 模型端点协议。同协议原样浅拷贝；responses 先经严格
  * 转换落到 chat 中间层，再按需经 llm-bridge 转 anthropic / google。
  */
-export function convertZenRequest(
-  from: ZenClientProtocol,
-  to: ZenModelProtocol,
+export function convertOpencodeZenRequest(
+  from: OpencodeZenClientProtocol,
+  to: OpencodeZenModelProtocol,
   input: Record<string, unknown>,
 ): Record<string, unknown> {
   if (from === to) return { ...input };
@@ -166,10 +166,10 @@ export function convertZenRequest(
 }
 
 /** 上游流 → 客户端协议的 SSE 转换；同协议原样返回。 */
-export function translateZenStream(
+export function translateOpencodeZenStream(
   stream: ReadableStream<Uint8Array>,
-  from: ZenModelProtocol,
-  to: ZenClientProtocol,
+  from: OpencodeZenModelProtocol,
+  to: OpencodeZenClientProtocol,
 ): ReadableStream<Uint8Array> {
   if (from === to) return stream;
   return handleUniversalStreamRequest(stream, BRIDGE_PROTOCOL[from], BRIDGE_PROTOCOL[to]);
@@ -191,7 +191,7 @@ interface AggregatedItem {
  * 真实上游（增量带 item_id）与 llm-bridge 重发射（增量只带 output_index）两种形状；
  * usage 与最终状态取自 response.created/completed。
  */
-export async function aggregateZenResponsesStream(body: ReadableStream<Uint8Array>): Promise<Record<string, unknown>> {
+export async function aggregateOpencodeZenResponsesStream(body: ReadableStream<Uint8Array>): Promise<Record<string, unknown>> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   const byId = new Map<string, AggregatedItem>();

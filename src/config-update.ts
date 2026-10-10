@@ -11,7 +11,8 @@ import { CODEBUDDY_PREFIX, isCodebuddyModel, WORKBUDDY_PREFIX, codebuddyModelPre
 import { validateQoderConfig } from "./qoder/index.ts";
 import { isQoderModel, QODER_CN_PREFIX, QODER_INTL_PREFIX } from "./qoder/catalog.ts";
 import { validateAgyConfig, isAgyModel } from "./agy/index.ts";
-import { validateZenConfig } from "./opencode/index.ts";
+import { validateOpencodeZenConfig } from "./opencode/index.ts";
+import { isOpencodeZenModel, OPENCODE_ZEN_PREFIX } from "./opencode/catalog.ts";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
 /**
@@ -167,7 +168,7 @@ export function parseExcludedModels(value: unknown): string[] {
     }
     if (!isLocalAdapterExclusionPattern(pattern)) {
       throw new Error(
-        `excludedModels pattern "${pattern}" must start with a full local adapter prefix (zcode/, zcode-<plan>/, codebuddy-*/, workbuddy-*/, qoder-*/, agy/); upstream models are selected via models --sync and official models are not excludable`,
+        `excludedModels pattern "${pattern}" must start with a full local adapter prefix (zcode/, zcode-<plan>/, codebuddy-*/, workbuddy-*/, qoder-*/, agy/, opencode-zen/); upstream models are selected via models --sync and official models are not excludable`,
       );
     }
   }
@@ -179,30 +180,31 @@ export function parseExcludedModels(value: unknown): string[] {
  * （cliproxy/new-api）由 selectedModels 管理、官方原生模型不参与排除，因此没有
  * 也不需要无前缀的输入口。分组按「用户可感知的产品」归一，不按前缀逐条列举：
  * 套餐档位（zcode 各 plan）与凭据地域（cn/intl）都跟登录/订阅走，Web 用户既看不到
- * 也输入不了前缀，一律折叠为产品级家族通配（ZCODE_FAMILY_GLOB_PREFIX 等 4 个常量）；
- * 产品名（CodeBuddy 与 WorkBuddy）是用户装哪个应用的直接感知，保留独立分组。
+ * 也输入不了前缀，一律折叠为产品级家族通配（ZCODE_FAMILY_GLOB_PREFIX 等常量）；
+ * CodeBuddy 与 WorkBuddy 合并为一个输入框：条目按双产品语义解释，保存时同时补
+ * 两个产品的家族通配前缀（装哪个应用即命中哪个，另一侧无模型匹配时自然空转）。
  * CLI 仍可用确定前缀写精确规则。 */
 export interface ExcludedModelGroupDefinition {
-  /** 稳定标识（= 保存前缀去掉尾部斜杠；前端按 key 回传条目并渲染文案）。 */
+  /** 稳定标识（= 首个保存前缀去掉尾部斜杠；前端按 key 回传条目并渲染文案）。 */
   key: string;
   /** 所属兼容端：决定输入框挂在哪个端的配置块下。 */
-  endpoint: "zcode" | "codebuddy" | "qoder" | "agy";
-  /** 保存时自动补充的前缀（zcode 组为家族通配，见 ZCODE_FAMILY_GLOB_PREFIX）。 */
-  prefix: string;
-  /** 回显拆分时可识别的前缀集合；缺省即 [prefix]。 */
+  endpoint: "zcode" | "codebuddy" | "qoder" | "agy" | "opencodeZen";
+  /** 保存时自动补充的前缀（zcode 组为家族通配；codebuddy 组同时补双产品前缀）。 */
+  prefixes: string[];
+  /** 回显拆分时可识别的前缀集合；缺省即 prefixes。 */
   matchPrefixes?: string[];
 }
 
 function groupDefinition(
   endpoint: ExcludedModelGroupDefinition["endpoint"],
-  prefix: string,
+  prefixes: string[],
   matchPrefixes?: string[],
 ): ExcludedModelGroupDefinition {
   // 家族通配前缀（zcode*\/、codebuddy-*\/）的 key 去掉通配段与斜杠，仍是产品名。
-  const key = prefix.replace(/-?\*?\/$/, "");
+  const key = prefixes[0]!.replace(/-?\*?\/$/, "");
   return matchPrefixes === undefined
-    ? { key, endpoint, prefix }
-    : { key, endpoint, prefix, matchPrefixes };
+    ? { key, endpoint, prefixes }
+    : { key, endpoint, prefixes, matchPrefixes };
 }
 
 /** zcode 家族通配保存前缀：一条规则同时覆盖 zcode/、各套餐前缀与动态 provider 前缀。 */
@@ -215,20 +217,19 @@ const QODER_FAMILY_GLOB_PREFIX = "qoder-*/";
 const CODEBUDDY_CATALOG_PREFIXES = codebuddyModelPrefixes();
 
 const ADAPTER_EXCLUDED_GROUPS: ExcludedModelGroupDefinition[] = [
-  groupDefinition("zcode", ZCODE_FAMILY_GLOB_PREFIX,
+  groupDefinition("zcode", [ZCODE_FAMILY_GLOB_PREFIX],
     [...zcodeStaticModelPrefixes(), ZCODE_FAMILY_GLOB_PREFIX]),
-  groupDefinition("codebuddy", CODEBUDDY_FAMILY_GLOB_PREFIX, [
-    ...CODEBUDDY_CATALOG_PREFIXES.filter((prefix) => prefix.startsWith("codebuddy-")),
+  // CodeBuddy/WorkBuddy 同框：保存时每条目同时补两个产品的家族通配前缀。
+  groupDefinition("codebuddy", [CODEBUDDY_FAMILY_GLOB_PREFIX, WORKBUDDY_FAMILY_GLOB_PREFIX], [
+    ...CODEBUDDY_CATALOG_PREFIXES,
     CODEBUDDY_PREFIX, CODEBUDDY_FAMILY_GLOB_PREFIX,
-  ]),
-  // WorkBuddy 组挂在 CodeBuddy 端（同一开关行）下，key 按产品名区分。
-  groupDefinition("codebuddy", WORKBUDDY_FAMILY_GLOB_PREFIX, [
-    ...CODEBUDDY_CATALOG_PREFIXES.filter((prefix) => prefix.startsWith("workbuddy-")),
     WORKBUDDY_PREFIX, WORKBUDDY_FAMILY_GLOB_PREFIX,
   ]),
-  groupDefinition("qoder", QODER_FAMILY_GLOB_PREFIX,
+  groupDefinition("qoder", [QODER_FAMILY_GLOB_PREFIX],
     [QODER_INTL_PREFIX, QODER_CN_PREFIX, "qoder/", QODER_FAMILY_GLOB_PREFIX]),
-  groupDefinition("agy", "agy/"),
+  groupDefinition("agy", ["agy/"]),
+  // Zen 是固定单前缀（opencode-zen/），无套餐/地域变体，无家族通配形态。
+  groupDefinition("opencodeZen", [OPENCODE_ZEN_PREFIX]),
 ];
 
 /** 当前配置下的分组定义（适配器对外前缀的权威清单）。 */
@@ -242,7 +243,8 @@ export function excludedModelGroupsFor(_config: GatewayConfig): ExcludedModelGro
  * excludedModels 影响。
  */
 export function isLocalAdapterModel(slug: string): boolean {
-  return isZcodeModel(slug) || isCodebuddyModel(slug) || isQoderModel(slug) || isAgyModel(slug);
+  return isZcodeModel(slug) || isCodebuddyModel(slug) || isQoderModel(slug) || isAgyModel(slug)
+    || isOpencodeZenModel(slug);
 }
 
 /**
@@ -261,7 +263,7 @@ export function isLocalAdapterExclusionPattern(pattern: string): boolean {
   // zcode 的 API Key 多 provider 前缀（zcode-<id>/）动态生成，无法静态枚举。
   if (/^zcode-[^/*\s]+\/.+/.test(lower)) return true;
   return ADAPTER_EXCLUDED_GROUPS
-    .flatMap((definition) => definition.matchPrefixes ?? [definition.prefix])
+    .flatMap((definition) => definition.matchPrefixes ?? definition.prefixes)
     .some((prefix) => lower.startsWith(prefix) && lower.length > prefix.length);
 }
 
@@ -290,7 +292,7 @@ export function splitExcludedModelsByGroup(
     const lower = pattern.toLowerCase();
     // 具体前缀在前（zcode 套餐前缀优先于家族通配 zcode*/），保证回显条目不带前缀残留。
     const matched = definitions.flatMap((definition) =>
-      (definition.matchPrefixes ?? [definition.prefix]).map((prefix) => ({ definition, prefix })))
+      (definition.matchPrefixes ?? definition.prefixes).map((prefix) => ({ definition, prefix })))
       .find((candidate) => lower.startsWith(candidate.prefix.toLowerCase()));
     if (matched) {
       const entry = pattern.slice(matched.prefix.length);
@@ -335,7 +337,7 @@ export function expandExcludedModelGroups(
       }
       const lower = entry.toLowerCase();
       const pasted = definitions.find((item) =>
-        (item.matchPrefixes ?? [item.prefix]).some((prefix) => lower.startsWith(prefix.toLowerCase())));
+        (item.matchPrefixes ?? item.prefixes).some((prefix) => lower.startsWith(prefix.toLowerCase())));
       if (pasted) {
         throw new Error(
           `excludedModelGroups.${key} entry "${raw}" already carries the ${pasted.key} prefix; enter the model name without it`,
@@ -346,7 +348,8 @@ export function expandExcludedModelGroups(
           `excludedModelGroups.${key} entry "${raw}" must be a bare model name without "/"`,
         );
       }
-      rules.push(`${definition.prefix}${entry}`);
+      // 每个保存前缀各生成一条规则（codebuddy 组即双产品家族通配成对出现）。
+      for (const prefix of definition.prefixes) rules.push(`${prefix}${entry}`);
     }
   }
   return normalizeExcludedModels(rules);
@@ -374,7 +377,7 @@ export function applySelectedModelsPatch(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
-  validateZenConfig(config);
+  validateOpencodeZenConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
@@ -492,7 +495,7 @@ export function applyWebUiConfigPatch(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
-  validateZenConfig(config);
+  validateOpencodeZenConfig(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

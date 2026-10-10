@@ -127,28 +127,28 @@ codex-cliproxy models --sync --model-merge-json https://github.com/owner/repo
 
 ### 排除模型（excludedModels）
 
-多个兼容入口（ZCode、CodeBuddy/WorkBuddy、Qoder、Antigravity）全部开启时，
-合并目录可达上百条，Codex 的模型下拉菜单会非常臃肿。`excludedModels` 在网关
+多个兼容入口（ZCode、CodeBuddy/WorkBuddy、Qoder、Antigravity、OpenCode Zen）全部
+开启时，合并目录可达上百条，Codex 的模型下拉菜单会非常臃肿。`excludedModels` 在网关
 **合并所有目录之后**统一过滤：命中的模型不再出现在 `/models`（含
 `?client_version=` 的 Codex 原始目录形态），对这些模型的推理请求也会被网关以
 404 拦截，不会转发到任何上游。
 
 **作用域仅限本地兼容端**（`zcode/`、`codebuddy-*/`、`workbuddy-*/`、`qoder-*/`、
-`agy/`，含 `zcode-team-coding-plan/` 等套餐前缀与 `codebuddy/`、`qoder/` 等旧
-前缀）：上游（CLIProxy/new-api）模型出现与否由 `models --sync` 的
+`agy/`、`opencode-zen/`，含 `zcode-team-coding-plan/` 等套餐前缀与 `codebuddy/`、
+`qoder/` 等旧前缀）：上游（CLIProxy/new-api）模型出现与否由 `models --sync` 的
 **selectedModels** 选择管理，官方原生模型不受排除影响——即使配置里存在指向上游
 或官方模型的历史规则，网关也会忽略它们。
 
 **Web 配置界面**按兼容端分组编辑：每个端的开关下方有独立的排除输入框，只填
 模型名（不带前缀），保存时网关自动补全该组前缀，界面不出现任何前缀。分组按
-**用户可感知的产品**归一（共 5 框：ZCode、CodeBuddy、WorkBuddy、Qoder、
-Antigravity），保存为产品级家族通配——`zcode*/模型名`（覆盖 `zcode/`、各套餐
-前缀与动态 provider 前缀）、`codebuddy-*/模型名`、`workbuddy-*/模型名`、
-`qoder-*/模型名`（各覆盖其 cn/intl 地域与旧前缀）、`agy/模型名`。套餐档位与
-凭据地域都跟登录/订阅走，Web 用户感知不到也不逐条列举；CodeBuddy 与
-WorkBuddy 是两个产品的直接感知，保持独立。CLI 仍可用地域/套餐前缀写精确规则，
-但 Web 保存会把它们归一成产品级通配。端未启用时分组的输入框仍保留，可预先
-添加规则。
+**用户可感知的产品**归一（共 5 框：ZCode、CodeBuddy/WorkBuddy、Qoder、
+Antigravity、OpenCode Zen），保存为产品级家族通配——`zcode*/模型名`（覆盖
+`zcode/`、各套餐前缀与动态 provider 前缀）、`codebuddy-*/模型名` 与
+`workbuddy-*/模型名`（两框合一：同一条目保存时同时补这两个前缀，各覆盖其
+cn/intl 地域与旧前缀）、`qoder-*/模型名`、`agy/模型名`、`opencode-zen/模型名`。
+套餐档位与凭据地域都跟登录/订阅走，Web 用户感知不到也不逐条列举。CLI 仍可用
+地域/套餐前缀写精确规则，但 Web 保存会把它们归一成产品级通配。端未启用时
+分组的输入框仍保留，可预先添加规则。
 
 **命令行**使用带完整前缀的规则：
 
@@ -158,7 +158,7 @@ WorkBuddy 是两个产品的直接感知，保持独立。CLI 仍可用地域/�
 codex-cliproxy models --exclude
 
 # 直接追加排除规则（逗号或空格分隔，支持多条）
-codex-cliproxy models --exclude "codebuddy-intl/gpt-4o, agy/gemini-2.5-flash"
+codex-cliproxy models --exclude "codebuddy*/gpt-4o, agy/gemini-2.5-flash"
 
 # 含字面量的通配（匹配 qoder-cn/ 下的 qoder-code 系列等）
 codex-cliproxy models --exclude "qoder-cn/qoder-*"

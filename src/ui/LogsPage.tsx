@@ -330,10 +330,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
                   onClick={() => setPage((current) => Math.max(1, current - 1))}
                 >{t("pagerPrev")}</button>
                 <span className="pager-status">
-                  {t("pagerStatus")
-                    .replaceAll("{page}", String(page))
-                    .replaceAll("{pages}", String(maxPage))
-                    .replaceAll("{total}", String(totalFiles))}
+                  {t("pagerStatus", { page, pages: maxPage, total: totalFiles })}
                 </span>
                 <select
                   className="pager-size"

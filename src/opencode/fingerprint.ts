@@ -30,20 +30,20 @@ const CLIENT = fingerprintData as {
 };
 
 /** 官方客户端 UA 快照：`opencode/<channel>/<version>/<clientName>`（门禁按此格式解析版本）。 */
-export const ZEN_CLIENT_USER_AGENT = `opencode/${CLIENT.channel}/${CLIENT.clientVersion}/${CLIENT.clientName}`;
+export const OPENCODE_ZEN_CLIENT_USER_AGENT = `opencode/${CLIENT.channel}/${CLIENT.clientVersion}/${CLIENT.clientName}`;
 /** 渠道段（官方 beta 渠道）。 */
-export const ZEN_CLIENT_CHANNEL = CLIENT.channel;
+export const OPENCODE_ZEN_CLIENT_CHANNEL = CLIENT.channel;
 /** 快照版本号：动态获取（见 user-agent.ts）失败时的回退值。 */
-export const ZEN_CLIENT_VERSION = CLIENT.clientVersion;
+export const OPENCODE_ZEN_CLIENT_VERSION = CLIENT.clientVersion;
 /** 客户端名段（`opencode2` 上报的 `cli`）。 */
-export const ZEN_CLIENT_NAME = CLIENT.clientName;
+export const OPENCODE_ZEN_CLIENT_NAME = CLIENT.clientName;
 
 /** 带工具流量的门禁模板：agent 提示词 + 官方工具集组合。 */
-export const ZEN_AGENT_SYSTEM_PROMPT = CLIENT.agentSystemPrompt;
+export const OPENCODE_ZEN_AGENT_SYSTEM_PROMPT = CLIENT.agentSystemPrompt;
 /** 无工具流量的门禁模板：标题生成器提示词（最短的可过检内置模板）。 */
-export const ZEN_TITLE_SYSTEM_PROMPT = CLIENT.titleSystemPrompt;
+export const OPENCODE_ZEN_TITLE_SYSTEM_PROMPT = CLIENT.titleSystemPrompt;
 /** 官方工具定义：带工具流量时按名去重后并入客户端 tools 以满足门禁。 */
-export const ZEN_CLIENT_TOOLS = CLIENT.tools;
+export const OPENCODE_ZEN_CLIENT_TOOLS = CLIENT.tools;
 
 /** 追加在门禁模板之后、客户端原始指令之前的衔接说明（明确优先级：客户端指令优先）。 */
 const GATEWAY_PRECEDENCE_NOTE = "# Gateway compatibility note\n"
@@ -56,7 +56,7 @@ const TITLE_TEMPLATE_OVERRIDE = "# Gateway compatibility note\n"
   + "Act as a general-purpose assistant: answer the user's request directly, completely and in the user's language.";
 
 /** 稳定的 40-hex 项目标识：官方客户端对项目目录做哈希，服务端不校验注册，任意稳定值即可。 */
-export function createZenProjectId(seed: string): string {
+export function createOpencodeZenProjectId(seed: string): string {
   return createHash("sha1").update(`codex-cliproxy-gateway:${seed}`).digest("hex");
 }
 
@@ -70,11 +70,11 @@ function traceHeaders(): { b3: string; traceparent: string } {
  * 构造发往 Zen 的完整标头集。除 content-type/accept 外全部替换为官方指纹，
  * 客户端原始标头（含任何鉴权）一律不透传。
  */
-export function buildZenUpstreamHeaders(
+export function buildOpencodeZenUpstreamHeaders(
   session: string,
   apiKey: string,
   projectId: string,
-  userAgent: string = ZEN_CLIENT_USER_AGENT,
+  userAgent: string = OPENCODE_ZEN_CLIENT_USER_AGENT,
 ): Record<string, string> {
   const trace = traceHeaders();
   return {
@@ -114,20 +114,20 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * 把客户端 tools 与官方工具定义合并：客户端同名定义优先（保持其 schema 不被篡改），
  * 官方定义补齐其余名字以满足门禁的「足量已知工具」校验。
  */
-export function mergeZenTools(clientTools: unknown): unknown[] {
+export function mergeOpencodeZenTools(clientTools: unknown): unknown[] {
   if (!Array.isArray(clientTools) || clientTools.length === 0) return [];
   const used = new Set<string>();
   for (const tool of clientTools) {
     const name = isPlainObject(tool) ? toolName(tool) : undefined;
     if (name) used.add(name);
   }
-  return [...clientTools, ...ZEN_CLIENT_TOOLS.filter((tool) => {
+  return [...clientTools, ...OPENCODE_ZEN_CLIENT_TOOLS.filter((tool) => {
     const name = toolName(tool);
     return name !== undefined && !used.has(name);
   })];
 }
 
-export interface ZenBodyInjection {
+export interface OpencodeZenBodyInjection {
   /** 注入后的上游请求体（新对象，不改写调用方输入）。 */
   body: Record<string, unknown>;
   /** 客户端原始请求是否为非流式：true 时适配器必须聚合 SSE 再回 JSON。 */
@@ -140,20 +140,20 @@ export interface ZenBodyInjection {
  * - `prompt_cache_key` 固定为会话 id（对齐官方行为，最大化上游 KV 缓存亲和）；
  * - 首条 system 消息合并官方模板（有工具→agent 模板；无工具→标题模板+中性覆盖），
  *   模板在前、客户端指令在后（实测指令靠后者主导模型行为）；
- * - reasoning effort 归一化为上游 `reasoning_effort`（见 normalizeZenEffort），
+ * - reasoning effort 归一化为上游 `reasoning_effort`（见 normalizeOpencodeZenEffort），
  *   `effortLevels` 为调用方从实时元数据取的该模型档位值域（空数组=不校验）。
  */
-export function injectZenFingerprintBody(
+export function injectOpencodeZenFingerprintBody(
   input: Record<string, unknown>,
   session: string,
   effortLevels: readonly string[] = [],
-): ZenBodyInjection {
+): OpencodeZenBodyInjection {
   const aggregateForClient = input.stream !== true;
   const tools = Array.isArray(input.tools) ? input.tools : [];
   const hasTools = tools.length > 0;
   const messages = Array.isArray(input.messages) ? [...input.messages] : [];
 
-  const template = hasTools ? ZEN_AGENT_SYSTEM_PROMPT : ZEN_TITLE_SYSTEM_PROMPT;
+  const template = hasTools ? OPENCODE_ZEN_AGENT_SYSTEM_PROMPT : OPENCODE_ZEN_TITLE_SYSTEM_PROMPT;
   const first = messages[0];
   const mergeable = messages.length > 0 && isMergeableSystem(first);
   // 目录条目已下发官方提示词（base_instructions）时，Codex 送来的首条 system 已完整
@@ -182,14 +182,14 @@ export function injectZenFingerprintBody(
     : { include_usage: true };
   // reasoning（Responses 形状）与原始 reasoning_effort 都不进 chat 请求体：
   // 前者 chat 端点不识别，后者可能带越界值（上游对陌生 effort 直接 400），
-  // 统一由 normalizeZenEffort 裁决后按需写回。
+  // 统一由 normalizeOpencodeZenEffort 裁决后按需写回。
   const { reasoning: _reasoning, reasoning_effort: _rawEffort, ...rest } = input;
-  const effort = normalizeZenEffort(effortLevels, input.reasoning_effort, input.reasoning);
+  const effort = normalizeOpencodeZenEffort(effortLevels, input.reasoning_effort, input.reasoning);
   return {
     body: {
       ...rest,
       messages,
-      ...(hasTools ? { tools: mergeZenTools(tools) } : {}),
+      ...(hasTools ? { tools: mergeOpencodeZenTools(tools) } : {}),
       ...(effort ? { reasoning_effort: effort } : {}),
       stream: true,
       stream_options: streamOptions,
@@ -205,7 +205,7 @@ export function injectZenFingerprintBody(
  * 值域为空（元数据缺失或模型无 effort 型 reasoning_options）时原样放行，由上游判定。
  * 大小写归一为小写后按值域精确匹配。
  */
-export function normalizeZenEffort(effortLevels: readonly string[], rawEffort: unknown, reasoning?: unknown): string | undefined {
+export function normalizeOpencodeZenEffort(effortLevels: readonly string[], rawEffort: unknown, reasoning?: unknown): string | undefined {
   const source = rawEffort ?? (isPlainObject(reasoning) ? reasoning.effort : undefined);
   if (typeof source !== "string") return undefined;
   const effort = source.trim().toLowerCase();

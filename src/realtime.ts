@@ -7,7 +7,7 @@ import { isZcodeModel } from "./zcode/catalog.ts";
 import { isCodebuddyModel } from "./codebuddy/catalog.ts";
 import { isQoderModel } from "./qoder/catalog.ts";
 import { isAgyModel } from "./agy/catalog.ts";
-import { isZenModel } from "./opencode/catalog.ts";
+import { isOpencodeZenModel } from "./opencode/catalog.ts";
 
 const MAX_REALTIME_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_PENDING_WEBSOCKET_BYTES = 1024 * 1024;
@@ -102,7 +102,7 @@ export function httpOnlyModelFamily(model: string): "zcode" | "codebuddy" | "wor
   if (isZcodeModel(model)) return "zcode";
   if (isQoderModel(model)) return "qoder";
   if (isAgyModel(model)) return "agy";
-  if (isZenModel(model)) return "opencode-zen";
+  if (isOpencodeZenModel(model)) return "opencode-zen";
   if (!isCodebuddyModel(model)) return undefined;
   return model.toLowerCase().startsWith("workbuddy") ? "workbuddy" : "codebuddy";
 }

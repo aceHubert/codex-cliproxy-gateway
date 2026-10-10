@@ -7,20 +7,20 @@ import test from "node:test";
 import {
   OPENCODE_ZEN_DISPLAY_PREFIX,
   OPENCODE_ZEN_PREFIX,
-  buildZenCatalog,
-  classifyZenProbeSignal,
-  createZenCatalogStore,
-  filterZenCatalogIds,
-  isZenModel,
-  mergeZenCatalog,
-  parseZenMetadataResponse,
-  parseZenModelsResponse,
-  zenDefaultEffort,
-  zenDisplayName,
-  zenUpstreamModel,
+  buildOpencodeZenCatalog,
+  classifyOpencodeZenProbeSignal,
+  createOpencodeZenCatalogStore,
+  filterOpencodeZenCatalogIds,
+  isOpencodeZenModel,
+  mergeOpencodeZenCatalog,
+  parseOpencodeZenMetadataResponse,
+  parseOpencodeZenModelsResponse,
+  opencodeZenDefaultEffort,
+  opencodeZenDisplayName,
+  opencodeZenUpstreamModel,
 } from "../src/opencode/catalog.ts";
-import type { ZenModelMetadata } from "../src/opencode/catalog.ts";
-import { ZEN_AGENT_SYSTEM_PROMPT } from "../src/opencode/fingerprint.ts";
+import type { OpencodeZenModelMetadata } from "../src/opencode/catalog.ts";
+import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "../src/opencode/fingerprint.ts";
 import type { ModelCatalog } from "../src/types.ts";
 
 /** 零计费元数据条目（免费模型的默认形状）。 */
@@ -28,19 +28,19 @@ const freeMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0, o
 const paidMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0.5, output: 1.5 }, ...extra });
 
 test("模型前缀识别与剥除：opencode-zen/ 前缀大小写不敏感", () => {
-  assert.equal(isZenModel("opencode-zen/nemotron-3.5-lightning-free"), true);
-  assert.equal(isZenModel("OPENCODE-ZEN/glm-5-free"), true);
-  assert.equal(isZenModel("gpt-5.5"), false);
-  assert.equal(isZenModel(42), false);
-  assert.equal(zenUpstreamModel("opencode-zen/kimi-k2.5-free"), "kimi-k2.5-free");
-  assert.equal(zenUpstreamModel("OPENCODE-ZEN/glm-5-free"), "glm-5-free");
-  assert.equal(zenUpstreamModel("opencode-zen/"), undefined);
-  assert.equal(zenUpstreamModel("opencode-zen/a/b"), undefined);
-  assert.equal(zenUpstreamModel("glm-5-free"), undefined);
+  assert.equal(isOpencodeZenModel("opencode-zen/nemotron-3.5-lightning-free"), true);
+  assert.equal(isOpencodeZenModel("OPENCODE-ZEN/glm-5-free"), true);
+  assert.equal(isOpencodeZenModel("gpt-5.5"), false);
+  assert.equal(isOpencodeZenModel(42), false);
+  assert.equal(opencodeZenUpstreamModel("opencode-zen/kimi-k2.5-free"), "kimi-k2.5-free");
+  assert.equal(opencodeZenUpstreamModel("OPENCODE-ZEN/glm-5-free"), "glm-5-free");
+  assert.equal(opencodeZenUpstreamModel("opencode-zen/"), undefined);
+  assert.equal(opencodeZenUpstreamModel("opencode-zen/a/b"), undefined);
+  assert.equal(opencodeZenUpstreamModel("glm-5-free"), undefined);
 });
 
 test("元数据 cost 判定免费：input/output 均为零才算，缺字段按非免费", () => {
-  const parsed = parseZenMetadataResponse({ opencode: { models: {
+  const parsed = parseOpencodeZenMetadataResponse({ opencode: { models: {
     "grok-code": freeMeta(),
     "big-pickle": freeMeta(),
     "nemotron-free": freeMeta({ cost: { input: 0, output: 0 } }),
@@ -56,14 +56,14 @@ test("元数据 cost 判定免费：input/output 均为零才算，缺字段按�
 });
 
 test("显示名：元数据官方名优先，缺失按 id 人工化", () => {
-  assert.equal(zenDisplayName("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning Free"), "Nemotron 3.5 Lightning Free");
-  assert.equal(zenDisplayName("mimo-v2.6-flash-free"), "Mimo V2.6 Flash Free");
-  assert.equal(zenDisplayName("grok-code", "  "), "Grok Code");
-  assert.equal(zenDisplayName("exo-free", "Exo Free"), "Exo Free");
+  assert.equal(opencodeZenDisplayName("nemotron-3.5-lightning-free", "Nemotron 3.5 Lightning Free"), "Nemotron 3.5 Lightning Free");
+  assert.equal(opencodeZenDisplayName("mimo-v2.6-flash-free"), "Mimo V2.6 Flash Free");
+  assert.equal(opencodeZenDisplayName("grok-code", "  "), "Grok Code");
+  assert.equal(opencodeZenDisplayName("exo-free", "Exo Free"), "Exo Free");
 });
 
 test("目录条目：slug 带 opencode-zen/ 前缀，display_name 带 OP-ZEN/ 前缀", () => {
-  const catalog = buildZenCatalog(["nemotron-3.5-lightning-free", "exo-free"]);
+  const catalog = buildOpencodeZenCatalog(["nemotron-3.5-lightning-free", "exo-free"]);
   assert.equal(catalog.models.length, 2);
   const entry = catalog.models[0]!;
   assert.equal(entry.slug, "opencode-zen/nemotron-3.5-lightning-free");
@@ -75,19 +75,19 @@ test("目录条目：slug 带 opencode-zen/ 前缀，display_name 带 OP-ZEN/ �
 });
 
 test("reasoning effort 档位取实时元数据：effort 型暴露真实值域，toggle/budget 型不暴露", () => {
-  const metadata: Record<string, ZenModelMetadata> = {
+  const metadata: Record<string, OpencodeZenModelMetadata> = {
     "deepseek-v4-flash-free": { deprecated: false, effortLevels: ["low", "high", "max"] },
     "muse-spark-free": { deprecated: false, effortLevels: ["minimal", "low", "medium", "high", "xhigh"] },
     "nemotron-3.5-lightning-free": { deprecated: false },
-    "brand-new-free": undefined as unknown as ZenModelMetadata,
+    "brand-new-free": undefined as unknown as OpencodeZenModelMetadata,
   };
   // 默认档位：有 high 取 high（对齐上游默认），否则末项；空值域不暴露。
-  assert.equal(zenDefaultEffort(["low", "high", "max"]), "high");
-  assert.equal(zenDefaultEffort(["minimal", "low", "medium", "high", "xhigh"]), "high");
-  assert.equal(zenDefaultEffort(["none", "medium"]), "medium");
-  assert.equal(zenDefaultEffort([]), undefined);
+  assert.equal(opencodeZenDefaultEffort(["low", "high", "max"]), "high");
+  assert.equal(opencodeZenDefaultEffort(["minimal", "low", "medium", "high", "xhigh"]), "high");
+  assert.equal(opencodeZenDefaultEffort(["none", "medium"]), "medium");
+  assert.equal(opencodeZenDefaultEffort([]), undefined);
 
-  const catalog = buildZenCatalog(["deepseek-v4-flash-free", "muse-spark-free", "nemotron-3.5-lightning-free", "brand-new-free"], metadata);
+  const catalog = buildOpencodeZenCatalog(["deepseek-v4-flash-free", "muse-spark-free", "nemotron-3.5-lightning-free", "brand-new-free"], metadata);
   const deepseek = catalog.models[0]!;
   assert.deepEqual(
     (deepseek.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),
@@ -105,19 +105,19 @@ test("reasoning effort 档位取实时元数据：effort 型暴露真实值域�
   assert.deepEqual(catalog.models[3]!.supported_reasoning_levels, []);
 });
 
-test("mergeZenCatalog 替换旧 zen 条目并整体后置 priority", () => {
+test("mergeOpencodeZenCatalog 替换旧 zen 条目并整体后置 priority", () => {
   const base: ModelCatalog = { models: [
     { slug: "gpt-5.5", priority: 0 },
     { slug: "opencode-zen/stale-free", priority: 5 },
   ] };
-  const merged = mergeZenCatalog(base, buildZenCatalog(["exo-free"]));
+  const merged = mergeOpencodeZenCatalog(base, buildOpencodeZenCatalog(["exo-free"]));
   assert.deepEqual(merged.models.map((entry) => entry.slug), ["gpt-5.5", "opencode-zen/exo-free"]);
   assert.ok(merged.models[1]!.priority! > 0);
 });
 
-test("parseZenModelsResponse 清洗全部 id（含付费）：去重、去非法字符、保序", () => {
+test("parseOpencodeZenModelsResponse 清洗全部 id（含付费）：去重、去非法字符、保序", () => {
   // 该端点不带计费信息：付费模型也在这里返回，免费判定交给元数据 cost。
-  const ids = parseZenModelsResponse({ object: "list", data: [
+  const ids = parseOpencodeZenModelsResponse({ object: "list", data: [
     { id: "claude-opus-5", object: "model" },
     { id: "nemotron-3.5-lightning-free", object: "model" },
     { id: "exo-free", object: "model" },
@@ -127,13 +127,13 @@ test("parseZenModelsResponse 清洗全部 id（含付费）：去重、去非法
   ] });
   assert.deepEqual(ids, ["claude-opus-5", "nemotron-3.5-lightning-free", "exo-free", "grok-code"]);
   // 畸形输入（非对象、缺 data）返回空数组而非抛错。
-  assert.deepEqual(parseZenModelsResponse(null), []);
-  assert.deepEqual(parseZenModelsResponse({}), []);
-  assert.deepEqual(parseZenModelsResponse({ data: "nope" }), []);
+  assert.deepEqual(parseOpencodeZenModelsResponse(null), []);
+  assert.deepEqual(parseOpencodeZenModelsResponse({}), []);
+  assert.deepEqual(parseOpencodeZenModelsResponse({ data: "nope" }), []);
 });
 
 test("元数据解析：npm/free/name/limit/reasoning_options/deprecated 全字段提取", () => {
-  const parsed = parseZenMetadataResponse({ opencode: { models: {
+  const parsed = parseOpencodeZenMetadataResponse({ opencode: { models: {
     "exo-free": { status: "deprecated", cost: { input: 0, output: 0 } },
     "muse-spark-1.3-contributor-free": { provider: { npm: "@ai-sdk/openai" }, cost: { input: 0, output: 0 }, name: "Muse Spark" },
     "space-bunny-free": { provider: { npm: "@ai-sdk/openai-compatible" } },
@@ -143,13 +143,13 @@ test("元数据解析：npm/free/name/limit/reasoning_options/deprecated 全字�
     "muse-spark-1.3-contributor-free": { npm: "@ai-sdk/openai", free: true, name: "Muse Spark", deprecated: false },
     "space-bunny-free": { npm: "@ai-sdk/openai-compatible", deprecated: false },
   });
-  assert.equal(parseZenMetadataResponse(null), undefined);
-  assert.equal(parseZenMetadataResponse({}), undefined);
-  assert.equal(parseZenMetadataResponse({ opencode: { models: "nope" } }), undefined);
+  assert.equal(parseOpencodeZenMetadataResponse(null), undefined);
+  assert.equal(parseOpencodeZenMetadataResponse({}), undefined);
+  assert.equal(parseOpencodeZenMetadataResponse({ opencode: { models: "nope" } }), undefined);
 });
 
 test("元数据解析：limit.context 与 reasoning_options 提取，畸形值视为缺失", () => {
-  const parsed = parseZenMetadataResponse({ opencode: { models: {
+  const parsed = parseOpencodeZenMetadataResponse({ opencode: { models: {
     "a-free": { limit: { context: 262144, output: 32768 } },
     "b-free": { limit: { context: 0 } },
     "c-free": { limit: { context: -5 } },
@@ -174,7 +174,7 @@ test("元数据解析：limit.context 与 reasoning_options 提取，畸形值�
 });
 
 test("上下文窗口：元数据 limit.context 声明，未知模型删字段", () => {
-  const catalog = buildZenCatalog(["nemotron-3.5-lightning-free", "brand-new-free"], {
+  const catalog = buildOpencodeZenCatalog(["nemotron-3.5-lightning-free", "brand-new-free"], {
     "nemotron-3.5-lightning-free": { deprecated: false, contextWindow: 262144 },
   });
   const nemotron = catalog.models[0]!;
@@ -189,17 +189,17 @@ test("上下文窗口：元数据 limit.context 声明，未知模型删字段",
 });
 
 test("探针信号分类：协议不符/下线/门禁/被服务四类，地区限制视为被服务", () => {
-  assert.equal(classifyZenProbeSignal(400, '{"error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}'), "unsupported");
-  assert.equal(classifyZenProbeSignal(401, '{"error":{"type":"ModelError","message":"Model glm-5-free is not supported"}}'), "offline");
-  assert.equal(classifyZenProbeSignal(404, '{"status":404,"message":"Cannot find any route matching"}'), "offline");
-  assert.equal(classifyZenProbeSignal(403, '{"error":{"type":"FreeTierError","message":"free tier can only be used from within OpenCode"}}'), "gate");
-  assert.equal(classifyZenProbeSignal(403, '{"error":{"type":"RegionError","message":"This model is not available in your country."}}'), "served");
-  assert.equal(classifyZenProbeSignal(200, ""), "served");
-  assert.equal(classifyZenProbeSignal(503, '{"error":{"message":"Endpoint is unavailable."}}'), "served");
+  assert.equal(classifyOpencodeZenProbeSignal(400, '{"error":{"type":"ModelProtocolUnsupported","message":"Model does not support this protocol."}}'), "unsupported");
+  assert.equal(classifyOpencodeZenProbeSignal(401, '{"error":{"type":"ModelError","message":"Model glm-5-free is not supported"}}'), "offline");
+  assert.equal(classifyOpencodeZenProbeSignal(404, '{"status":404,"message":"Cannot find any route matching"}'), "offline");
+  assert.equal(classifyOpencodeZenProbeSignal(403, '{"error":{"type":"FreeTierError","message":"free tier can only be used from within OpenCode"}}'), "gate");
+  assert.equal(classifyOpencodeZenProbeSignal(403, '{"error":{"type":"RegionError","message":"This model is not available in your country."}}'), "served");
+  assert.equal(classifyOpencodeZenProbeSignal(200, ""), "served");
+  assert.equal(classifyOpencodeZenProbeSignal(503, '{"error":{"message":"Endpoint is unavailable."}}'), "served");
 });
 
 test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -free 后缀 + 探针兜底", () => {
-  const metadata: Record<string, ZenModelMetadata> = {
+  const metadata: Record<string, OpencodeZenModelMetadata> = {
     "grok-code": { deprecated: false, free: true },
     "big-pickle": { deprecated: false, free: true },
     "exo-free": { deprecated: true, free: true },
@@ -208,7 +208,7 @@ test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -fr
   };
   // 元数据权威：零计费且未 deprecated 才可见；付费/已下线剔除。
   assert.deepEqual(
-    filterZenCatalogIds(
+    filterOpencodeZenCatalogIds(
       ["grok-code", "big-pickle", "exo-free", "claude-opus-5", "muse-spark-free"],
       metadata,
       undefined,
@@ -217,15 +217,15 @@ test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -fr
   );
   // 元数据无条目（刚轮换上线）：-free 后缀宽限 + 探针裁决；无后缀无法验证免费，剔除。
   assert.deepEqual(
-    filterZenCatalogIds(["jev-1.13-free", "claude-fable-5"], metadata, {
+    filterOpencodeZenCatalogIds(["jev-1.13-free", "claude-fable-5"], metadata, {
       "jev-1.13-free": { result: "chat", at: 1 },
       "claude-fable-5": { result: "chat", at: 1 },
     }),
     ["jev-1.13-free"],
   );
-  assert.deepEqual(filterZenCatalogIds(["jev-1.13-free"], metadata, { "jev-1.13-free": { result: "drop", at: 1 } }), []);
+  assert.deepEqual(filterOpencodeZenCatalogIds(["jev-1.13-free"], metadata, { "jev-1.13-free": { result: "drop", at: 1 } }), []);
   // 元数据整体不可用：只信 -free 后缀（无后缀零计费模型暂不示，好过误示付费）。
-  assert.deepEqual(filterZenCatalogIds(["exo-free", "grok-code", "claude-opus-5"], undefined, undefined), ["exo-free"]);
+  assert.deepEqual(filterOpencodeZenCatalogIds(["exo-free", "grok-code", "claude-opus-5"], undefined, undefined), ["exo-free"]);
 });
 
 test("目录存储：动态 id + 元数据属性 + TTL 内不重复拉取 + 失败回退 last-good", async () => {
@@ -234,7 +234,7 @@ test("目录存储：动态 id + 元数据属性 + TTL 内不重复拉取 + 失�
   let fetches = 0;
   let metadataFetches = 0;
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       now: () => now,
       ttlMs: 60_000,
@@ -271,7 +271,7 @@ test("目录存储：动态 id + 元数据属性 + TTL 内不重复拉取 + 失�
     assert.equal(fetches, 2);
     // 失败冷却：拉取异常回退 last-good，冷却期内不重试。
     let fail = true;
-    const failing = createZenCatalogStore({
+    const failing = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       now: () => now,
       ttlMs: 60_000,
@@ -297,7 +297,7 @@ test("目录存储：动态 id + 元数据属性 + TTL 内不重复拉取 + 失�
 test("目录存储：动态列表为空时回退元数据免费集", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-meta-fallback-"));
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       fetchCatalog: async () => ({ data: [] }),
       fetchMetadata: async () => ({ opencode: { models: {
@@ -317,7 +317,7 @@ test("目录存储：动态列表为空时回退元数据免费集", async () =>
 test("目录存储：完全无缓存（首次拉取即失败）返回空目录，不用静态快照充数", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-empty-"));
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       fetchCatalog: async () => { throw new Error("always down"); },
     });
@@ -331,7 +331,7 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-split-"));
   let now = 1_000_000;
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       now: () => now,
       ttlMs: 60_000,
@@ -354,8 +354,8 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
     assert.ok(Array.isArray(catalog.models) && catalog.models.length === 2, "catalog.json 是成品目录");
     // 成品即终态：提示词与模板在生成时已替换，serve 不再加工。
     for (const entry of catalog.models) {
-      assert.equal(entry.base_instructions, ZEN_AGENT_SYSTEM_PROMPT);
-      assert.equal((entry.model_messages as { instructions_template?: string }).instructions_template, ZEN_AGENT_SYSTEM_PROMPT);
+      assert.equal(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
+      assert.equal((entry.model_messages as { instructions_template?: string }).instructions_template, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
     }
     // 转发 endpoint 由元数据确认（provider.api）。
     assert.equal(store.endpoint("exo-free"), "https://opencode.ai/zen/v1");
@@ -370,7 +370,7 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
 test("目录存储：元数据拉取失败只信 -free 后缀，旧版缓存文件兼容读取", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-legacy-"));
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       ttlMs: 60_000,
       fetchCatalog: async () => ({ data: [{ id: "exo-free" }, { id: "grok-code" }] }),
@@ -388,7 +388,7 @@ test("目录存储：元数据拉取失败只信 -free 后缀，旧版缓存文�
       content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
       ids,
     }));
-    const legacyStore = createZenCatalogStore({
+    const legacyStore = createOpencodeZenCatalogStore({
       cacheDirectory: legacy,
       fetchCatalog: async () => { throw new Error("不应拉取"); },
     });
@@ -418,7 +418,7 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
     } } };
   };
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory, now: () => now, ttlMs: 60_000,
       metadataTtlMs: 600_000, probeTtlMs: 120_000,
       fetchCatalog, fetchMetadata,
@@ -438,7 +438,7 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
     assert.equal(probed.length, 1);
     // 新 store 从磁盘回读元数据（不再拉取）；探针 TTL 过期后重新裁决并翻转结果。
     now += 61_000;
-    const reread = createZenCatalogStore({
+    const reread = createOpencodeZenCatalogStore({
       cacheDirectory: directory, now: () => now, ttlMs: 60_000,
       metadataTtlMs: 600_000, probeTtlMs: 120_000,
       fetchCatalog,
@@ -459,7 +459,7 @@ test("目录存储：探针失败不记录裁决，保守保留并下轮重试",
   let now = 1_000_000;
   let attempts = 0;
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory, now: () => now, ttlMs: 60_000,
       metadataTtlMs: 600_000, probeTtlMs: 600_000,
       fetchCatalog: async () => ({ data: [{ id: "jev-1.13-free" }] }),
@@ -485,7 +485,7 @@ test("目录存储：探针失败不记录裁决，保守保留并下轮重试",
 test("目录存储：协议与 effort 档位暴露均取实时元数据", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-protocol-"));
   try {
-    const store = createZenCatalogStore({
+    const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory,
       fetchCatalog: async () => ({ data: [{ id: "muse-spark-1.3-contributor-free" }, { id: "deepseek-v4-flash-free" }] }),
       fetchMetadata: async () => ({ opencode: { models: {

@@ -29,14 +29,10 @@ const DICT = {
     logSizeInvalid: "请输入 0～1024 的有效数字。",
     labelModelSelect: "模型选择",
     descModelSelect: "当前已选模型始终显示在下方，可直接移除；点击页面「保存」后生效。",
-    excludedGroup_zcode: "ZCode",
-    excludedGroup_codebuddy: "CodeBuddy",
-    excludedGroup_workbuddy: "WorkBuddy",
-    excludedGroup_qoder: "Qoder",
-    excludedGroup_agy: "Antigravity",
+    excludedGroupLabel: "排除模型",
     labelExcludedModels: "排除模型（未启用的端）",
-    excludedGroupPlaceholder: "每行一个模型名，如 gemini-2.5-flash",
-    descExcludedGroup: "排除该组前缀下的这些模型：每行一个模型名（不带前缀），保存时自动补全该组前缀；前缀后可含字面量通配（如 gemini*），不允许只填 *。想隐藏整个端请直接关闭上方开关。仅对本地兼容端生效，上游模型请用「模型选择」管理。",
+    excludedGroupPlaceholder: "每行一个模型名，如 {example}",
+    descExcludedGroup: "排除该组下的这些模型：每行一个模型名（不带前缀）。",
     fetchModels: "从上游拉取",
     fetchingModels: "拉取中…",
     modelsFetchHint: "从上游列表勾选模型，点击「应用」加入当前选择，再统一保存。",
@@ -187,14 +183,10 @@ const DICT = {
     logSizeInvalid: "Enter a valid number from 0 to 1024.",
     labelModelSelect: "Model Selection",
     descModelSelect: "Selected models are always listed below and can be removed directly. Use Save to persist changes.",
-    excludedGroup_zcode: "ZCode",
-    excludedGroup_codebuddy: "CodeBuddy",
-    excludedGroup_workbuddy: "WorkBuddy",
-    excludedGroup_qoder: "Qoder",
-    excludedGroup_agy: "Antigravity",
+    excludedGroupLabel: "Excluded models",
     labelExcludedModels: "Excluded models (endpoints off)",
-    excludedGroupPlaceholder: "One model name per line, e.g. gemini-2.5-flash",
-    descExcludedGroup: "Excludes these models under this group's prefix: one model name per line (no prefix — the gateway adds it on save). Globs on literal text after the prefix (e.g. gemini*) are allowed; a bare * is not. To hide an entire endpoint, turn its switch off above. Local compatibility endpoints only; upstream models are managed by Model Selection.",
+    excludedGroupPlaceholder: "One model name per line, e.g. {example}",
+    descExcludedGroup: "Excludes these models under this group: one model name per line (no prefix).",
     fetchModels: "Fetch from Upstream",
     fetchingModels: "Fetching…",
     modelsFetchHint: "Select upstream models and apply them to your selection, then save your changes.",
@@ -327,16 +319,26 @@ const DICT = {
 
 export type I18nKey = keyof typeof DICT.zh;
 
+/** 文案模板的变量插值：{name} 占位符按 vars 替换，缺失的变量原样保留（便于发现漏传）。 */
+export function formatTemplate(
+  template: string,
+  vars?: Record<string, string | number>,
+): string {
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (matched, name: string) =>
+    Object.hasOwn(vars, name) ? String(vars[name]) : matched);
+}
+
 interface LangContextValue {
   lang: Lang;
   setLang: (lang: Lang) => void;
-  t: (key: I18nKey) => string;
+  t: (key: I18nKey, vars?: Record<string, string | number>) => string;
 }
 
 const LangContext = createContext<LangContextValue>({
   lang: "zh",
   setLang: () => {},
-  t: (key) => DICT.zh[key],
+  t: (key, vars) => formatTemplate(DICT.zh[key], vars),
 });
 
 const LANG_STORAGE_KEY = "ccp-ui-lang";
@@ -351,7 +353,8 @@ export function LangProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.lang = lang === "en" ? "en" : "zh-CN";
   }, [lang]);
-  const t = useCallback((key: I18nKey) => DICT[lang][key] ?? DICT.zh[key], [lang]);
+  const t = useCallback((key: I18nKey, vars?: Record<string, string | number>) =>
+    formatTemplate(DICT[lang][key] ?? DICT.zh[key], vars), [lang]);
   return <LangContext.Provider value={{ lang, setLang, t }}>{children}</LangContext.Provider>;
 }
 

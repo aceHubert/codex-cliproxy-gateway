@@ -10,7 +10,7 @@
 | codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `catalog.ts` 的 `cloneCodexBase()`（条目 `base_instructions` + 模板） |
 | qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `catalog.ts` 的 `buildQoderCatalog()`（条目） |
 | agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `catalog.ts` 的 `buildAgyCatalog()`（条目） |
-| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildZenCatalog()`（条目）+ 转发路 `injectZenFingerprintBody`（门禁模板注入） |
+| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`（门禁模板注入） |
 
 与本机安装强相关的值（ZCode.app 版本）仍在运行时动态读取，JSON 中的 `appVersion` 只是分析快照。
 
@@ -25,7 +25,7 @@ Codex catalog 快照 `models/codex_client_models.json` 中每个条目都带 17�
 `src/catalog.ts` 的 `withAgentSystemPrompt`），替换随目录缓存落盘，`/v1/models` 侧只读合并、
 不重建条目。Codex 从 `/v1/models?client_version=…` 或 `config.toml` 的 `model_catalog_json`
 缓存文件读到条目后，按官方客户端提示词发送。OpenCode Zen 同时保留转发路的门禁模板注入：
-客户端送来的首条 system 已完整包含待注入模板时（目录下发即如此），`injectZenFingerprintBody`
+客户端送来的首条 system 已完整包含待注入模板时（目录下发即如此），`injectOpencodeZenFingerprintBody`
 不再重复注入，避免同一段提示词出现两遍。
 codebuddy 适配器的 `workbuddy/*` 条目**沿用同一份 CodeBuddy 主提示词**（本机无 WorkBuddy IDE
 与其产品配置；未做 `CODEBUDDY_BRAND_NAME` 品牌名替换——真实 WorkBuddy 客户端是把同一模板的
@@ -158,7 +158,7 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
     （`base_instructions` 与 `model_messages` 模板已在生成时替换）。每次元数据刷新后两个
     文件同步重写；`/v1/models` 只读合并 catalog.json，不在运行时重建条目。转发上游 baseURL
     由元数据 `provider.api` 确认（全 provider 共享一份，与客户端同源），元数据缺失或非
-    http(s) 时回退 `ZEN_DEFAULT_ENDPOINT`；端点路径仍按模型 `provider.npm` 映射的协议拼接
+    http(s) 时回退 `OPENCODE_ZEN_DEFAULT_ENDPOINT`；端点路径仍按模型 `provider.npm` 映射的协议拼接
     （`protocolFromNpm`；`@ai-sdk/mistral` 等 OpenAI 兼容 SDK 走缺省 chat）。
 - **更新方法（两条路）**：
   1. **包内提取（首选，不必运行客户端）**：`curl https://registry.npmjs.org/-/package/@opencode/cli/dist-tags`

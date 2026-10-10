@@ -57,7 +57,7 @@ import {
   type QoderDependencies,
 } from "./qoder/index.ts";
 import { agyEnabled, createAgyAdapter, validateAgyConfig, type AgyDependencies } from "./agy/index.ts";
-import { zenEnabled, createZenAdapter, validateZenConfig, type ZenDependencies } from "./opencode/index.ts";
+import { opencodeZenEnabled, createOpencodeZenAdapter, validateOpencodeZenConfig, type OpencodeZenDependencies } from "./opencode/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -195,11 +195,11 @@ Models:
   --exclude [PATTERNS]  manage excluded models for the local compatibility
                         endpoints; every rule must start with a full adapter
                         prefix (zcode/, zcode-<plan>/, codebuddy-intl|cn/,
-                        workbuddy-intl|cn/, qoder-intl|cn/, agy/; the
-                        product family globs zcode*/, codebuddy-*/,
-                        workbuddy-*/, qoder-*\/ cover every plan/region
-                        prefix at once) and wildcards may only follow it
-                        (e.g. codebuddy-intl/gpt-4o, qoder-cn/qoder-*);
+                        workbuddy-intl|cn/, qoder-intl|cn/, agy/,
+                        opencode-zen/; the product family globs zcode*/,
+                        codebuddy-*/, workbuddy-*/, qoder-*\/ cover every
+                        plan/region prefix at once) and wildcards may only
+                        follow it (e.g. codebuddy-intl/gpt-4o, qoder-cn/qoder-*);
                         upstream models are selected via
                         models --sync and official models are not excludable;
                         family-wide patterns (prefix/ or prefix/*) are
@@ -1258,7 +1258,7 @@ export interface CompatibleModelsDependencies {
   codebuddy?: CodebuddyDependencies;
   qoder?: QoderDependencies;
   agy?: AgyDependencies;
-  zen?: ZenDependencies;
+  opencodeZen?: OpencodeZenDependencies;
 }
 
 export interface CompatibleModelsSnapshot {
@@ -1317,11 +1317,9 @@ export async function collectCompatibleModels(
     createQoderAdapter(config, { refreshCatalogOnStart: false, ...dependencies.qoder }));
   await collect("agy", agyEnabled(config), () =>
     createAgyAdapter(config, { refreshCatalogOnStart: false, ...dependencies.agy }));
-  // 普通列表包含 Zen；排除选择器继续遵循五产品分组的既定作用域。
-  if (includeUpstream) {
-    await collect("opencode-zen", zenEnabled(config), () =>
-      createZenAdapter(config, { refreshCatalogOnStart: false, ...dependencies.zen }));
-  }
+  // Zen 与其余兼容端同权：普通列表与排除选择器都包含（Zen 在排除作用域内）。
+  await collect("opencode-zen", opencodeZenEnabled(config), () =>
+    createOpencodeZenAdapter(config, { refreshCatalogOnStart: false, ...dependencies.opencodeZen }));
   return { entries, failures };
 }
 
@@ -1950,7 +1948,7 @@ async function writeConfigAndRestart(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
-  validateZenConfig(config);
+  validateOpencodeZenConfig(config);
   writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
@@ -1981,7 +1979,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   const codebuddyTarget = onOffValue(options, "codebuddy");
   const qoderTarget = onOffValue(options, "qoder");
   const agyTarget = onOffValue(options, "agy");
-  const zenTarget = onOffValue(options, "opencode-zen");
+  const opencodeZenTarget = onOffValue(options, "opencode-zen");
   const logTarget = onOffValue(options, "log");
   const debugTarget = onOffValue(options, "debug");
   const maxLogsOption = stringOption(options, "max-request-logs");
@@ -1991,12 +1989,12 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && zenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && opencodeZenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
     const codebuddyActive = codebuddyEnabled(config);
     const qoderActive = qoderEnabled(config);
     const agyActive = agyEnabled(config);
-    const zenActive = zenEnabled(config);
+    const opencodeZenActive = opencodeZenEnabled(config);
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
       zcode: zcodeActive,
@@ -2009,8 +2007,8 @@ async function configCommand(options: CliOptions): Promise<void> {
       ...(config.qoder === true && !qoderActive ? { qoderConfigured: true } : {}),
       agy: agyActive,
       ...(config.agy === true && !agyActive ? { agyConfigured: true } : {}),
-      opencodeZen: zenActive,
-      ...(config.opencodeZen === true && !zenActive ? { opencodeZenConfigured: true } : {}),
+      opencodeZen: opencodeZenActive,
+      ...(config.opencodeZen === true && !opencodeZenActive ? { opencodeZenConfigured: true } : {}),
       requestLogging: config.requestLogging === true,
       debug: config.debug === true,
       logDir: requestLogDir(config),
@@ -2052,11 +2050,11 @@ async function configCommand(options: CliOptions): Promise<void> {
       ? "Antigravity 开关已保存；upstream-only 模式下暂不生效。"
       : `Antigravity（agy/）适配${agyTarget ? "已启用" : "已禁用"}。`);
   }
-  if (zenTarget !== undefined) {
-    config.opencodeZen = zenTarget;
-    applied.push(zenTarget && !zenEnabled(config)
+  if (opencodeZenTarget !== undefined) {
+    config.opencodeZen = opencodeZenTarget;
+    applied.push(opencodeZenTarget && !opencodeZenEnabled(config)
       ? "OpenCode Zen 开关已保存；upstream-only 模式下暂不生效。"
-      : `OpenCode Zen（opencode-zen/）适配${zenTarget ? "已启用" : "已禁用"}。`);
+      : `OpenCode Zen（opencode-zen/）适配${opencodeZenTarget ? "已启用" : "已禁用"}。`);
   }
   if (maxLogsOption !== undefined) {
     config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
@@ -2088,7 +2086,7 @@ async function configCommand(options: CliOptions): Promise<void> {
     // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
     // 纯日志选项不影响目录，不触发失效。
     invalidateModels: zcodeTarget !== undefined || codebuddyTarget !== undefined || qoderTarget !== undefined
-      || agyTarget !== undefined || zenTarget !== undefined,
+      || agyTarget !== undefined || opencodeZenTarget !== undefined,
     logDirLine: logTarget ? `Request logs will be written to: ${config.logDir}` : undefined,
   });
 }

@@ -56,7 +56,7 @@ function mergeDelta(state: AggregationState, delta: Record<string, unknown>): vo
  * 消费上游 SSE 流并聚合为单个 chat.completion 对象；流提前断开（无 finish 帧）时
  * finish_reason 兜底为 "stop"，usage 缺失时省略，保证返回结构始终可被客户端解析。
  */
-export async function aggregateZenStreamToCompletion(
+export async function aggregateOpencodeZenStreamToCompletion(
   body: ReadableStream<Uint8Array>,
 ): Promise<Record<string, unknown>> {
   const state: AggregationState = {

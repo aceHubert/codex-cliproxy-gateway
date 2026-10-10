@@ -3,15 +3,15 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createGatewayHandler, isZenResponsesWebSocket } from "../src/gateway.ts";
+import { createGatewayHandler, isOpencodeZenResponsesWebSocket } from "../src/gateway.ts";
 import { collectCompatibleModels } from "../src/cli.ts";
 import {
-  ZEN_CLIENT_USER_AGENT,
-  ZEN_AGENT_SYSTEM_PROMPT,
+  OPENCODE_ZEN_CLIENT_USER_AGENT,
+  OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
 } from "../src/opencode/fingerprint.ts";
 import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "../src/opencode/session.ts";
-import { normalizeZenUpstreamError, validateZenConfig, zenEnabled } from "../src/opencode/index.ts";
-import type { ZenDependencies } from "../src/opencode/index.ts";
+import { normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "../src/opencode/index.ts";
+import type { OpencodeZenDependencies } from "../src/opencode/index.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
 type Json = Record<string, any>;
@@ -38,7 +38,7 @@ function chunkFrame(delta: Json, finish: string | null = null, id = "zen-test-1"
 interface Fixture {
   directory: string;
   config: GatewayConfig;
-  create: (overrides?: Partial<GatewayConfig>, dependencies?: Partial<ZenDependencies>) => ReturnType<typeof createGatewayHandler>;
+  create: (overrides?: Partial<GatewayConfig>, dependencies?: Partial<OpencodeZenDependencies>) => ReturnType<typeof createGatewayHandler>;
   upstream: { url: string; headers: Record<string, string>; body: Json } | undefined;
 }
 
@@ -120,12 +120,13 @@ function chatRequest(model = MODEL, extra: Json = {}, headers: Record<string, st
   });
 }
 
-test("合并排除规则后 Zen 目录与推理保持可用，原有兼容端仍在转发前拒绝", TIMEOUT, async () => {
+test("合并排除规则只命中点名模型：未排除的 Zen 可用，其他兼容端仍在转发前拒绝", TIMEOUT, async () => {
   await fixture(async ({ create }) => {
-    const handler = create({ excludedModels: ["agy/hidden-model", "opencode-zen/*"] });
+    const handler = create({ excludedModels: ["agy/hidden-model", "opencode-zen/exo-free"] });
     const listed = await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const models = await listed.json() as { data: Array<{ id: string }> };
     assert.ok(models.data.some((model) => model.id === MODEL));
+    assert.ok(!models.data.some((model) => model.id === "opencode-zen/exo-free"));
     const blocked = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: "agy/hidden-model", input: "test" }),
@@ -138,9 +139,9 @@ test("合并排除规则后 Zen 目录与推理保持可用，原有兼容端仍
   });
 });
 
-test("普通兼容模型列表包含 Zen，五产品排除选择器不扩展到 Zen", TIMEOUT, async () => {
+test("普通兼容模型列表与排除选择器都包含 Zen", TIMEOUT, async () => {
   await fixture(async ({ config, directory }) => {
-    const dependencies = { zen: {
+    const dependencies = { opencodeZen: {
       cacheDirectory: directory, refreshCatalogOnStart: false,
       fetch: async () => Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }),
       fetchMetadata: async () => ({}), probeModel: async () => "chat" as const,
@@ -148,7 +149,7 @@ test("普通兼容模型列表包含 Zen，五产品排除选择器不扩展到 
     const listed = await collectCompatibleModels(config, dependencies);
     assert.ok(listed.entries.some((model) => model.slug === MODEL));
     const selectable = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
-    assert.equal(selectable.entries.some((model) => model.slug === MODEL), false);
+    assert.ok(selectable.entries.some((model) => model.slug === MODEL));
   });
 });
 
@@ -157,42 +158,42 @@ test("zen 配置校验：类型、环回监听与前缀保留", () => {
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
-  assert.equal(zenEnabled(base), false);
-  assert.equal(zenEnabled({ ...base, opencodeZen: true }), true);
-  assert.equal(zenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), false);
-  assert.throws(() => validateZenConfig({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
-  assert.throws(() => validateZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true }), /环回/);
-  assert.throws(() => validateZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }), /前缀保留/);
-  validateZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true });
+  assert.equal(opencodeZenEnabled(base), false);
+  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true }), true);
+  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), false);
+  assert.throws(() => validateOpencodeZenConfig({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
+  assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true }), /环回/);
+  assert.throws(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }), /前缀保留/);
+  validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true });
 });
 
 test("上游错误归一化：FreeTierError/限流/模型失效给出明确指引", () => {
-  const free403 = normalizeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
+  const free403 = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
   assert.equal(free403.status, 403);
   assert.equal(free403.type, "zen_free_tier_error");
   assert.match(free403.message, /指纹数据/);
-  const limited = normalizeZenUpstreamError(429, JSON.stringify({ error: { type: "FreeUsageLimitError", message: "rate limited" } }));
+  const limited = normalizeOpencodeZenUpstreamError(429, JSON.stringify({ error: { type: "FreeUsageLimitError", message: "rate limited" } }));
   assert.equal(limited.status, 429);
   assert.equal(limited.type, "zen_rate_limited");
   assert.match(limited.message, /限频/);
-  const gone = normalizeZenUpstreamError(404, JSON.stringify({ error: { message: "model nemotron-not-exist not found" } }));
+  const gone = normalizeOpencodeZenUpstreamError(404, JSON.stringify({ error: { message: "model nemotron-not-exist not found" } }));
   assert.equal(gone.status, 404);
   assert.equal(gone.type, "zen_model_unavailable");
   assert.match(gone.message, /动态轮换/);
-  const generic = normalizeZenUpstreamError(500, "internal");
+  const generic = normalizeOpencodeZenUpstreamError(500, "internal");
   assert.equal(generic.status, 500);
   assert.equal(generic.type, "zen_upstream_error");
 });
 
 test("上游错误归一化：403 区域限制与门禁失效分开归类", () => {
   // 区域限制：同为 403，但详情是地区不可用——不能误报成指纹失效（探针分类同样视为被服务）。
-  const region = normalizeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "RegionError", message: "This model is not available in your country" } }));
+  const region = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "RegionError", message: "This model is not available in your country" } }));
   assert.equal(region.status, 403);
   assert.equal(region.type, "zen_region_error");
   assert.match(region.message, /地区/);
   assert.ok(!region.message.includes("指纹数据"), "区域错误不得引导用户升级指纹");
   // 门禁失效仍是 FreeTierError 归类。
-  const gate = normalizeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
+  const gate = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
   assert.equal(gate.type, "zen_free_tier_error");
 });
 
@@ -225,7 +226,7 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、模板与强
     assert.match(await response.text(), /TIME_WAIT/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
     assert.equal(up.url, "https://opencode.ai/zen/v1/chat/completions");
-    assert.equal(up.headers["user-agent"], ZEN_CLIENT_USER_AGENT);
+    assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.equal(up.headers.authorization, "Bearer public");
     assert.equal(up.headers["x-opencode-client"], "cli");
     assert.match(up.headers["x-opencode-project"], /^[0-9a-f]{40}$/);
@@ -435,7 +436,7 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
     assert.equal(up.url, "https://opencode.ai/zen/v1/responses");
     assert.equal(up.body.model, "muse-spark-1.3-contributor-free");
-    assert.equal(up.headers["user-agent"], ZEN_CLIENT_USER_AGENT);
+    assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.match(up.headers["x-opencode-session"] ?? "", OPENCODE_SESSION_PATTERN);
     assert.match(up.body.prompt_cache_key ?? "", OPENCODE_SESSION_PATTERN);
   });
@@ -565,15 +566,15 @@ test("zen 目录过滤：下线/非 chat 协议/探针剔除的模型不暴露",
     });
     const response = await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const data = (await response.json() as Json).data as Json[];
-    const zenIds = data.filter((item) => String(item.id).startsWith("opencode-zen/")).map((item) => String(item.id));
-    assert.ok(zenIds.includes("opencode-zen/nemotron-3.5-lightning-free"));
-    assert.ok(zenIds.includes("opencode-zen/muse-spark-1.3-contributor-free"), "非 chat 协议模型保留（按协议路由）");
-    assert.ok(!zenIds.includes("opencode-zen/jev-1.13-free"), "探针 drop 的模型不得暴露");
-    assert.ok(!zenIds.includes("opencode-zen/claude-opus-5"), "元数据 cost 非零的付费模型不得暴露");
+    const opencodeZenIds = data.filter((item) => String(item.id).startsWith("opencode-zen/")).map((item) => String(item.id));
+    assert.ok(opencodeZenIds.includes("opencode-zen/nemotron-3.5-lightning-free"));
+    assert.ok(opencodeZenIds.includes("opencode-zen/muse-spark-1.3-contributor-free"), "非 chat 协议模型保留（按协议路由）");
+    assert.ok(!opencodeZenIds.includes("opencode-zen/jev-1.13-free"), "探针 drop 的模型不得暴露");
+    assert.ok(!opencodeZenIds.includes("opencode-zen/claude-opus-5"), "元数据 cost 非零的付费模型不得暴露");
   });
 });
 
-const AGENT_PROMPT_HEAD = ZEN_AGENT_SYSTEM_PROMPT.slice(0, 60);
+const AGENT_PROMPT_HEAD = OPENCODE_ZEN_AGENT_SYSTEM_PROMPT.slice(0, 60);
 
 test("Zen WebSocket 握手本地拒绝，令客户端降级 HTTPS/SSE", TIMEOUT, async () => {
   await fixture(async ({ create, config }) => {
@@ -582,7 +583,7 @@ test("Zen WebSocket 握手本地拒绝，令客户端降级 HTTPS/SSE", TIMEOUT,
       const upgrade = new Request("http://127.0.0.1:8327/v1/responses", {
         headers: { upgrade: "websocket", "x-codex-routing-hint": `model=${model}` },
       });
-      assert.equal(isZenResponsesWebSocket(upgrade, config), true);
+      assert.equal(isOpencodeZenResponsesWebSocket(upgrade, config), true);
       const response = await handler(upgrade);
       assert.equal(response.status, 426);
       assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "opencode-zen-http-only");
@@ -591,11 +592,11 @@ test("Zen WebSocket 握手本地拒绝，令客户端降级 HTTPS/SSE", TIMEOUT,
     const upgrade = (hint: string, url = "http://127.0.0.1:8327/v1/responses") => new Request(url, {
       headers: { upgrade: "websocket", "x-codex-routing-hint": `model=${hint}` },
     });
-    assert.equal(isZenResponsesWebSocket(upgrade("gpt-5.5"), config), false);
-    assert.equal(isZenResponsesWebSocket(upgrade(MODEL, "http://127.0.0.1:8327/v1/chat/completions"), config), false);
-    assert.equal(isZenResponsesWebSocket(upgrade(MODEL), { ...config, opencodeZen: false }), false);
+    assert.equal(isOpencodeZenResponsesWebSocket(upgrade("gpt-5.5"), config), false);
+    assert.equal(isOpencodeZenResponsesWebSocket(upgrade(MODEL, "http://127.0.0.1:8327/v1/chat/completions"), config), false);
+    assert.equal(isOpencodeZenResponsesWebSocket(upgrade(MODEL), { ...config, opencodeZen: false }), false);
     // 无升级头的普通 POST 不受影响。
-    assert.equal(isZenResponsesWebSocket(new Request("http://127.0.0.1:8327/v1/responses", { method: "POST" }), config), false);
+    assert.equal(isOpencodeZenResponsesWebSocket(new Request("http://127.0.0.1:8327/v1/responses", { method: "POST" }), config), false);
   });
 });
 
@@ -621,9 +622,9 @@ test("目录条目 base_instructions 为官方 agent 提示词（与其它适配
     const zen = (raw.models as Json[]).filter((entry) => String(entry.slug).startsWith("opencode-zen/"));
     assert.ok(zen.length > 0, "Codex 形状目录应含 zen 条目");
     for (const entry of zen) {
-      assert.equal(entry.base_instructions, ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 应下发官方提示词`);
+      assert.equal(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 应下发官方提示词`);
       const messages = entry.model_messages as { instructions_template?: string } | undefined;
-      assert.equal(messages?.instructions_template, ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 的 instructions_template 必须替换，否则客户端仍发官方提示词`);
+      assert.equal(messages?.instructions_template, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 的 instructions_template 必须替换，否则客户端仍发官方提示词`);
     }
   });
 });

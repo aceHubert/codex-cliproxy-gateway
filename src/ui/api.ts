@@ -35,12 +35,13 @@ export interface ManualCodexConfig {
   keys: ManualCodexKeyRow[];
 }
 
-/** 排除模型分组定义：条目由用户填写模型名（不带前缀），保存时网关自动补全 prefix。
- * 分组即本地适配器前缀的权威清单（含 zcode 各套餐前缀）；排除不涉及上游与官方模型。 */
+/** 排除模型分组定义：条目由用户填写模型名（不带前缀），保存时网关自动补全 prefixes
+ * （CodeBuddy 框同时补双产品前缀）。分组即本地适配器前缀的权威清单（含 zcode 各套餐
+ * 前缀）；排除不涉及上游与官方模型。 */
 export interface ExcludedModelGroup {
   key: string;
-  endpoint: "zcode" | "codebuddy" | "qoder" | "agy";
-  prefix: string;
+  endpoint: "zcode" | "codebuddy" | "qoder" | "agy" | "opencodeZen";
+  prefixes: string[];
 }
 
 export interface UiConfig {

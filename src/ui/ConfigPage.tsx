@@ -12,18 +12,18 @@ import {
 } from "./api.ts";
 import { Header } from "./Header.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
-import { useI18n, type I18nKey } from "./i18n.tsx";
+import { useI18n } from "./i18n.tsx";
 import type { ExcludedModelGroup } from "./api.ts";
 import { joinExcludedLines, splitExcludedLines } from "./excluded-models-field.ts";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
 
-/** 分组 key → 文案键的静态映射（i18n 键是字面量联合类型，模板字符串无法直接索引）。 */
-const EXCLUDED_GROUP_LABELS: Record<string, I18nKey> = {
-  zcode: "excludedGroup_zcode",
-  codebuddy: "excludedGroup_codebuddy",
-  workbuddy: "excludedGroup_workbuddy",
-  qoder: "excludedGroup_qoder",
-  agy: "excludedGroup_agy",
+/** 分组 key → placeholder 里的示例模型（模型名不参与翻译，直接写死）。 */
+const EXCLUDED_GROUP_EXAMPLES: Record<string, string> = {
+  zcode: "glm-5.2-*",
+  codebuddy: "gemini-2.5-flash",
+  qoder: "qwen-3.7-*",
+  agy: "gpt-*",
+  "opencode-zen": "mimo-*",
 };
 
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。
@@ -105,9 +105,10 @@ function ReadonlyRow({
 
 /** 排除模型的单分组输入框：只填模型名，前缀由网关在保存时补全。 */
 function ExcludedGroupInput({
-  label, value, disabled, onChange,
-}: { label: string; value: string; disabled: boolean; onChange: (value: string) => void }) {
-  const { t } = useI18n();
+  label, placeholder, value, disabled, onChange,
+}: {
+  label: string; placeholder: string; value: string; disabled: boolean; onChange: (value: string) => void;
+}) {
   return (
     <label className="excluded-group">
       <span className="excluded-group-label">{label}</span>
@@ -115,7 +116,7 @@ function ExcludedGroupInput({
         className="input-textarea"
         rows={2}
         spellCheck={false}
-        placeholder={t("excludedGroupPlaceholder")}
+        placeholder={placeholder}
         value={value}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
@@ -207,20 +208,20 @@ export function ConfigPage({
     if (groups.length === 0) return null;
     return (
       <div className="excluded-groups">
-        {groups.map((group) => {
-          const labelKey = EXCLUDED_GROUP_LABELS[group.key];
-          return (
-            <ExcludedGroupInput
-              key={group.key}
-              label={labelKey ? t(labelKey) : group.key}
-              value={form.excludedEntries[group.key] ?? ""}
-              disabled={excludedDisabled}
-              onChange={(value) => setForm((current) => current
-                ? { ...current, excludedEntries: { ...current.excludedEntries, [group.key]: value } }
-                : current)}
-            />
-          );
-        })}
+        {groups.map((group) => (
+          <ExcludedGroupInput
+            key={group.key}
+            label={t("excludedGroupLabel")}
+            placeholder={t("excludedGroupPlaceholder", {
+              example: EXCLUDED_GROUP_EXAMPLES[group.key] ?? "gemini-2.5-flash",
+            })}
+            value={form.excludedEntries[group.key] ?? ""}
+            disabled={excludedDisabled}
+            onChange={(value) => setForm((current) => current
+              ? { ...current, excludedEntries: { ...current.excludedEntries, [group.key]: value } }
+              : current)}
+          />
+        ))}
         <p className="field-desc">{t("descExcludedGroup")}</p>
       </div>
     );
@@ -616,7 +617,7 @@ export function ConfigPage({
                     <span className="field-keyname">opencodeZen</span>
                   </div>
                   <div className="field-control-area">
-                    {/* upstream-only 模式下网关按禁用处理 zen 入口（zenEnabled）：
+                    {/* upstream-only 模式下网关按禁用处理 zen 入口（opencodeZenEnabled）：
                         开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
                     <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
                       <input
@@ -632,6 +633,7 @@ export function ConfigPage({
                       {upstreamOnly && (
                         <p className="field-desc zcode-disabled-hint">{t("opencodeZenDisabledHint")}</p>
                       )}
+                    {renderExcludedGroups("opencodeZen")}
                   </div>
                 </div>
                 {/* 排除输入框常驻：端行因「未检测且未启用」隐藏时，该端的分组输入框

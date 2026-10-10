@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import codexClientModels from "../../models/codex_client_models.json";
 import { invalidateModelsCache, parseCodexCatalog, withAgentSystemPrompt } from "../catalog.ts";
 import { atomicWrite } from "../toml.ts";
-import { ZEN_AGENT_SYSTEM_PROMPT } from "./fingerprint.ts";
+import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "./fingerprint.ts";
 import type { ModelCatalog, ModelEntry } from "../types.ts";
 
 /**
@@ -37,24 +37,24 @@ const EFFORT_DESCRIPTIONS = new Map(
  * 模型默认 effort：有 high 取 high（对齐上游默认行为），否则取值域末项；
  * 无档位声明时返回 undefined（目录不暴露档位选择）。
  */
-export function zenDefaultEffort(levels: readonly string[]): string | undefined {
+export function opencodeZenDefaultEffort(levels: readonly string[]): string | undefined {
   if (levels.length === 0) return undefined;
   return levels.includes("high") ? "high" : levels[levels.length - 1];
 }
 
-export function isZenModel(model: unknown): boolean {
+export function isOpencodeZenModel(model: unknown): boolean {
   return typeof model === "string" && model.toLowerCase().startsWith(OPENCODE_ZEN_PREFIX);
 }
 
 /** `opencode-zen/<model-id>` → 裸模型 ID；无前缀、前缀后为空或含斜杠返回 undefined。 */
-export function zenUpstreamModel(model: string): string | undefined {
-  if (!isZenModel(model)) return undefined;
+export function opencodeZenUpstreamModel(model: string): string | undefined {
+  if (!isOpencodeZenModel(model)) return undefined;
   const bare = model.slice(OPENCODE_ZEN_PREFIX.length);
   return bare && !bare.includes("/") ? bare : undefined;
 }
 
 /** 显示名：优先元数据官方名称，其余按 id 人工化（mimo-v2.6-flash-free → Mimo V2.6 Flash Free）。 */
-export function zenDisplayName(id: string, metadataName?: string): string {
+export function opencodeZenDisplayName(id: string, metadataName?: string): string {
   if (typeof metadataName === "string" && metadataName.trim()) return metadataName.trim();
   return id.split("-").map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part)).join(" ");
 }
@@ -67,9 +67,9 @@ function record(value: unknown): Record<string, unknown> | undefined {
 /**
  * 解析 /zen/v1/models 响应（OpenAI list 形状）：校验并去重全部模型 id，保持上游
  * 顺序。该端点不带计费信息，「哪些是免费模型」由元数据 cost 判定（见
- * filterZenCatalogIds），这里只做形状清洗。
+ * filterOpencodeZenCatalogIds），这里只做形状清洗。
  */
-export function parseZenModelsResponse(value: unknown): string[] {
+export function parseOpencodeZenModelsResponse(value: unknown): string[] {
   const data = record(value);
   const list = Array.isArray(data?.data) ? data.data : [];
   const ids: string[] = [];
@@ -88,15 +88,15 @@ export function parseZenModelsResponse(value: unknown): string[] {
  * （limit.context）与 reasoning effort 档位（reasoning_options）全部取自它；
  * 元数据缺失的模型按 id 人工化命名、删窗口字段、不暴露档位。
  */
-export function buildZenCatalog(
+export function buildOpencodeZenCatalog(
   ids: string[],
-  metadata?: Record<string, ZenModelMetadata>,
+  metadata?: Record<string, OpencodeZenModelMetadata>,
 ): ModelCatalog {
   if (!BASE) throw new Error("Codex 模型快照缺少 gpt-5.5 基底条目");
   const models: ModelEntry[] = ids.map((id, index) => {
     const meta = metadata && Object.hasOwn(metadata, id) ? metadata[id] : undefined;
     const model = structuredClone(BASE);
-    const displayName = zenDisplayName(id, meta?.name);
+    const displayName = opencodeZenDisplayName(id, meta?.name);
     model.slug = `${OPENCODE_ZEN_PREFIX}${id}`;
     model.display_name = `${OPENCODE_ZEN_DISPLAY_PREFIX}${displayName}`;
     model.description = `OpenCode Zen 免费模型 ${displayName}（指纹转发，按模型端点协议自动转换）`;
@@ -121,7 +121,7 @@ export function buildZenCatalog(
       effort,
       description: EFFORT_DESCRIPTIONS.get(effort) ?? "",
     }));
-    model.default_reasoning_level = zenDefaultEffort(effortLevels) ?? "medium";
+    model.default_reasoning_level = opencodeZenDefaultEffort(effortLevels) ?? "medium";
     delete model.default_reasoning_summary;
     // Chat Completions 工具调用原生支持并行函数调用。
     model.supports_parallel_tool_calls = true;
@@ -137,19 +137,19 @@ export function buildZenCatalog(
       delete model.max_context_window;
       delete model.effective_context_window_percent;
     }
-    return withAgentSystemPrompt(model, ZEN_AGENT_SYSTEM_PROMPT);
+    return withAgentSystemPrompt(model, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
   });
   return { models };
 }
 
-export function mergeZenCatalog(base: ModelCatalog, zen: ModelCatalog): ModelCatalog {
-  const models = base.models.filter((entry) => !isZenModel(entry.slug));
+export function mergeOpencodeZenCatalog(base: ModelCatalog, opencodeZen: ModelCatalog): ModelCatalog {
+  const models = base.models.filter((entry) => !isOpencodeZenModel(entry.slug));
   const priority = Math.max(0, ...models.map((entry) => Number(entry.priority) || 0)) + 100;
-  return { models: [...models, ...zen.models.map((entry, index) => ({ ...entry, priority: priority + index }))] };
+  return { models: [...models, ...opencodeZen.models.map((entry, index) => ({ ...entry, priority: priority + index }))] };
 }
 
 /** 官方元数据中的单模型信息：免费判定、生命周期、端点协议、显示名、窗口与 effort 档位。 */
-export interface ZenModelMetadata {
+export interface OpencodeZenModelMetadata {
   /** 模型级 SDK 覆盖（如 @ai-sdk/anthropic）；缺省继承 provider 级 openai-compatible。 */
   npm?: string;
   /** provider 级 baseURL（元数据 api 字段，如 https://opencode.ai/zen/v1）；转发 endpoint 的依据。 */
@@ -176,9 +176,9 @@ function metadataApi(value: unknown): string | undefined {
 }
 
 /** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点。 */
-export type ZenModelProtocol = "chat" | "responses" | "anthropic" | "google";
+export type OpencodeZenModelProtocol = "chat" | "responses" | "anthropic" | "google";
 
-const NPM_PROTOCOL: Record<string, ZenModelProtocol> = {
+const NPM_PROTOCOL: Record<string, OpencodeZenModelProtocol> = {
   "@ai-sdk/openai-compatible": "chat",
   "@ai-sdk/openai": "responses",
   "@ai-sdk/anthropic": "anthropic",
@@ -187,7 +187,7 @@ const NPM_PROTOCOL: Record<string, ZenModelProtocol> = {
 };
 
 /** npm 字段 → 端点协议；缺省（无覆盖）即继承 openai-compatible chat。 */
-export function protocolFromNpm(npm: string | undefined): ZenModelProtocol {
+export function protocolFromNpm(npm: string | undefined): OpencodeZenModelProtocol {
   return (npm && NPM_PROTOCOL[npm]) || "chat";
 }
 
@@ -221,13 +221,13 @@ function metadataEffortLevels(entry: Record<string, unknown>): string[] | undefi
  * `limit.context` 与 `reasoning_options`（effort 档位）。结构不符返回 undefined，调用方按
  * "元数据不可用"保守处理（只信 `-free` 后缀、删窗口字段、不暴露档位）。
  */
-export function parseZenMetadataResponse(value: unknown): Record<string, ZenModelMetadata> | undefined {
+export function parseOpencodeZenMetadataResponse(value: unknown): Record<string, OpencodeZenModelMetadata> | undefined {
   const provider = record(record(value)?.opencode);
   const models = record(provider?.models);
   if (!models) return undefined;
-  // provider 级 baseURL：所有模型共享，缺省由转发层回退 ZEN_DEFAULT_ENDPOINT。
+  // provider 级 baseURL：所有模型共享，缺省由转发层回退 OPENCODE_ZEN_DEFAULT_ENDPOINT。
   const api = metadataApi(provider?.api);
-  const result: Record<string, ZenModelMetadata> = {};
+  const result: Record<string, OpencodeZenModelMetadata> = {};
   for (const [id, raw] of Object.entries(models)) {
     const entry = record(raw);
     if (!entry) continue;
@@ -249,7 +249,7 @@ export function parseZenMetadataResponse(value: unknown): Record<string, ZenMode
 }
 
 /** 单端点探针信号。 */
-export type ZenProbeSignal = "served" | "unsupported" | "offline" | "gate";
+export type OpencodeZenProbeSignal = "served" | "unsupported" | "offline" | "gate";
 
 /**
  * 探针响应分类：协议不符（400 ModelProtocolUnsupported）→ unsupported；模型不存在
@@ -257,7 +257,7 @@ export type ZenProbeSignal = "served" | "unsupported" | "offline" | "gate";
  * （200、429、5xx、403 RegionError）→ served——地区限制与本地网络相关，视为模型
  * 在该端点被正常服务，不作为剔除依据。
  */
-export function classifyZenProbeSignal(status: number, body: string): ZenProbeSignal {
+export function classifyOpencodeZenProbeSignal(status: number, body: string): OpencodeZenProbeSignal {
   const text = body.toLowerCase();
   if (status === 400 && (text.includes("modelprotocolunsupported") || text.includes("does not support this protocol"))) return "unsupported";
   if (status === 401 || status === 404) return "offline";
@@ -266,11 +266,11 @@ export function classifyZenProbeSignal(status: number, body: string): ZenProbeSi
 }
 
 /** 多端点探针阶梯的裁决：模型端点协议，或 drop（所有已支持协议都不服务该模型）。 */
-export type ZenProbeResult = ZenModelProtocol | "drop";
+export type OpencodeZenProbeResult = OpencodeZenModelProtocol | "drop";
 
 /** 探针裁决缓存条目。 */
-export interface ZenProbeVerdictEntry {
-  result: ZenProbeResult;
+export interface OpencodeZenProbeVerdictEntry {
+  result: OpencodeZenProbeResult;
   at: number;
 }
 
@@ -282,10 +282,10 @@ export interface ZenProbeVerdictEntry {
  * - 元数据整体不可用（拉取失败且无 last-good）：只信 `-free` 后缀——无后缀的
  *   零计费模型（grok-code、big-pickle）此时无法验证免费，暂时不示（好过误示付费模型）。
  */
-export function filterZenCatalogIds(
+export function filterOpencodeZenCatalogIds(
   ids: string[],
-  metadata: Record<string, ZenModelMetadata> | undefined,
-  verdicts: Record<string, ZenProbeVerdictEntry> | undefined,
+  metadata: Record<string, OpencodeZenModelMetadata> | undefined,
+  verdicts: Record<string, OpencodeZenProbeVerdictEntry> | undefined,
 ): string[] {
   if (!metadata) return ids.filter((id) => id.endsWith("-free"));
   return ids.filter((id) => {
@@ -296,14 +296,14 @@ export function filterZenCatalogIds(
   });
 }
 
-export interface ZenCatalogStoreOptions {
+export interface OpencodeZenCatalogStoreOptions {
   cacheDirectory: string;
   /** 返回 /zen/v1/models 的已解码 JSON；认证与超时由调用方负责。 */
   fetchCatalog: () => Promise<unknown>;
   /** 返回 models.opencode.ai 元数据 JSON；缺省不启用下线过滤。 */
   fetchMetadata?: () => Promise<unknown>;
   /** 无元数据模型的多端点探针；缺省不探测（保守保留）。 */
-  probeModel?: (id: string) => Promise<ZenProbeResult>;
+  probeModel?: (id: string) => Promise<OpencodeZenProbeResult>;
   codexModelsCacheFile?: string;
   now?: () => number;
   ttlMs?: number;
@@ -315,8 +315,8 @@ interface CachedCatalog {
   fetchedAt: number;
   /** 动态 ∪ 预置的原始 id 列表（未过滤）。 */
   ids: string[];
-  metadata?: { fetchedAt: number; models: Record<string, ZenModelMetadata> };
-  verdicts?: Record<string, ZenProbeVerdictEntry>;
+  metadata?: { fetchedAt: number; models: Record<string, OpencodeZenModelMetadata> };
+  verdicts?: Record<string, OpencodeZenProbeVerdictEntry>;
   /** 成品条目（`base_instructions` 与 `model_messages` 模板已替换）：刷新时合成，
    *  与 `opencode-zen-catalog.json` 内容一致；serve 路径只读，不重建。 */
   models?: ModelEntry[];
@@ -348,7 +348,7 @@ const PROBE_TTL_MS = 24 * 60 * 60 * 1000;
  * 可见目录在原始 id 列表之上叠加两层数据：官方元数据（deprecated 过滤 + 端点协议）
  * 与无元数据模型的探针裁决；元数据不可用时保守不过滤。
  */
-export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
+export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOptions) {
   const now = options.now ?? Date.now;
   const ttlMs = Math.max(60_000, options.ttlMs ?? CATALOG_TTL_MS);
   const metadataTtlMs = Math.max(60_000, options.metadataTtlMs ?? METADATA_TTL_MS);
@@ -361,15 +361,15 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
   let refreshing: Promise<void> | undefined;
 
   const visibleIds = (value: CachedCatalog): string[] =>
-    filterZenCatalogIds(value.ids, value.metadata?.models, value.verdicts);
+    filterOpencodeZenCatalogIds(value.ids, value.metadata?.models, value.verdicts);
   const contentDigest = (ids: string[]): string => digest(ids);
 
   /** 按当前 ids/元数据/裁决合成成品条目；刷新与 catalog.json 落盘都走这里。 */
   const buildModels = (value: CachedCatalog): ModelEntry[] =>
-    buildZenCatalog(visibleIds(value), value.metadata?.models).models;
+    buildOpencodeZenCatalog(visibleIds(value), value.metadata?.models).models;
 
-  /** 解析单模型元数据条目（磁盘读回用）；字段与 parseZenMetadataResponse 产出同构。 */
-  const parseMetadataEntry = (raw: unknown): ZenModelMetadata | undefined => {
+  /** 解析单模型元数据条目（磁盘读回用）；字段与 parseOpencodeZenMetadataResponse 产出同构。 */
+  const parseMetadataEntry = (raw: unknown): OpencodeZenModelMetadata | undefined => {
     const entry = record(raw);
     if (!entry) return;
     return {
@@ -406,7 +406,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
         if (metadataRaw && typeof metadataRaw.fetched_at === "number") {
           const models = record(metadataRaw.models);
           if (models) {
-            const parsedModels: Record<string, ZenModelMetadata> = {};
+            const parsedModels: Record<string, OpencodeZenModelMetadata> = {};
             for (const [id, raw] of Object.entries(models)) {
               const entry = parseMetadataEntry(raw);
               if (entry) parsedModels[id] = entry;
@@ -416,7 +416,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
         }
         const verdictsRaw = record(parsed.probe_verdicts);
         if (verdictsRaw) {
-          const verdicts: Record<string, ZenProbeVerdictEntry> = {};
+          const verdicts: Record<string, OpencodeZenProbeVerdictEntry> = {};
           for (const [id, raw] of Object.entries(verdictsRaw)) {
             const entry = record(raw);
             if (!entry || typeof entry.at !== "number") continue;
@@ -463,7 +463,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
     if (current && now() - current.fetchedAt < metadataTtlMs) return;
     if (metadataRetryAt > now()) return;
     try {
-      const parsed = parseZenMetadataResponse(await options.fetchMetadata());
+      const parsed = parseOpencodeZenMetadataResponse(await options.fetchMetadata());
       if (parsed) value.metadata = { fetchedAt: now(), models: parsed };
       metadataRetryAt = 0;
     } catch {
@@ -511,7 +511,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
     const cooling = !force && retryAt > now();
     if (cooling || !(force || !cached || now() - cached.fetchedAt >= ttlMs)) return;
     try {
-      const dynamicIds = parseZenModelsResponse(await options.fetchCatalog());
+      const dynamicIds = parseOpencodeZenModelsResponse(await options.fetchCatalog());
       const previous = cached;
       const value: CachedCatalog = {
         fetchedAt: now(),
@@ -557,7 +557,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
       return cached?.models ?? [];
     },
     /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat。 */
-    protocol(id: string): ZenModelProtocol {
+    protocol(id: string): OpencodeZenModelProtocol {
       const models = cached?.metadata?.models;
       const meta = models && Object.hasOwn(models, id) ? models[id] : undefined;
       if (meta) return protocolFromNpm(meta.npm);
@@ -566,7 +566,7 @@ export function createZenCatalogStore(options: ZenCatalogStoreOptions) {
     },
     /**
      * 模型上游 baseURL：元数据 provider.api 确认（全 provider 共享一份），元数据缺失或
-     * 非 http(s) 时返回 undefined，由转发层回退 ZEN_DEFAULT_ENDPOINT。
+     * 非 http(s) 时返回 undefined，由转发层回退 OPENCODE_ZEN_DEFAULT_ENDPOINT。
      */
     endpoint(id: string): string | undefined {
       return cached?.metadata?.models?.[id]?.api;

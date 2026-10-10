@@ -84,9 +84,11 @@ test("parseExcludedModels trims, drops blanks, dedupes case-insensitively, and r
   assert.deepEqual(parseExcludedModels([
     "qoder-cn/qoder-*", "zcode/glm*", "zcode*/glm-5.3",
     "codebuddy-*/gpt-4o", "workbuddy-*/gpt-4o", "qoder-*/qwen-3.8-flash",
+    "opencode-zen/grok-code",
   ]), [
     "qoder-cn/qoder-*", "zcode/glm*", "zcode*/glm-5.3",
     "codebuddy-*/gpt-4o", "workbuddy-*/gpt-4o", "qoder-*/qwen-3.8-flash",
+    "opencode-zen/grok-code",
   ]);
   assert.throws(() => parseExcludedModels(["*"]), /would exclude every model/);
   assert.throws(() => parseExcludedModels(["agy/x", "***"]), /would exclude every model/);
@@ -128,6 +130,7 @@ test("the exclusion scope follows the authoritative adapter prefixes", () => {
   assert.equal(isLocalAdapterModel("qoder-cn/qoder-code"), true);
   assert.equal(isLocalAdapterModel("qoder/qoder-code"), true);
   assert.equal(isLocalAdapterModel("agy/gemini-2.5-flash"), true);
+  assert.equal(isLocalAdapterModel("opencode-zen/grok-code"), true);
   assert.equal(isLocalAdapterModel("cliproxy/gamma"), false);
   assert.equal(isLocalAdapterModel("gpt-native"), false);
   // 规则必须带完整前缀：固定前缀按权威清单，zcode 家族通配（zcode*/）与动态 provider
@@ -141,6 +144,7 @@ test("the exclusion scope follows the authoritative adapter prefixes", () => {
   assert.equal(isLocalAdapterExclusionPattern("zcode-myprovider/glm"), true);
   assert.equal(isLocalAdapterExclusionPattern("codebuddy/gpt-4o"), true);
   assert.equal(isLocalAdapterExclusionPattern("agy/gemini-2.5-flash"), true);
+  assert.equal(isLocalAdapterExclusionPattern("opencode-zen/grok-code"), true);
   assert.equal(isLocalAdapterExclusionPattern("qoder-cn/qoder-*"), true);
   assert.equal(isLocalAdapterExclusionPattern("zcode-*"), false);
   assert.equal(isLocalAdapterExclusionPattern("cliproxy/alpha"), false);
@@ -153,22 +157,24 @@ test("excluded model groups normalize to one box per user-visible product", () =
   assert.equal(groups.length, 5);
   // 每组一个产品级家族通配；回显识别该产品的全部前缀（套餐档、cn/intl 地域、旧前缀）。
   assert.deepEqual(groups[0], {
-    key: "zcode", endpoint: "zcode", prefix: "zcode*/",
+    key: "zcode", endpoint: "zcode", prefixes: ["zcode*/"],
     matchPrefixes: ["zcode/", "zcode-individual-coding-plan/", "zcode-team-coding-plan/", "zcode-start-plan/", "zcode*/"],
   });
+  // CodeBuddy/WorkBuddy 同框：保存时每条目同时补两个产品的家族通配前缀。
   assert.deepEqual(groups[1], {
-    key: "codebuddy", endpoint: "codebuddy", prefix: "codebuddy-*/",
-    matchPrefixes: ["codebuddy-intl/", "codebuddy-cn/", "codebuddy/", "codebuddy-*/"],
+    key: "codebuddy", endpoint: "codebuddy", prefixes: ["codebuddy-*/", "workbuddy-*/"],
+    matchPrefixes: [
+      "workbuddy-intl/", "workbuddy-cn/", "codebuddy-intl/", "codebuddy-cn/",
+      "codebuddy/", "codebuddy-*/", "workbuddy/", "workbuddy-*/",
+    ],
   });
   assert.deepEqual(groups[2], {
-    key: "workbuddy", endpoint: "codebuddy", prefix: "workbuddy-*/",
-    matchPrefixes: ["workbuddy-intl/", "workbuddy-cn/", "workbuddy/", "workbuddy-*/"],
-  });
-  assert.deepEqual(groups[3], {
-    key: "qoder", endpoint: "qoder", prefix: "qoder-*/",
+    key: "qoder", endpoint: "qoder", prefixes: ["qoder-*/"],
     matchPrefixes: ["qoder-intl/", "qoder-cn/", "qoder/", "qoder-*/"],
   });
-  assert.deepEqual(groups.at(-1), { key: "agy", endpoint: "agy", prefix: "agy/" });
+  assert.deepEqual(groups.at(-2), { key: "agy", endpoint: "agy", prefixes: ["agy/"] });
+  // Zen 是固定单前缀，无家族通配形态。
+  assert.deepEqual(groups.at(-1), { key: "opencode-zen", endpoint: "opencodeZen", prefixes: ["opencode-zen/"] });
   assert.ok(groups.every((group) => !group.key.includes("upstream") && !group.key.startsWith("cliproxy")));
   // upstream-only 模式同样只有适配器分组（排除在该模式下天然不生效）。
   assert.deepEqual(excludedModelGroupsFor({ ...GROUP_TEST_CONFIG, upstreamOnly: true }), groups);
@@ -186,6 +192,7 @@ test("excluded model groups split full rules into prefix-free entries and keep t
     "qoder-cn/qoder-code-x",
     "qoder-intl/qoder-*",
     "qoder/qoder-code",
+    "opencode-zen/grok-code",
     "cliproxy/alpha",
     "gpt-native",
     "qoder-cn/",
@@ -193,10 +200,10 @@ test("excluded model groups split full rules into prefix-free entries and keep t
   ], groups), {
     entries: {
       zcode: ["glm-5.3", "glm-5.3", "glm-5.3"],
-      codebuddy: ["gpt-4o", "gpt-4o"],
-      workbuddy: ["gpt-4o"],
+      codebuddy: ["gpt-4o", "gpt-4o", "gpt-4o"],
       qoder: ["qoder-code-x", "qoder-*", "qoder-code"],
       agy: [],
+      "opencode-zen": ["grok-code"],
     },
     other: ["cliproxy/alpha", "gpt-native", "qoder-cn/", "zcode-myprovider/glm.3"],
   });
@@ -204,11 +211,12 @@ test("excluded model groups split full rules into prefix-free entries and keep t
 
 test("excluded model groups expand prefix-free entries back into full rules", () => {
   const groups = excludedModelGroupsFor(GROUP_TEST_CONFIG);
-  // 每组保存为产品级家族通配：一条规则覆盖该产品的全部前缀（套餐档、cn/intl、旧前缀）。
+  // 每组保存为产品级家族通配：一条规则覆盖该产品的全部前缀（套餐档、cn/intl、旧前缀）；
+  // CodeBuddy 框按双产品语义展开（codebuddy-*/ 与 workbuddy-*/ 成对保存）；Zen 组是固定前缀直拼。
   assert.deepEqual(expandExcludedModelGroups(
-    { zcode: ["glm-5.3", "  "], codebuddy: ["gpt-4o"], qoder: ["qwen-3.8-flash"] },
+    { zcode: ["glm-5.3", "  "], codebuddy: ["gpt-4o"], qoder: ["qwen-3.8-flash"], "opencode-zen": ["grok-code"] },
     groups,
-  ), ["zcode*/glm-5.3", "codebuddy-*/gpt-4o", "qoder-*/qwen-3.8-flash"]);
+  ), ["zcode*/glm-5.3", "codebuddy-*/gpt-4o", "workbuddy-*/gpt-4o", "qoder-*/qwen-3.8-flash", "opencode-zen/grok-code"]);
   // 地域/套餐前缀分组已不存在：按未知分组拒绝。
   assert.throws(() => expandExcludedModelGroups({ "zcode-team-coding-plan": ["glm-5.3"] }, groups),
     /Unknown excluded model group/);
@@ -220,7 +228,11 @@ test("group expansion rejects bare wildcards, pasted prefixes, slashed entries, 
   const groups = excludedModelGroupsFor(GROUP_TEST_CONFIG);
   assert.throws(() => expandExcludedModelGroups({ agy: ["*"] }, groups), /would exclude every model of this group/);
   assert.throws(() => expandExcludedModelGroups({ agy: ["agy/gemini-2.5-flash"] }, groups), /already carries the agy prefix/);
+  // 合并框粘贴任一产品的完整 ID 都被拒（报错指向所属分组 key）。
+  assert.throws(() => expandExcludedModelGroups({ codebuddy: ["workbuddy-intl/gpt-4o"] }, groups), /already carries the codebuddy prefix/);
+  assert.throws(() => expandExcludedModelGroups({ codebuddy: ["codebuddy-cn/gpt-4o"] }, groups), /already carries the codebuddy prefix/);
   assert.throws(() => expandExcludedModelGroups({ zcode: ["glm/x"] }, groups), /must be a bare model name without/);
+  assert.throws(() => expandExcludedModelGroups({ workbuddy: ["gpt-4o"] }, groups), /Unknown excluded model group/);
   assert.throws(() => expandExcludedModelGroups({ upstream: ["alpha"] }, groups), /Unknown excluded model group/);
   assert.throws(() => expandExcludedModelGroups({ unknown: ["x"] }, groups), /Unknown excluded model group/);
   assert.throws(() => expandExcludedModelGroups({ agy: "gemini-2.5-flash" }, groups), /expects an array/);
@@ -339,6 +351,34 @@ test("collectCompatibleModels can skip upstream models for the exclusion picker"
   try {
     const snapshot = await collectCompatibleModels(fixture.config, {}, { includeUpstream: false });
     assert.deepEqual(snapshot.entries, []);
+    assert.deepEqual(snapshot.failures, []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("collectCompatibleModels includes enabled zen models for the exclusion picker", async () => {
+  const fixture = makeCliFixture();
+  try {
+    // Zen 在排除作用域内：选择器（includeUpstream: false）同样列出已启用的 zen 模型。
+    const opencodeZenDeps: ExcludeModelsDependencies["opencodeZen"] = {
+      cacheDirectory: path.join(fixture.home, "zen-cache"),
+      refreshCatalogOnStart: false,
+      projectId: "a".repeat(40),
+      fetch: (async (url: string | URL | Request) => {
+        if (String(url).endsWith("/zen/v1/models")) {
+          return Response.json({ object: "list", data: [{ id: "exo-free" }, { id: "nemotron-free" }] });
+        }
+        // 元数据端点按不可用处理：目录回退 -free 后缀过滤，两个 id 都可见。
+        throw new Error(`未模拟的 zen 上游调用：${String(url)}`);
+      }) as typeof fetch,
+    };
+    const snapshot = await collectCompatibleModels(
+      { ...fixture.config, opencodeZen: true },
+      { opencodeZen: opencodeZenDeps },
+      { includeUpstream: false },
+    );
+    assert.deepEqual(snapshot.entries.map((model) => model.slug), ["opencode-zen/exo-free", "opencode-zen/nemotron-free"]);
     assert.deepEqual(snapshot.failures, []);
   } finally {
     fixture.cleanup();
@@ -567,14 +607,21 @@ test("web ui config patch expands excluded model groups into prefixed rules", ()
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
       catalogPath: paths.catalogFile, excludedModels: ["agy/gemini-2.5-flash", "zcode-team-coding-plan/glm-5.3"],
     }));
-    // 分组条目补前缀后整组替换；zcode 组保存为家族通配（一条覆盖全部套餐前缀）。
+    // 分组条目补前缀后整组替换；zcode 组保存为家族通配（一条覆盖全部套餐前缀），
+    // CodeBuddy 框双产品前缀成对保存。
     const { applied } = applyWebUiConfigPatch(paths, {
-      excludedModelGroups: { agy: ["gemini-2.5-flash", "  "], qoder: ["qoder-code-x"], zcode: ["glm-5.3"] },
+      excludedModelGroups: {
+        agy: ["gemini-2.5-flash", "  "], qoder: ["qoder-code-x"], zcode: ["glm-5.3"],
+        codebuddy: ["gpt-4o"], "opencode-zen": ["grok-code"],
+      },
     }, false);
     assert.deepEqual(applied, [{
       field: "excludedModels",
       before: ["agy/gemini-2.5-flash", "zcode-team-coding-plan/glm-5.3"],
-      after: ["agy/gemini-2.5-flash", "qoder-*/qoder-code-x", "zcode*/glm-5.3"],
+      after: [
+        "agy/gemini-2.5-flash", "qoder-*/qoder-code-x", "zcode*/glm-5.3",
+        "codebuddy-*/gpt-4o", "workbuddy-*/gpt-4o", "opencode-zen/grok-code",
+      ],
     }]);
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as GatewayConfig;
     assert.deepEqual(saved.excludedModels, applied[0].after);
@@ -582,7 +629,10 @@ test("web ui config patch expands excluded model groups into prefixed rules", ()
     // 值未变化时不写盘也不落审计。
     const before = fs.statSync(paths.gatewayConfig).mtimeMs;
     const again = applyWebUiConfigPatch(paths, {
-      excludedModelGroups: { agy: ["gemini-2.5-flash"], qoder: ["qoder-code-x"], zcode: ["glm-5.3"] },
+      excludedModelGroups: {
+        agy: ["gemini-2.5-flash"], qoder: ["qoder-code-x"], zcode: ["glm-5.3"],
+        codebuddy: ["gpt-4o"], "opencode-zen": ["grok-code"],
+      },
     }, false);
     assert.deepEqual(again.applied, []);
     assert.equal(fs.statSync(paths.gatewayConfig).mtimeMs, before);

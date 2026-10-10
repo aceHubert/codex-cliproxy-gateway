@@ -1,11 +1,13 @@
 # 协议转换抽离：共享原语与事件内核，适配器保留特性
 
-状态：待执行（采用无转换 hooks 方案，已明确逐家职责，M0 金样本先行）
+状态：待执行（无转换 hooks；agent 前缀插件与 CLIProxy / NewAPI / 官方 default 路由，M0 金样本先行）
 创建日期：2026-10-09
 
 ## 目标
 
 把 zcode / codebuddy / qoder / agy / opencode-zen 的重复转换原语和 Responses 事件合成机构抽离到 `src/protocols/`。各适配器保留工具声明决策、历史遍历、上游帧消费（feed）及特性执行，通过显式调用共享函数和 sink 复用机制，不向通用转换器注册特性 hooks。以金样本证明现有请求、响应和错误行为不变；为 [OpenAI Chat Completions 端点计划](openai-chat-completions-endpoint.md)提供纯转换原语、事件内核和单跳方向注册表。通用方向转换器仅组合协议规则，不承诺完整表达各适配器特性。
+
+补充目标（2026-10-10）：仅将各 agent 兼容 adapter 作为内建路由插件，使用 register(prefix, fn) 统一派发；gateway 主函数保留公共入口边界与派发，不再逐家硬编码转换分支。CLIProxy、NewAPI 与官方链路不注册前缀，作为 default 提供；default 内部保留代理前缀判定、线程粘性及传输协商，详见 §6。本次仅补充方案，未启动源码迁移。
 
 ## 范围
 
@@ -17,12 +19,14 @@
   - 五个代理逐家切换（每家独立 commit）：codebuddy → qoder → zcode → agy → opencode-zen。
   - M0 金样本固化测试先行；全程以「金样本不变」为验收标准。
   - 删除确实由共享原语和事件内核取代的代码；保留必要的各家遍历分支。原有净删除行数估算作废，M0 按实际可共享边界重新统计，不以删除行数作为验收目标。
+  - 内建路由插件试验（P0–P2）：前缀注册、adapter 工厂组合、CLIProxy/官方默认路由与 compaction/Responses WebSocket 兼容逻辑迁移；与协议原语抽离分阶段验证。
 - 不包含：
   - chat→各方言的新方向转换器与 Responses SSE→chat 的入口 `encode`——[chat-completions 计划](openai-chat-completions-endpoint.md) M1/M3 基于本内核新增。
   - opencode-zen 的 llm-bridge 流式路径（`handleUniversalStreamRequest`）替换——实测完整，待 chat 计划 M3 产出共享流式转换器覆盖 anthropic/google→chat 后退役（见决策记录）。
-  - 入口协议插件层（路径匹配、`forwardChat`、网关派发）——chat 计划范围。
+  - 新增 Chat 入口协议 encode/decode 与 forwardChat 能力——chat 计划范围；§6 只插件化现有路由，不提前实现新协议支持。
   - 各代理传输层与凭据：qoder envelope/COSY 签名/排队恢复、agy CloudCodeAssist wrapper、codebuddy 头构造、zcode client-signing 与凭据槽位——布局与传输留在 adapter。
   - 配置项与 `schemas/gateway-config.schema.json` 变更（零配置面变化）。
+  - 第三方插件下载、动态代码加载、插件市场、独立沙箱或插件配置格式；本轮插件仅为仓库内模块。
 
 ## 背景
 
@@ -224,8 +228,89 @@ feed 保留在各 adapter 内，按上游协议直接调用 sink，自持上游 
 
 本计划完成后，chat 计划 M1 的 chat↔Responses 与 M3 的 chat↔Anthropic/chat↔Gemini 按同一注册表新增通用方向，复用纯转换原语、事件内核、外壳与 usage（并新增反向 chat 事件合成器）。需要服务器工具/reasoning 专属语义的入口仍由 adapter 编排，不能因为注册了协议方向而绕过各家的历史/feed。M4 同步调整 chat 计划的消费边界，不能再承诺整套厂商转换器无需特性处理即可直接复用。
 
+### 6. 内建 agent 路由插件试验：register(prefix, fn)
+
+这是路由注册，不是转换 hooks。插件 handler 拥有本通道的校验、转换、传输和响应生成，内部显式调用共享原语；注册器只选择 handler。协议方向注册表与模型前缀注册表分别维护，不能根据前缀直接推定目标协议。
+
+概念调用如下（名称为拟议 API，不表示仓库已实现）：
+
+```ts
+registry.register("agy/", agyPlugin.handle);
+registry.register("opencode-zen/", zenPlugin.handle);
+registry.setDefault(defaultUpstreamRouter.handle);
+```
+
+register 的范围仅为 ZCode、CodeBuddy/WorkBuddy、Qoder、AGY、OpenCode Zen 等 agent 兼容模块。CLIProxy、NewAPI 与 official 均不进入该注册表，不新增 newapi/、official/ 或 offical/ 模型前缀。未命中 agent 处理器的请求进入 defaultUpstreamRouter；它在内部根据代理配置前缀、upstreamOnly、hint 与粘性选择第三方代理或官方处理器。第三方代理由 upstreamType 选择 CLIProxy 或 NewAPI，现有 cliproxy/（或 config.prefix）由 default 解释，不意味着将所有 default 请求强制发给第三方代理。
+
+**NewAPI 与 CLIProxy 共用默认转发逻辑：** 当前 gateway 的普通 HTTP、compaction 与 Responses WS 目标/帧路径不按 upstreamType 分叉；route.kind 名称仍为 cliproxy，实际目标由 upstreamBaseUrl 决定。因此下文 CPA/CLIProxy 转发侧的前缀、认证、粘性、压缩与协商规则同样覆盖 NewAPI，不仅限 CLIProxy 产品。保留现有配置与 route.kind，不为了插件化新增第二份 NewAPI 转发器。WebSocket 是否成功仍由实际上游能力决定，保留拨号失败与降级行为。
+
+派发顺序：公共端点/安全与传输边界 → agent 前缀匹配与入口能力判断 → 已处理则返回，否则按旧规则进入 default → default 选择 CPA/官方并执行对应兼容处理。agent 的错误与拒绝属于已处理结果，不退回 default；Realtime 保留独立端点分流。CPA 与本地 agent 前缀冲突的旧优先级需在 P0 固化，不能用默认注册顺序改变它。
+
+#### 6.1 公共边界、注册契约与模块职责
+
+- gateway：健康检查、mountPath 与 /ui 本地边界、公共请求上下文、模型排除拦截、目录端点与日志外壳、HTTP/升级传输入口。业务转换归 handler；模型排除保持仅针对现有本地兼容族，不扩大到 CPA/官方模型。
+- 路由注册器：匹配模型前缀、调用 handler、调用默认处理器，不读取凭据、不生成 compaction、不识别厂商事件。相同匹配前缀重复注册在启动时报错；重叠前缀按最长匹配确定，P0 固化优先级。
+- 插件组合模块：仅创建 agent 实例并注册别名/前缀，统一提供其 catalog 与 close 生命周期；gateway 不再维护五组 request WeakSet、close 调用和目录参数。catalog/日志归属元数据由 agent 插件提供，CPA/官方目录由 default 模块提供，两者沿用现有合并规则，不通过模型前缀注册表达目录操作。
+- 默认路由模块：内部保留 CPA 配置前缀识别、hint、线程/父线程/image-turn 粘性与 upstreamOnly 的既有判定，并持有 CPA/官方处理器；不借助 register 进行这次选择。CPA 的 HTTP 与 WebSocket 共用该实例的线程/turn 状态及容量限制；不得建立两个状态副本。
+- default 内部的 CLIProxy/官方处理器：拥有上游 URL 构造、各自认证边界、body 改写或透传及响应流。共用纯传输辅助函数；不让官方先进入 CPA 改写再恢复。可以拆成独立内部模块，但不将它们包装成 agent 前缀插件。
+
+register(prefix, fn) 的 fn 接收完整路由上下文，不能只有剥前缀后的 model 字符串：至少包含 Request、mountPath 内路径/方法、完整模型名、命中前缀、路由来源及取消信号。需要 JSON 时通过请求级缓存惰性读取，原始字节始终可用于透传；前缀匹配不修改 model/body/headers，由插件自行解析模型。body model 与 routing hint 的优先级按现有入口分别保持，不能为统一接口而改变冲突结果。
+
+插件对支持的入口返回已处理结果；只有尚未消费请求、且旧路由本来允许通用透传的入口才可显式 decline。转换失败、凭据错误、排除/拒绝及已消费的流不得通过 decline 重试到默认上游，避免重复请求和认证跨界。本地适配入口无效 JSON 的通道错误仍依 hint 归属处理，通用解析失败保留原有统一 400，不扩大通道归属规则；已经缓存的正文不得再从 Request 流读取。
+
+前缀注册清单必须包含全部既有 agent 形式：CodeBuddy/WorkBuddy 地域前缀及旧别名；Qoder 地域与无地域形式；ZCode 固定套餐前缀与动态 provider 形式（本地 zcode- 族处理器再验证具体连接）；AGY 与 Zen。agent 注册匹配保持既有大小写行为，CPA 配置前缀当前为精确 startsWith，单独留在 default；不能统一改为小写或改写上游模型 ID。禁用通道、未知动态前缀、旧别名、前缀空模型的结果先纳入 P0，不趁迁移改变当前错误/回退行为。
+
+插件只暴露仓库内既有能力，选择 handler 后仍由插件检查路径、方法与传输；Zen 现有 Chat/Responses 路径及 compact 拒绝，其他本地代理 Responses/compact 路径与 HTTP-only 协商分别保留。当前目录之外的模型请求不能仅因未列入 catalog 就改变旧路由。
+
+旧前缀不全是可用别名：codebuddy/、workbuddy/ 当前用于识别本地族后明确返回 adapter 400；qoder/ 则实际映射国际版。注册这些形式是为了保留各自既有结果，不能统一转换成有效地域前缀。
+
+#### 6.2 CLIProxy / NewAPI 与官方链路：已确认的转换边界
+
+代码核对基线：gateway.ts 的 decideRoute / decideThreadRoute / copyRequestHeaders、HTTP 通用转发和 compaction 分支，以及 Responses WebSocket 帧处理；realtime.ts 的桥接与重连逻辑。它们没有先把官方协议转成 CPA 协议的一套通用双向转换器，而是共用 Responses 入口，包含以下不对称的兼容处理。
+
+| 场景 | 现有行为 | 插件化后的责任 |
+| --- | --- | --- |
+| CLIProxy / NewAPI 普通 HTTP | 去模型与 hint 前缀、重写 JSON model；非 GPT 且无压缩触发时还原 compaction 历史 | 共用第三方代理 handler |
+| CLIProxy / NewAPI 认证 | 移除客户端 Authorization、ChatGPT 账号及其他上游 key 头，注入已配置代理 key；HTTP 与 Responses WS 均覆盖 | 共用代理 HTTP/WS 处理器，key 仍走现有存储分派 |
+| 官方普通 HTTP | 按原始正文与官方认证转发；已有可用 hint 时可不解压/解析 JSON | official handler，不调用通用请求转换器 |
+| 响应 | 普通 body/status/流透传，共用响应头清理；压缩兼容分支才生成新响应 | 各 handler，保持背压与取消 |
+| 无前缀 CPA 请求 | thread、parent-thread 或 image-turn 命中已记忆 CPA 会话，或 upstreamOnly | 默认路由策略调用 CPA handler |
+| GPT 与非 GPT | GPT 判定目前为 model.toLowerCase().startsWith("gpt-")；压缩兼容仅应用于非 GPT CPA 模型 | CPA handler 保留判定，不扩展为全部模型 |
+
+官方透传仍有 hop-by-hop/accept-encoding 等传输头清理，不能宣称所有头逐字节不变。CPA 重序列化后移除 content-encoding；upstreamOnly 的非 Responses 路径恢复原 content-encoding 并透传原字节，Responses/compact 仍进入兼容处理。惰性正文缓存须保留这两个分支，不强制所有请求都先 JSON.parse/JSON.stringify。
+
+**目录拉取仍有区别：** upstreamType=cliproxy 消费上游 Codex 目录；upstreamType=newapi 从 OpenAI /models 列表结合内联快照与规则合成本地 Codex 目录。该分支继续留在 upstream-catalog.ts / catalog.ts，default 提供目录时复用它，不因转发逻辑相同而统一成一种拉取方式。配置缺省类型与缓存/合并/覆盖规则均保持。
+
+**compaction 不能遗漏，也不能全局无条件执行：**
+
+- CPA 非 GPT 的 /responses/compact（v1）与 compaction_trigger（v2）会改发上游 /responses，构造摘要请求、消费 JSON/SSE、校验完成状态与摘要，再生成替换历史或合成 compaction 响应；下一轮 ocx1 历史还原为可读文本。
+- CPA GPT 与官方链路保持原生请求/响应路径，不注入上述摘要转换。ZCode/Qoder/CodeBuddy/AGY 保留各自压缩包装与错误文案；Zen 保留 compact 拒绝。
+- 将现有 build/read/synthetic/rewrite 等纯压缩辅助函数移入独立 compat/compaction 模块；由适用插件显式调用，网关不做转换中间件，不复用厂商 hooks。迁移时保留裁剪字段、图片处理、触发条件、原生 compaction 输出优先级与失败行为。
+
+#### 6.3 WebSocket 与 Realtime 的例外
+
+只提供返回 Response 的 HTTP fn 不足以完成插件化。register 可保留同一入口，但 dispatch 结果需区分普通 HTTP 响应与升级/桥接会话；传输生命周期由类型化契约表达，具体签名由 P0 对现有桥接测试确定。不能把 stream/upgrade 的所有权隐藏在 Response 转换回调里。
+
+- Responses WS 握手先依据 hint/粘性选择 CPA 或官方；连接内帧可能换模型，不能只在握手时匹配一次。官方连接遇 CPA 模型会 pin CPA 会话并触发重连，CPA 帧去前缀；turn 记录与 image-turn 后续 HTTP 路由共享状态。
+- CPA 非 GPT 的触发帧可能转为 HTTP/SSE 摘要请求，再把合成事件发回 WS；普通 compaction 历史帧需重写。此逻辑归 CPA 桥接会话，不能因 HTTP handler 迁移而丢失。
+- 本地 HTTP-only 插件保留 426/降级协商及 marker，CPA 拨号失败也保留 426 路径；网关外的 bridge 生命周期与握手取消仍保留。P1 仅试验 HTTP，未迁移的 WS 路径明确留在原实现；P2 后才可验收 gateway 无厂商分支。
+- HTTP-only 握手目前有外层 startGateway 分流与 handleCore 返回 426 两段边界；responsesWebSocketTarget 自身的排除名单并不覆盖全部本地族。P2 必须先由通用传输入口识别插件传输能力再进入桥接，不能仅移植该函数内的名单，导致 Qoder/Zen 绕过协商。
+- Realtime calls、/live、sideband 与保留路径不一定携带模型前缀，继续作为独立端点/传输服务先于普通默认路由处理，不通过 official/ 前缀模拟；认证与 provider mode 保持 realtime.ts 自己的规则，不套用普通 CPA 头替换。现有未实现官方 Realtime 路径的响应保持。
+
+#### 6.4 插件试验分工与验收
+
+- **注册器/集成 agent**：P0 建路由行为矩阵与类型；P1 实现注册/默认路由/请求缓存/插件组合，在 gateway 删除已迁移的 HTTP 厂商分支；P2 迁移升级契约、目录/日志归属与 close，统一验证既有公共边界。公共注册器与 gateway 只由该负责人编辑。
+- **default 模块负责人**：提取 CLIProxy/NewAPI 共用代理 handler、官方 handler 与默认路由状态，保留代理前缀判定/认证/字节透传、压缩分支及 WS 会话；三者均不进入 agent 注册表。保留两种 upstreamType 的目录差异，先比较原始上游请求再迁移，不把代理侧跨厂商协议转换能力复制进网关。
+- **各 adapter agent**：在各家目录提供实例/handle/catalog/close，收回当前 gateway 内的路径判断、compact 包装与通道错误；复用 §4.1 保留的特性，注册全部前缀/别名。CodeBuddy→Qoder 仍按依赖顺序验证。
+- **验收负责人**：固定 hint/body 冲突、禁用/旧别名/动态前缀、重叠前缀、空模型、decline、目录与排除、只读取一次正文、错误归属和 close 清理。HTTP/WS 同时验证 OAuth 不外发 CPA、official 原字节透传、upstreamOnly 两条正文路径、thread/parent/image-turn 粘性，以及 GPT/非 GPT 的 v1/v2/历史/失败/取消。
+- P0–P2 不改配置，不引入外部加载器，不改变新 Chat 协议计划范围。每阶段全量回归；P2 验证后才能将试验标记完成。若试验明确推迟，记录剩余事项与原 WS 分支，不将 HTTP 迁移单独宣称整个插件化完成。
+
 ## 风险
 
+- 风险：仅按前缀匹配使无前缀粘性请求误去官方，或强制解析破坏官方/压缩正文透传。
+  缓解：§6 的默认路由独立于前缀注册，HTTP/WS 共享 CPA 会话状态，惰性读取且保留原字节；P0 固化路由与上游正文矩阵。
+- 风险：HTTP 插件迁移遗漏 compact、WS 逐帧切换、Realtime、目录/日志和 close 生命周期。
+  缓解：P1/P2 分阶段验证；压缩由插件显式调用纯兼容模块；传输与管理职责单独列验收，不把 register(prefix, fn) 当成全部契约。
 - 风险：响应向流式重构（abort/cancel 传播、事件顺序、sequence_number、非流式聚合、zcode 多腿换 reader）引入隐性回归，真实上游不能作为回归主力。
   缓解：M0 金样本固化完整 SSE 逐事件转录（含 sequence_number、取消、错误帧、非流式聚合、多腿换腿点）后才动工；逐家切换、逐家全量测试 + 独立 commit，可按家回滚。
 - 风险：错误类型/文案漂移破坏测试断言与客户端诊断（含 qoder 的 CodeBuddy→Qoder 文案改写链）。
@@ -247,7 +332,10 @@ feed 保留在各 adapter 内，按上游协议直接调用 sink，自持上游 
 2. M1 共享纯原语、事件内核与通用方向组合落地（纯新增）：以现行为为蓝本落实 §2.1 / §3.1 的显式调用契约，定义通用方向支持范围，附 kernel/原语单测；adapter 未切换，全量测试保持绿。
 3. M2 请求向逐家复用原语：按 §4 顺序 1→5、§4.1 分工执行，每家独立 commit + 该家与全量测试通过 + 金样本不变；仅删除被原语取代的代码，保留本地特性遍历。
 4. M3 响应向逐家复用 sink / 外壳：按 §4 顺序 1→4，每家独立 commit + 全量测试通过 + SSE 转录金样本不变；保留各家 feed、Qoder 包装与 ZCode 续跑，只删除被事件内核取代的机构，不预设净删除行数。
-5. M4 收尾：死代码清扫、tech-debt 登记（llm-bridge 退役条件、遗留策略差异）、chat 计划里程碑改写为基于本内核、`bun run check` 全绿、归档计划并写历史记录。
+5. M4 协议抽离收尾：死代码清扫、tech-debt 登记（llm-bridge 退役条件、遗留差异）、chat 计划消费边界改写、`bun run check` 全绿并写实现历史记录；插件试验尚未完成时计划保持 active。
+6. P0 插件试验基线：审计 §6 特殊情况，补齐 HTTP/WS/默认路由金样本，固化注册、惰性正文与传输契约；可与 M0 调研并行，源码仍保持不变。
+7. P1 HTTP 注册派发试验：M1 API 稳定且相关 adapter 已迁移后，先注册一家 HTTP agent adapter，再逐家迁移；通用 CPA/官方流量由独立 default 接管，不注册其前缀。目录/日志生命周期保留桥接，WS 暂用旧路径，逐步全量回归。
+8. P2 插件试验收尾：升级/逐帧路由、共享粘性、目录/日志/close 全部对齐，gateway 不再有厂商转换分支；check 全绿、记录历史与明确债务。M0–M4 与 P0–P2 均完成（或插件试验获明确推迟并留痕）后归档。
 
 ## 验证方式
 
@@ -258,6 +346,8 @@ feed 保留在各 adapter 内，按上游协议直接调用 sink，自持上游 
 - M0 图片与响应样本：base64/远程 URL、工具输出图片、客户端同名工具、多图匹配失败；搜索结果缺失与未知服务器块；识别成功/失败/达到续跑上限，以及执行或换腿期间取消，验证事件序号跨腿连续。
 - M0 Qoder 信封样本：排队后正常推理、内部 DONE 后仍有数据、缺独立 finish、显式错误、重复工具 index、非零 choice；流式/非流式/onComplete 计费字段与错误标签一致性、取消失败终态行为。
 - M0 CodeBuddy / AGY / Zen 组合样本：CodeBuddy pending reasoning 与工具结果图片位置；AGY 签名单独/附着 Part 及后续调用关联；Zen 同义原语复用前后的宽松历史、协议方向矩阵和聚合边界。纯原语测试通过不能替代各家完整请求/响应金样本。
+- P0–P2：test/gateway.test.ts、test/realtime.test.ts、test/model-exclude-gateway.test.ts 及各 adapter gateway 测试；以 §6.4 矩阵补缺口，尤其 CPA 非 GPT compaction 与官方 hint 下压缩原字节透传。仅对文档规划更新不运行源码测试。
+- P0–P2 代理类型矩阵：分别以 upstreamType=cliproxy/newapi 验证共用 default 转发、前缀/认证、粘性、upstreamOnly、压缩与 WS 协商；目录测试分别验证 Codex 目录直读与 OpenAI 列表合成，不能只验证 CLIProxy 类型。
 
 ## 进度记录
 
@@ -265,7 +355,10 @@ feed 保留在各 adapter 内，按上游协议直接调用 sink，自持上游 
 - [ ] M1：`src/protocols/` 纯原语、事件内核与通用方向组合落地（纯新增，无特性 hooks）。
 - [ ] M2：请求向五家复用原语完成，本地遍历保留（codebuddy → qoder → zcode → agy → opencode-zen）。
 - [ ] M3：响应向四家复用 sink / 外壳完成，本地 feed 保留（codebuddy → qoder → zcode → agy）。
-- [ ] M4：死代码清除、tech-debt 登记、chat 计划改写、check 全绿、归档与历史记录。
+- [ ] M4：协议抽离死代码清除、tech-debt 登记、chat 计划改写、check 与历史记录。
+- [ ] P0：前缀插件、CPA/官方默认路由与传输契约基线固化。
+- [ ] P1：HTTP 插件注册派发试验完成，旧 WS 路径明确保留。
+- [ ] P2：WS/粘性/目录/日志/close 迁移完成，整体回归与归档。
 
 ## 决策记录
 
@@ -277,3 +370,6 @@ feed 保留在各 adapter 内，按上游协议直接调用 sink，自持上游 
 - 2026-10-09：先 M0 金样本后动工。理由：真实上游低频使用约束下，特征化测试是唯一可持续的行为不变验收手段；所有后续「逐字节一致」承诺都以 M0 固化的样本为准绳。
 - 2026-10-09（早期方案，已被末条决策替代）：曾规划服务器声明/历史与响应扩展 hooks，以及计费 decorateSnapshot；保留分类排除原则，取消全部新增特性 hooks 和扩展注册机制。
 - 2026-10-09：按用户选择采用无转换 hooks 方案。各家保留声明/历史遍历、协议 feed 与内部特性，显式调用共享纯原语与 Responses sink；通用方向注册表不代替完整厂商适配。Qoder 继续复用 CodeBuddy 并保留计费/取消包装，ZCode 在本地处理搜索/图片与多腿续跑，AGY 在本地处理 schema/签名，Zen 仅复用同义原语。新增 §4.1 的逐 agent 工作清单与协作边界，取消旧净删除行数承诺；既有观测/脱敏回调保留，不用作特性注入。
+- 2026-10-10：补充内建 agent 前缀插件试验（§6、P0–P2），采用 register(prefix, fn) 与独立默认路由。核对现有 CPA/官方链路：普通响应没有统一双向协议转换，CPA 仍有模型/认证改写及非 GPT compaction 合成，官方保留原字节透传；线程粘性与 WS 逐帧协商使纯前缀路由不足。业务转换迁入插件，跨请求状态与传输协商独立建模，公共入口边界继续保留；不新增 official/ 前缀、转换 hooks 或外部插件加载机制。
+- 2026-10-10：按用户补充，register 仅用于 agent 兼容模块；取消 CPA 的前缀注册方案，CPA/官方统一作为 default 提供。cliproxy/ 的既有语义保留在 default 内部，与 hint、upstreamOnly、粘性、压缩及 WS 规则一起判定；agent 错误不回退 default。
+- 2026-10-10：补全 NewAPI 范围。CLIProxy/NewAPI 共用 default 的代理转发逻辑，不分别注册、不新增 newapi/ 前缀；保留 upstreamType 在目录拉取/合成中的现有差异，验收覆盖两种类型。文中 CPA 转发侧规则均包括 NewAPI 当前共用路径。

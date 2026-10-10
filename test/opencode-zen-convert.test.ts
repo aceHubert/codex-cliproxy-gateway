@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  aggregateZenResponsesStream,
-  convertZenRequest,
+  aggregateOpencodeZenResponsesStream,
+  convertOpencodeZenRequest,
   responsesToChatBody,
-  translateZenStream,
+  translateOpencodeZenStream,
 } from "../src/opencode/convert.ts";
 
 const encoder = new TextEncoder();
@@ -59,32 +59,32 @@ test("responses → chat 严格转换：instructions、工具历史、custom 工
   assert.deepEqual((tools[1]!.function.parameters.properties as Record<string, unknown>).input, { type: "string" });
 });
 
-test("convertZenRequest：同协议浅拷贝、chat → anthropic max_tokens 修正、chat → responses 结构", () => {
+test("convertOpencodeZenRequest：同协议浅拷贝、chat → anthropic max_tokens 修正、chat → responses 结构", () => {
   const input: Record<string, unknown> = {
     model: "opencode-zen/x",
     messages: [{ role: "system", content: "sys" }, { role: "user", content: "hi" }],
     stream: false,
     max_tokens: 512,
   };
-  const same = convertZenRequest("chat", "chat", input);
+  const same = convertOpencodeZenRequest("chat", "chat", input);
   assert.notEqual(same, input);
   assert.equal(same.max_tokens, 512);
-  const anthropic = convertZenRequest("chat", "anthropic", input);
+  const anthropic = convertOpencodeZenRequest("chat", "anthropic", input);
   assert.equal(anthropic.max_tokens, 512, "llm-bridge 默认 1024 需被客户端值覆盖");
   assert.equal(anthropic.system, "sys");
   assert.ok(Array.isArray(anthropic.messages));
-  const responses = convertZenRequest("chat", "responses", input);
+  const responses = convertOpencodeZenRequest("chat", "responses", input);
   assert.ok(Array.isArray(responses.input));
 });
 
-test("translateZenStream：chat ↔ responses 工具事件双向完整", async () => {
+test("translateOpencodeZenStream：chat ↔ responses 工具事件双向完整", async () => {
   const chatSse = [
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_issue\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"issue\\\":42}\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
     "data: [DONE]\n\n",
   ].join("");
-  const toResponses = await new Response(translateZenStream(streamOf(chatSse), "chat", "responses")).text();
+  const toResponses = await new Response(translateOpencodeZenStream(streamOf(chatSse), "chat", "responses")).text();
   assert.match(toResponses, /response\.function_call_arguments\.delta/);
   assert.match(toResponses, /lookup_issue/);
   assert.match(toResponses, /response\.completed/);
@@ -94,13 +94,13 @@ test("translateZenStream：chat ↔ responses 工具事件双向完整", async (
     "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":0,\"delta\":\"{\\\"issue\\\":42}\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
   ].join("");
-  const toChat = await new Response(translateZenStream(streamOf(responsesSse), "responses", "chat")).text();
+  const toChat = await new Response(translateOpencodeZenStream(streamOf(responsesSse), "responses", "chat")).text();
   assert.match(toChat, /tool_calls/);
   assert.match(toChat, /lookup_issue/);
   assert.match(toChat, /\[DONE\]/);
 });
 
-test("aggregateZenResponsesStream：文本、函数调用与 usage 聚合为完整 response", async () => {
+test("aggregateOpencodeZenResponsesStream：文本、函数调用与 usage 聚合为完整 response", async () => {
   const sse = [
     "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"created_at\":123,\"status\":\"in_progress\",\"model\":\"muse-spark-1.3-contributor-free\"}}\n\n",
     "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"i1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
@@ -110,7 +110,7 @@ test("aggregateZenResponsesStream：文本、函数调用与 usage 聚合为完�
     "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"{\\\"issue\\\":9}\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"created_at\":123,\"status\":\"completed\",\"model\":\"muse-spark-1.3-contributor-free\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7}}}\n\n",
   ].join("");
-  const result = await aggregateZenResponsesStream(streamOf(sse));
+  const result = await aggregateOpencodeZenResponsesStream(streamOf(sse));
   assert.equal(result.id, "r1");
   assert.equal(result.object, "response");
   assert.equal(result.status, "completed");

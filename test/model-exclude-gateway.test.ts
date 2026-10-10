@@ -190,6 +190,90 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
   }
 });
 
+/* ---------------- opencode-zen：合并过滤与 chat/responses 双入口拦截 ---------------- */
+
+const OPENCODE_ZEN_MODEL = "opencode-zen/nemotron-3.5-lightning-free";
+const OPENCODE_ZEN_EXCLUDED = "opencode-zen/exo-free";
+
+test("zen models honor excludedModels in /v1/models and are blocked on chat and responses", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-zen-"));
+  const config: GatewayConfig = {
+    host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", opencodeZen: true,
+    excludedModels: [OPENCODE_ZEN_EXCLUDED],
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+    catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
+  };
+  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: CPA_MODELS }));
+  const opencodeZenInferCalls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const target = String(input);
+    if (target.includes("official.invalid") && target.includes("/models")) {
+      return Response.json({ models: NATIVE_MODELS });
+    }
+    throw new Error(`未模拟的上游调用：${target}`);
+  }) as typeof fetch;
+  try {
+    const opencodeZenDependencies = {
+      cacheDirectory: directory,
+      refreshCatalogOnStart: false,
+      projectId: "a".repeat(40),
+      fetch: (async (url: string | URL | Request) => {
+        const target = String(url);
+        if (target.endsWith("/zen/v1/models")) {
+          return Response.json({ object: "list", data: [{ id: "nemotron-3.5-lightning-free" }, { id: "exo-free" }] });
+        }
+        if (target.endsWith("/zen/v1/chat/completions")) {
+          opencodeZenInferCalls.push(target);
+          return Response.json({ error: { message: "unexpected inference" } }, { status: 500 });
+        }
+        // 元数据等其余端点按不可用处理：目录回退 -free 后缀过滤，两个 id 都可见。
+        throw new Error(`未模拟的 zen 上游调用：${target}`);
+      }) as typeof fetch,
+    };
+    const handler = createGatewayHandler(config, "fake-cpa-key", "invalid",
+      new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"),
+      undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
+      undefined, undefined, undefined, opencodeZenDependencies);
+    try {
+      // 合并目录过滤：被排除的 zen 条目从 /models 撤下，未排除的 zen 条目保留。
+      const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
+      const models = ((await codex.json()) as Json).models as Json[];
+      assert.deepEqual(models.map((model) => model.slug).sort(), [
+        "cliproxy/gamma", "cliproxy/test-cpa", "gpt-native", OPENCODE_ZEN_MODEL,
+      ]);
+
+      // chat/completions 入口：被排除 zen 模型在转发前 404，不触达上游。
+      const chat = await handler(new Request("http://127.0.0.1:8327/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer inbound-oauth" },
+        body: JSON.stringify({ model: OPENCODE_ZEN_EXCLUDED, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      assert.equal(chat.status, 404);
+      assert.equal(chat.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+
+      // responses 入口：同样拦截。
+      const responses = await handler(responsesRequest(OPENCODE_ZEN_EXCLUDED));
+      assert.equal(responses.status, 404);
+      assert.equal(responses.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+      assert.equal(opencodeZenInferCalls.length, 0);
+
+      // 未被排除的 zen 模型不受影响：chat/completions 正常进入 Zen 转发。
+      await handler(new Request("http://127.0.0.1:8327/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer inbound-oauth" },
+        body: JSON.stringify({ model: OPENCODE_ZEN_MODEL, messages: [{ role: "user", content: "hi" }] }),
+      }));
+      assert.equal(opencodeZenInferCalls.length, 1);
+    } finally {
+      handler.close();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 /* ---------------- Web UI 配置接口的 excludedModels 读写 ---------------- */
 
 const UI_TOKEN = "ccp_test_token_0123456789abcdef";
@@ -254,12 +338,13 @@ test("web ui config api splits excluded rules into prefix groups and expands the
     const read = await handler(uiRequest("/ui/api/config"));
     assert.equal(read.status, 200);
     const editable = ((await read.json()) as Json).editable as Json;
-    // 分组定义：按用户可感知的产品归一（5 组），全部保存为产品级家族通配。
+    // 分组定义：按用户可感知的产品归一（5 组，CodeBuddy/WorkBuddy 同框），
+    // 全部保存为产品级家族通配（Zen 为固定前缀）。
     const groups = editable.excludedGroups as Json[];
     assert.equal(groups.length, 5);
-    assert.deepEqual(groups.map((group) => group.key), ["zcode", "codebuddy", "workbuddy", "qoder", "agy"]);
+    assert.deepEqual(groups.map((group) => group.key), ["zcode", "codebuddy", "qoder", "agy", "opencode-zen"]);
     assert.deepEqual(editable.excludedEntries, {
-      zcode: ["glm-5.3"], codebuddy: [], workbuddy: [], qoder: ["qoder-code"], agy: [],
+      zcode: ["glm-5.3"], codebuddy: [], qoder: ["qoder-code"], agy: [], "opencode-zen": [],
     });
 
     // 保存：分组条目由服务端补前缀，整组替换 excludedModels（产品级家族通配）。

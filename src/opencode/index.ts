@@ -7,23 +7,23 @@ import {
   type SessionBindingCache,
 } from "./session.ts";
 import {
-  buildZenUpstreamHeaders,
-  createZenProjectId,
-  injectZenFingerprintBody,
+  buildOpencodeZenUpstreamHeaders,
+  createOpencodeZenProjectId,
+  injectOpencodeZenFingerprintBody,
 } from "./fingerprint.ts";
-import { aggregateZenStreamToCompletion } from "./response.ts";
+import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
 import {
   OPENCODE_ZEN_PREFIX,
-  classifyZenProbeSignal,
-  createZenCatalogStore,
-  isZenModel,
-  mergeZenCatalog,
-  zenUpstreamModel,
+  classifyOpencodeZenProbeSignal,
+  createOpencodeZenCatalogStore,
+  isOpencodeZenModel,
+  mergeOpencodeZenCatalog,
+  opencodeZenUpstreamModel,
 } from "./catalog.ts";
-import type { ZenModelProtocol, ZenProbeResult } from "./catalog.ts";
-import { aggregateZenResponsesStream, convertZenRequest, translateZenStream } from "./convert.ts";
-import { createZenUserAgentStore } from "./user-agent.ts";
-import type { ZenUserAgentStore } from "./user-agent.ts";
+import type { OpencodeZenModelProtocol, OpencodeZenProbeResult } from "./catalog.ts";
+import { aggregateOpencodeZenResponsesStream, convertOpencodeZenRequest, translateOpencodeZenStream } from "./convert.ts";
+import { createOpencodeZenUserAgentStore } from "./user-agent.ts";
+import type { OpencodeZenUserAgentStore } from "./user-agent.ts";
 
 
 import { localTime, logExchange, logGroupFromPath, requestLogDir } from "../request-log.ts";
@@ -43,15 +43,15 @@ import type { GatewayConfig, ModelCatalog, ProcessLogTarget } from "../types.ts"
  */
 
 
-export const ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1";
-export const ZEN_PUBLIC_API_KEY = "public";
+export const OPENCODE_ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1";
+export const OPENCODE_ZEN_PUBLIC_API_KEY = "public";
 /** OpenCode 官方模型元数据（客户端同源数据）：含每模型端点协议（provider.npm）与 deprecated 标记。 */
-export const ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
+export const OPENCODE_ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
 
 /** 免费目录轮换节奏慢，按 10 分钟对齐目录 TTL 定时刷新。 */
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 600_000;
 
-export interface ZenDependencies {
+export interface OpencodeZenDependencies {
   /** 上游端点覆盖；缺省 https://opencode.ai/zen/v1。 */
   endpoint?: string;
   /** 自定义鉴权 key；缺省读环境变量 OPENCODE_API_KEY，再缺省 "public"。 */
@@ -65,9 +65,9 @@ export interface ZenDependencies {
   /** models.opencode.ai 元数据拉取覆盖（测试注入）；缺省走真实网络。 */
   fetchMetadata?: () => Promise<unknown>;
   /** 无元数据模型的多端点探针覆盖（测试注入）；缺省用指纹请求真实探测。 */
-  probeModel?: (id: string) => Promise<ZenProbeResult>;
+  probeModel?: (id: string) => Promise<OpencodeZenProbeResult>;
   /** 客户端 UA 版本获取覆盖（测试注入）；缺省按 npm dist-tag 拉取并回退指纹快照。 */
-  userAgentStore?: ZenUserAgentStore;
+  userAgentStore?: OpencodeZenUserAgentStore;
 
 
   catalogRefreshIntervalMs?: number;
@@ -79,15 +79,15 @@ export interface ZenDependencies {
   processLog?: ProcessLogTarget;
 }
 
-export function zenEnabled(config: GatewayConfig): boolean {
+export function opencodeZenEnabled(config: GatewayConfig): boolean {
   return config.opencodeZen === true && config.upstreamOnly !== true;
 }
 
-export function validateZenConfig(config: GatewayConfig): void {
+export function validateOpencodeZenConfig(config: GatewayConfig): void {
   if (config.opencodeZen !== undefined && typeof config.opencodeZen !== "boolean") {
     throw new Error("opencodeZen 必须为 boolean");
   }
-  if (!zenEnabled(config)) return;
+  if (!opencodeZenEnabled(config)) return;
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 opencodeZen 时网关只能监听环回地址");
@@ -97,17 +97,17 @@ export function validateZenConfig(config: GatewayConfig): void {
   }
 }
 
-export function zenError(status: number, message: string, type = "invalid_request_error"): Response {
+export function opencodeZenError(status: number, message: string, type = "invalid_request_error"): Response {
   return Response.json({ error: { type, message } }, { status });
 }
 
 /** 只输出预定义分类 + 上游原始错误文本；Zen 请求不携带用户凭据，错误详情可安全透出。 */
-export function normalizeZenUpstreamError(status: number, body: string): { status: number; type: string; message: string } {
+export function normalizeOpencodeZenUpstreamError(status: number, body: string): { status: number; type: string; message: string } {
   const text = body.toLowerCase();
   const upstreamMessage = extractUpstreamMessage(body);
   // 区域限制先于门禁判定：上游对地区不可用的模型同样返回 403，但详情是
   // "not available in your country" 而非 FreeTierError——误报成指纹失效会把
-  // 用户引向错误的修复方向（探针分类 classifyZenProbeSignal 同样把它视为被服务）。
+  // 用户引向错误的修复方向（探针分类 classifyOpencodeZenProbeSignal 同样把它视为被服务）。
   if (status === 403 && (text.includes("region") || text.includes("country") || text.includes("not available in your"))) {
     return {
       status: 403,
@@ -165,12 +165,12 @@ function extractUpstreamMessage(body: string): string {
   }
 }
 
-function resolveApiKey(dependencies: ZenDependencies): string {
-  return dependencies.apiKey ?? process.env.OPENCODE_API_KEY ?? ZEN_PUBLIC_API_KEY;
+function resolveApiKey(dependencies: OpencodeZenDependencies): string {
+  return dependencies.apiKey ?? process.env.OPENCODE_API_KEY ?? OPENCODE_ZEN_PUBLIC_API_KEY;
 }
 
 /** 模型端点 URL：google 走 per-model 路径 + SSE 流式后缀（对齐官方 AI SDK 构造）。 */
-function zenProtocolUrl(baseUrl: string, protocol: ZenModelProtocol, model: string): string {
+function opencodeZenProtocolUrl(baseUrl: string, protocol: OpencodeZenModelProtocol, model: string): string {
   switch (protocol) {
     case "chat": return `${baseUrl}/chat/completions`;
     case "responses": return `${baseUrl}/responses`;
@@ -180,22 +180,22 @@ function zenProtocolUrl(baseUrl: string, protocol: ZenModelProtocol, model: stri
 }
 
 
-export function createZenAdapter(config: GatewayConfig, dependencies: ZenDependencies = {}) {
-  validateZenConfig(config);
-  const enabled = zenEnabled(config);
-  const endpoint = dependencies.endpoint ?? ZEN_DEFAULT_ENDPOINT;
+export function createOpencodeZenAdapter(config: GatewayConfig, dependencies: OpencodeZenDependencies = {}) {
+  validateOpencodeZenConfig(config);
+  const enabled = opencodeZenEnabled(config);
+  const endpoint = dependencies.endpoint ?? OPENCODE_ZEN_DEFAULT_ENDPOINT;
   const baseUrl = endpoint.replace(/\/+$/, "");
   const fetchImpl = dependencies.fetch ?? fetch;
-  const projectId = dependencies.projectId ?? createZenProjectId(os.hostname());
+  const projectId = dependencies.projectId ?? createOpencodeZenProjectId(os.hostname());
   const sessionResolver = createOpenCodeSessionResolver(
     dependencies.sessionCache ?? createSessionBindingCache(),
   );
 
   /** UA 版本动态获取：转发与探测统一读 current()，失败静默回退指纹快照。 */
-  const userAgent = dependencies.userAgentStore ?? createZenUserAgentStore({ fetch: fetchImpl });
+  const userAgent = dependencies.userAgentStore ?? createOpencodeZenUserAgentStore({ fetch: fetchImpl });
   /** 转发/探测统一用同一套指纹标头（含当前 UA），避免 UA 漂移只修一半。 */
-  const zenHeaders = (session: string): Record<string, string> =>
-    buildZenUpstreamHeaders(session, resolveApiKey(dependencies), projectId, userAgent.current());
+  const opencodeZenHeaders = (session: string): Record<string, string> =>
+    buildOpencodeZenUpstreamHeaders(session, resolveApiKey(dependencies), projectId, userAgent.current());
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
     dir: requestLogDir(config),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
@@ -204,7 +204,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
   const fetchModels = async (): Promise<unknown> => {
     // 目录端点目前不校验指纹，但完整标头零成本且能免疫未来收紧。
     const session = sessionResolver.resolve(new Headers());
-    const headers = zenHeaders(session);
+    const headers = opencodeZenHeaders(session);
     headers.accept = "application/json";
     const response = await fetchImpl(`${baseUrl}/models`, { method: "GET", headers, signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`zen /models returned HTTP ${response.status}`);
@@ -213,9 +213,9 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
   // 元数据与探针都复用与转发一致的指纹标头：与真实客户端流量同形态，门禁行为一致。
   const fetchMetadata = dependencies.fetchMetadata ?? (async (): Promise<unknown> => {
     const session = sessionResolver.resolve(new Headers());
-    const headers = zenHeaders(session);
+    const headers = opencodeZenHeaders(session);
     headers.accept = "application/json";
-    const response = await fetchImpl(ZEN_METADATA_URL, { method: "GET", headers, signal: AbortSignal.timeout(60_000) });
+    const response = await fetchImpl(OPENCODE_ZEN_METADATA_URL, { method: "GET", headers, signal: AbortSignal.timeout(60_000) });
     if (!response.ok) throw new Error(`zen metadata returned HTTP ${response.status}`);
     return await response.json();
   });
@@ -224,14 +224,14 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
    * 协议；401/404（模型不存在或需账号）直接 drop；第一阶梯出现 FreeTierError 视为
    * 指纹全局异常、保守保留为 chat；全阶梯无信号才 drop（如 systemone 的 jev）。
    */
-  const probeModel = dependencies.probeModel ?? (async (id: string): Promise<ZenProbeResult> => {
+  const probeModel = dependencies.probeModel ?? (async (id: string): Promise<OpencodeZenProbeResult> => {
     const probePlain = async (
       path: string,
       body: Record<string, unknown>,
       extraHeaders: Record<string, string> = {},
     ): Promise<Response> => {
       const session = sessionResolver.resolve(new Headers());
-      const headers = { ...zenHeaders(session), ...extraHeaders };
+      const headers = { ...opencodeZenHeaders(session), ...extraHeaders };
       return fetchImpl(`${baseUrl}${path}`, {
         method: "POST",
         headers,
@@ -239,11 +239,11 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         signal: AbortSignal.timeout(30_000),
       });
     };
-    const steps: Array<[ZenModelProtocol, () => Promise<Response>]> = [
+    const steps: Array<[OpencodeZenModelProtocol, () => Promise<Response>]> = [
       ["chat", async () => {
         const session = sessionResolver.resolve(new Headers());
-        const headers = zenHeaders(session);
-        const { body } = injectZenFingerprintBody(
+        const headers = opencodeZenHeaders(session);
+        const { body } = injectOpencodeZenFingerprintBody(
           { model: id, messages: [{ role: "user", content: "hi" }], stream: true, max_tokens: 1 },
           session,
         );
@@ -268,7 +268,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         return protocol;
       }
       const text = await response.text().catch(() => "");
-      const signal = classifyZenProbeSignal(response.status, text);
+      const signal = classifyOpencodeZenProbeSignal(response.status, text);
       if (signal === "served") return protocol;
       if (signal === "offline") return "drop";
       if (signal === "gate" && index === 0) return "chat"; // 指纹/门禁全局异常：保守不过滤。
@@ -278,7 +278,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
 
 
   const store = enabled
-    ? createZenCatalogStore({
+    ? createOpencodeZenCatalogStore({
       cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
       fetchCatalog: fetchModels,
       fetchMetadata,
@@ -308,7 +308,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
     async catalog(): Promise<ModelCatalog> {
       if (!store || closed) return { models: [] };
       try {
-        // 系统提示词已在 buildZenCatalog 合成时替换（含 model_messages 模板），缓存即成品；
+        // 系统提示词已在 buildOpencodeZenCatalog 合成时替换（含 model_messages 模板），缓存即成品；
         // 转发路仍保留门禁模板注入，已含模板时不重复注入。
         return { models: await store.catalog() };
       } catch {
@@ -342,17 +342,17 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         }
       };
       const fail = (status: number, message: string, type?: string) => {
-        const response = zenError(status, message, type);
+        const response = opencodeZenError(status, message, type);
         log(status, JSON.stringify({ error: { type, message } }), response.headers);
         return response;
       };
       if (!enabled || closed) return fail(503, "OpenCode Zen 入口未启用或网关已关闭", "configuration_error");
-      // isZenModel 大小写不敏感而目录 slug 用小写前缀：OPENCODE-ZEN/x 归一后再剥前缀。
+      // isOpencodeZenModel 大小写不敏感而目录 slug 用小写前缀：OPENCODE-ZEN/x 归一后再剥前缀。
       const rawModel = typeof input.model === "string" ? input.model : "";
-      const normalized = isZenModel(rawModel)
+      const normalized = isOpencodeZenModel(rawModel)
         ? rawModel.slice(0, OPENCODE_ZEN_PREFIX.length).toLowerCase() + rawModel.slice(OPENCODE_ZEN_PREFIX.length)
         : rawModel;
-      const upstreamModel = zenUpstreamModel(normalized);
+      const upstreamModel = opencodeZenUpstreamModel(normalized);
       if (!upstreamModel) return fail(400, `OpenCode Zen 模型必须使用 ${OPENCODE_ZEN_PREFIX} 前缀`);
       const abort = new AbortController();
       const onAbort = () => abort.abort(request.signal.reason);
@@ -369,14 +369,14 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         if (request.signal.aborted) onAbort();
         abort.signal.throwIfAborted();
         const session = sessionResolver.resolve(request.headers);
-        const headers = zenHeaders(session);
+        const headers = opencodeZenHeaders(session);
         const protocol = store?.protocol(upstreamModel) ?? "chat";
         // 上游 baseURL 由元数据 provider.api 确认（官方同源数据）；元数据缺失回退配置/缺省端点。
         const modelBaseUrl = (store?.endpoint(upstreamModel) ?? endpoint).replace(/\/+$/, "");
         const aggregateForClient = input.stream !== true;
         let upstream: Response;
         if (protocol === "chat") {
-          const { body } = injectZenFingerprintBody({ ...input, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []);
+          const { body } = injectOpencodeZenFingerprintBody({ ...input, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []);
           abort.signal.throwIfAborted();
           upstream = await fetchImpl(`${modelBaseUrl}/chat/completions`, {
             method: "POST",
@@ -386,7 +386,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
           });
         } else {
           // 非 chat 协议模型：请求转成模型协议（chat 为规范中间层），上游流反向转回 chat。
-          const converted = convertZenRequest("chat", protocol, input);
+          const converted = convertOpencodeZenRequest("chat", protocol, input);
           const body: Record<string, unknown> = {
             ...converted,
             model: upstreamModel,
@@ -395,7 +395,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
           };
           const extraHeaders: Record<string, string> = protocol === "anthropic" ? { "anthropic-version": "2023-06-01" } : {};
           abort.signal.throwIfAborted();
-          upstream = await fetchImpl(zenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
+          upstream = await fetchImpl(opencodeZenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
             method: "POST",
             headers: { ...headers, ...extraHeaders },
             body: JSON.stringify(body),
@@ -404,7 +404,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         }
         if (!upstream.ok || !upstream.body) {
           const errorBody = await upstream.text().catch(() => "");
-          const safe = normalizeZenUpstreamError(upstream.status, errorBody);
+          const safe = normalizeOpencodeZenUpstreamError(upstream.status, errorBody);
           logGatewayError(sink?.processLog, {
             requestTime, method: request.method, url: incoming.pathname,
             status: safe.status,
@@ -414,9 +414,9 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
           cleanup();
           return fail(safe.status, safe.message, safe.type);
         }
-        const stream = protocol === "chat" ? upstream.body : translateZenStream(upstream.body, protocol, "chat");
+        const stream = protocol === "chat" ? upstream.body : translateOpencodeZenStream(upstream.body, protocol, "chat");
         if (aggregateForClient) {
-          const completion = await aggregateZenStreamToCompletion(stream);
+          const completion = await aggregateOpencodeZenStreamToCompletion(stream);
           const response = Response.json(completion);
           log(200, JSON.stringify(completion), response.headers);
           cleanup();
@@ -476,16 +476,16 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         }
       };
       const fail = (status: number, message: string, type?: string) => {
-        const response = zenError(status, message, type);
+        const response = opencodeZenError(status, message, type);
         log(status, JSON.stringify({ error: { type, message } }), response.headers);
         return response;
       };
       if (!enabled || closed) return fail(503, "OpenCode Zen 入口未启用或网关已关闭", "configuration_error");
       const rawModel = typeof input.model === "string" ? input.model : "";
-      const normalized = isZenModel(rawModel)
+      const normalized = isOpencodeZenModel(rawModel)
         ? rawModel.slice(0, OPENCODE_ZEN_PREFIX.length).toLowerCase() + rawModel.slice(OPENCODE_ZEN_PREFIX.length)
         : rawModel;
-      const upstreamModel = zenUpstreamModel(normalized);
+      const upstreamModel = opencodeZenUpstreamModel(normalized);
       if (!upstreamModel) return fail(400, `OpenCode Zen 模型必须使用 ${OPENCODE_ZEN_PREFIX} 前缀`);
       const abort = new AbortController();
       const onAbort = () => abort.abort(request.signal.reason);
@@ -502,7 +502,7 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
         if (request.signal.aborted) onAbort();
         abort.signal.throwIfAborted();
         const session = sessionResolver.resolve(request.headers);
-        const headers = zenHeaders(session);
+        const headers = opencodeZenHeaders(session);
         const protocol = store?.protocol(upstreamModel) ?? "chat";
         // 上游 baseURL 由元数据 provider.api 确认（官方同源数据）；元数据缺失回退配置/缺省端点。
         const modelBaseUrl = (store?.endpoint(upstreamModel) ?? endpoint).replace(/\/+$/, "");
@@ -519,23 +519,23 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
             method: "POST", headers, body: JSON.stringify(body), signal: abort.signal,
           });
         } else {
-          const converted = convertZenRequest("responses", protocol, input);
+          const converted = convertOpencodeZenRequest("responses", protocol, input);
           let body: Record<string, unknown>;
           let extraHeaders: Record<string, string> = {};
           if (protocol === "chat") {
             // chat 端点门禁要求官方模板在场：转换后仍走注入（带工具时 agent 模板 + 官方工具集）。
-            body = injectZenFingerprintBody({ ...converted, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
+            body = injectOpencodeZenFingerprintBody({ ...converted, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
           } else {
             body = { ...converted, model: upstreamModel, stream: true };
             if (protocol === "anthropic") extraHeaders = { "anthropic-version": "2023-06-01" };
           }
-          upstream = await fetchImpl(zenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
+          upstream = await fetchImpl(opencodeZenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
             method: "POST", headers: { ...headers, ...extraHeaders }, body: JSON.stringify(body), signal: abort.signal,
           });
         }
         if (!upstream.ok || !upstream.body) {
           const errorBody = await upstream.text().catch(() => "");
-          const safe = normalizeZenUpstreamError(upstream.status, errorBody);
+          const safe = normalizeOpencodeZenUpstreamError(upstream.status, errorBody);
           logGatewayError(sink?.processLog, {
             requestTime, method: request.method, url: incoming.pathname,
             status: safe.status,
@@ -560,9 +560,9 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
           cleanup();
           return new Response(toClient, { status: 200, headers: responseHeaders });
         }
-        const translated = translateZenStream(upstream.body, protocol, "responses");
+        const translated = translateOpencodeZenStream(upstream.body, protocol, "responses");
         if (!clientStreams) {
-          const completion = await aggregateZenResponsesStream(translated);
+          const completion = await aggregateOpencodeZenResponsesStream(translated);
           const response = Response.json(completion);
           log(200, JSON.stringify(completion), response.headers);
           cleanup();
@@ -596,4 +596,4 @@ export function createZenAdapter(config: GatewayConfig, dependencies: ZenDepende
   };
 }
 
-export { isZenModel, mergeZenCatalog };
+export { isOpencodeZenModel, mergeOpencodeZenCatalog };
