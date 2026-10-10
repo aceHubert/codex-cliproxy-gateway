@@ -227,6 +227,7 @@ export function mergeQoderCatalog(base: ModelCatalog, qoder: ModelCatalog): Mode
 }
 
 export interface QoderCatalogStoreOptions {
+  catalogMode?: "dynamic" | "manual";
   region?: QoderRegion;
   cacheDirectory: string;
   credentials: () => Promise<QoderCredentials | null>;
@@ -316,6 +317,7 @@ export function createQoderCatalogStore(options: QoderCatalogStoreOptions) {
     } catch {
       // 切换账号时已清空旧目录，失败只能复用相同身份的最近成功结果。
       retry = { key, at: now() + FAILURE_COOLDOWN_MS };
+      if (force && !cached) throw new Error(`${label} Qoder 模型目录拉取失败，且没有当前账号的可用缓存`);
     }
   }
 
@@ -339,14 +341,31 @@ export function createQoderCatalogStore(options: QoderCatalogStoreOptions) {
 
   return {
     async catalog(): Promise<ModelCatalog> {
-      await refresh(false);
+      if (options.catalogMode !== "manual") await refresh(false);
+      else await refreshing;
       const credential = await options.credentials();
       if (!credential) return { models: [] };
+      if (cached?.key !== cacheKey(credential)) cached = readDisk(cacheKey(credential));
+      if (options.catalogMode === "manual" && !cached) return { models: [] };
       if (!cached || cached.key !== cacheKey(credential)) {
         throw new Error(`${label} Qoder 模型目录拉取失败，且没有当前账号的可用缓存`);
       }
       return { models: structuredClone(cached.models) };
     },
-    async refresh(): Promise<void> { await refresh(true); },
+    async refresh(): Promise<void> {
+      await refresh(true);
+      const credential = await options.credentials();
+      if (credential && cached?.key !== cacheKey(credential)) {
+        throw new Error(`${label} Qoder 登录在目录更新期间发生变化，请重新刷新当前账号的模型目录`);
+      }
+    },
+    async reload(): Promise<ModelCatalog> {
+      await refreshing;
+      // 只接受当前账号的磁盘目录；登录切换不能借用旧账号的模型授权。
+      const credential = await options.credentials();
+      cached = credential ? readDisk(cacheKey(credential)) : undefined;
+      retry = undefined;
+      return { models: structuredClone(cached?.models ?? []) };
+    },
   };
 }

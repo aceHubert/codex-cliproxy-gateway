@@ -117,6 +117,8 @@ export function readRootTomlString(source: string, key: string): string | undefi
   const match = lines[index].match(ASSIGN_RE);
   if (!match) return undefined;
   const raw = match[4].trim();
+  // 多行字符串不能按首行的空字符串处理，避免覆盖用户的非受管目录。
+  if (raw.startsWith('"""') || raw.startsWith("'''")) return undefined;
   const basic = raw.match(/^"(?:[^"\\]|\\.)*"/);
   if (basic) {
     try {

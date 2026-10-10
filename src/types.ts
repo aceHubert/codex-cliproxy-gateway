@@ -57,11 +57,11 @@ export interface GatewayConfig {
    * 审计的可追溯深度；0 表示不限制。
    */
   maxGatewayLogBytes?: number;
-  /** 是否启用 upstream-only 纯转发：目录和请求均只使用第三方上游，模型名不加前缀。 */
+  /** default 是否仅使用第三方上游裸模型 ID；不影响 agent 启用，Codex 使用合并静态目录。 */
   upstreamOnly?: boolean;
   /** 是否启用 ZCode Responses 入口；默认关闭。 */
   zcode?: boolean;
-  /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时按禁用处理。 */
+  /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。 */
   codebuddy?: boolean;
   /**
    * @deprecated 已由 codebuddyAccount 取代。读取时旧值（auto/cn/intl）一次性迁移为
@@ -75,14 +75,13 @@ export interface GatewayConfig {
    * 解析，不落配置。历史哨兵 "default" 读取时归一为 "auto"。
    */
   codebuddyAccount?: string;
-  /** 是否启用 Qoder Responses 入口；默认关闭，自动发现各地域登录。upstreamOnly 为 true 时按禁用处理。 */
+  /** 是否启用 Qoder Responses 入口；默认关闭，自动发现各地域登录。 */
   qoder?: boolean;
-  /** 是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录。upstreamOnly 为 true 时按禁用处理。 */
+  /** 是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录。 */
   agy?: boolean;
   /**
    * 是否启用 OpenCode Zen（opencode-zen/）Chat Completions 入口；默认关闭，经指纹
    * 转发消费 Zen 免费模型（公共鉴权 Bearer public，可选 OPENCODE_API_KEY）。
-   * upstreamOnly 为 true 时按禁用处理。
    */
   opencodeZen?: boolean;
 }

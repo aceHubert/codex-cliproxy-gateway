@@ -13,6 +13,7 @@ import { runCli } from "../src/cli.ts";
 import { instanceMarker, resolvePaths, runWithInstancePaths } from "../src/paths.ts";
 import { requestLogDir } from "../src/request-log.ts";
 import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../src/webui.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "../src/model-state.ts";
 import type { WebUiContext } from "../src/webui.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
 
@@ -109,7 +110,16 @@ async function makeFixture(overrides: {
   fs.writeFileSync(paths.stdoutLog, "--2026-09-13 10:00:00.000-- gateway booted\n");
   const uiHtmlPath = path.join(home, "ui-index.html");
   fs.writeFileSync(uiHtmlPath, "<!doctype html><html><body><div id=\"root\"></div></body></html>");
-  const webUi: WebUiContext = { paths, uiHtmlPath, ...overrides.webUi };
+  const webUi: WebUiContext = { paths, uiHtmlPath,
+    modelDeps: {
+      reloadModels: async () => ({ loaded: true, revision: "fixture" }),
+      wait: async () => {},
+      // 默认只测共享合成与 TOML；agent 网络和真实本机配置通过专门用例注入。
+      updateCodexCatalog: (modelPaths, next, deps, options) => updateCodexModelCatalog(modelPaths, {
+        ...next, zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
+      }, deps, options),
+    },
+    ...overrides.webUi };
   // UI 运行在独立端口上，这里直接构造 UI 处理器（不经模型网关的路由与日志包装）；
   // 测试沿用网关端口 8320 做 Host 校验。
   const handler = (request: Request) => handleWebUiRequest(request, config, webUi, config.port);
@@ -271,6 +281,7 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
     assert.equal(payload.editable.maxRequestLogs, 0);
     // 模型选择已迁入可编辑分组（保存走 /ui/api/upstream/models，同步重建目录文件）。
     assert.deepEqual(payload.editable.selectedModels, ["glm-5.3", "kimi-k2"]);
+    assert.equal(Object.hasOwn(payload.editable, "upstreamOnly"), false);
     assert.equal(payload.readonly.upstreamBaseUrl, "http://127.0.0.1:8317/v1");
     // 路由模式按 upstreamOnly 取反导出，不直接暴露布尔值。
     assert.equal(payload.readonly.upstreamOnly, false);
@@ -280,12 +291,14 @@ test("GET /ui/api/config returns editable and readonly groups", async () => {
   }
 });
 
-test("GET /ui/api/config 的 routerMode 随 upstreamOnly 取反", async () => {
+test("GET /ui/api/config 只读展示 upstreamOnly 与对应路由模式", async () => {
   const { handler, home } = await makeFixture({ config: { upstreamOnly: true } });
   try {
     const payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      editable: Record<string, unknown>;
       readonly: { upstreamOnly: boolean; routerMode: string };
     };
+    assert.equal(Object.hasOwn(payload.editable, "upstreamOnly"), false);
     assert.equal(payload.readonly.upstreamOnly, true);
     assert.equal(payload.readonly.routerMode, "upstream-only");
   } finally {
@@ -372,6 +385,7 @@ test("GET /ui/api/config 手动模式 static 目录激活时追加 model_catalog
   });
   try {
     fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
+    fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "glm-5.3" }] }));
     type ManualPayload = {
       readonly: { manualCodexConfig: {
         staticCatalogActive: boolean;
@@ -382,7 +396,7 @@ test("GET /ui/api/config 手动模式 static 目录激活时追加 model_catalog
     let payload = await (await handler(authedRequest("/ui/api/config"))).json() as ManualPayload;
     assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, true);
     const catalogRow = payload.readonly.manualCodexConfig.keys.find((row) => row.key === "model_catalog_json");
-    assert.equal(catalogRow?.expected, config.catalogPath);
+    assert.equal(catalogRow?.expected, codexCatalogFile(paths));
 
     // 切回 split（upstreamOnly=false）但 config.toml 仍残留该键时提示删除。
     const live = { ...config, upstreamOnly: false } as GatewayConfig;
@@ -403,13 +417,14 @@ test("GET /ui/api/config 手动模式 static 目录当前值遮蔽 URL 查询且
   });
   try {
     fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
+    fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "glm-5.3" }] }));
     const cases = [
       {
         current: "https://catalog.example/models.json?token=catalog-secret&session=query-secret#hash-secret",
         displayed: "https://catalog.example/models.json?…",
         matches: false,
       },
-      { current: config.catalogPath, displayed: config.catalogPath, matches: true },
+      { current: codexCatalogFile(paths), displayed: codexCatalogFile(paths), matches: true },
       { current: "/tmp/other-catalog.json", displayed: "/tmp/other-catalog.json", matches: false },
     ];
     for (const { current, displayed, matches } of cases) {
@@ -427,7 +442,7 @@ test("GET /ui/api/config 手动模式 static 目录当前值遮蔽 URL 查询且
       };
       const row = payload.readonly.manualCodexConfig.keys.find((item) => item.key === "model_catalog_json");
       assert.deepEqual(row, {
-        key: "model_catalog_json", expected: config.catalogPath, current: displayed, matches,
+        key: "model_catalog_json", expected: codexCatalogFile(paths), current: displayed, matches,
       });
     }
   } finally {
@@ -641,6 +656,9 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       { json: { zcode: "yes" }, message: /boolean/ },
       { json: { codebuddy: "on" }, message: /boolean/ },
       { json: { opencodeZen: "on" }, message: /boolean/ },
+      ...[true, false, "on", 1, null, [], {}].map((value) => ({
+        json: { upstreamOnly: value }, message: /Unsupported field: upstreamOnly/,
+      })),
       // 账号选择只在 CLI：UI 提交 codebuddyAccount 一律按不支持字段拒绝。
       { json: { codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }, message: /Unsupported field/ },
       { json: { codebuddyRegion: "cn" }, message: /Unsupported field/ },
@@ -663,6 +681,55 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("Web UI 拒绝修改 upstreamOnly，混合提交也不写文件或触发模型与进程操作", async () => {
+  const calls: string[] = [];
+  const upstream = await startFakeUpstream((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ models: [{ slug: "selected-one" }] }));
+  });
+  const { handler, paths, home } = await makeFixture({
+    config: { upstreamBaseUrl: upstream.url, upstreamOnly: true },
+    webUi: {
+      scheduleRestart: () => { calls.push("gateway"); },
+      upstreamDeps: {
+        readKey: () => { calls.push("read-key"); return ""; },
+        stopCodexServers: async () => { calls.push("codex"); return { scan: "ok", results: [] }; },
+      },
+      modelDeps: {
+        reloadModels: async () => { calls.push("reload"); return { loaded: true, revision: "rejected" }; },
+        updateCodexCatalog: async () => {
+          calls.push("catalog");
+          return { catalogPath: "fixture", count: 1, manual: false, tomlChanged: false };
+        },
+      },
+    },
+  });
+  try {
+    fs.mkdirSync(path.dirname(paths.launchAgent), { recursive: true });
+    fs.writeFileSync(paths.launchAgent, "fixture");
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, pendingRestart: false, config: null }));
+    fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [{ slug: "previous" }] }));
+    fs.writeFileSync(paths.upstreamModelsCacheFile, JSON.stringify({ models: [{ slug: "previous-raw" }] }));
+    fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "previous-static" }] }));
+    fs.writeFileSync(paths.configToml, "model = \"previous\"\n");
+    const files = [paths.gatewayConfig, paths.stateFile, paths.catalogFile, paths.upstreamModelsCacheFile,
+      codexCatalogFile(paths), paths.configToml, paths.stdoutLog];
+    const before = files.map((file) => fs.readFileSync(file, "utf8"));
+    for (const upstreamOnly of [true, false]) {
+      for (const changes of [{}, { requestLogging: false }, { selectedModels: ["selected-one"] },
+        { excludedModels: ["agy/hidden"], selectedModels: ["selected-one"], requestLogging: false }]) {
+        const response = await handler(authedRequest("/ui/api/config", { json: { upstreamOnly, ...changes } }));
+        assert.equal(response.status, 400);
+        const body = await response.json() as { error: { message: string } };
+        assert.match(body.error.message, /Unsupported field: upstreamOnly/);
+        assert.deepEqual(files.map((file) => fs.readFileSync(file, "utf8")), before);
+        assert.deepEqual(calls, []);
+        assert.equal(upstream.requests.length, 0);
+      }
+    }
+  } finally { await upstream.close(); fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test("GET /ui/api/upstream/models fetches the upstream catalog without exposing the key", async () => {
@@ -692,7 +759,7 @@ test("GET /ui/api/upstream/models fetches the upstream catalog without exposing 
     };
     assert.equal(payload.upstreamType, "cliproxy");
     assert.deepEqual(payload.models.map((model) => model.slug), ["glm-5.3", "kimi-k2"]);
-    assert.equal(payload.models[0].displayName, "GLM-5.3");
+    assert.equal(payload.models[0].displayName, "CliProxy/GLM-5.3");
     assert.ok(!JSON.stringify(payload).includes("test-secret-key"), "model list must not carry the API key");
     assert.equal(upstream.requests.length, 1);
     assert.equal(upstream.requests[0].authorization, "Bearer test-secret-key");
@@ -764,7 +831,7 @@ test("POST /ui/api/upstream/models rebuilds the catalog and persists the selecti
   }
 });
 
-test("POST /ui/api/upstream/models requires a non-empty selection and keeps the cache in upstream-only mode", async () => {
+test("POST /ui/api/upstream/models rejects an empty combined static catalog and keeps the cache", async () => {
   const upstream = await startFakeUpstream((_request, response) => {
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ models: [
@@ -783,11 +850,11 @@ test("POST /ui/api/upstream/models requires a non-empty selection and keeps the 
       models: [{ slug: "gpt-5.5" }],
     }, null, 2)}\n`);
 
-    // upstream-only 目录不能为空（网关按非空校验启动），空选择直接拒绝且不触碰上游。
+    // 合成静态目录不能为空；空上游选择不发请求，由共享合成检查 agent 是否补足。
     const empty = await handler(authedRequest("/ui/api/upstream/models", { json: { selectedModels: [] } }));
     assert.equal(empty.status, 400);
     const emptyBody = await empty.json() as { error: { message: string } };
-    assert.match(emptyBody.error.message, /at least one/);
+    assert.match(emptyBody.error.message, /静态模型目录为空/);
     assert.equal(upstream.requests.length, 0);
 
     // 已选 ID 在上游全部消失时，过滤后的目录为空；upstream-only 仍拒绝保存。
@@ -796,7 +863,7 @@ test("POST /ui/api/upstream/models requires a non-empty selection and keeps the 
     }));
     assert.equal(stale.status, 400);
     const staleBody = await stale.json() as { error: { message: string } };
-    assert.match(staleBody.error.message, /at least one/);
+    assert.match(staleBody.error.message, /静态模型目录为空/);
     assert.equal(fs.existsSync(paths.catalogFile), false);
 
     const response = await handler(authedRequest("/ui/api/upstream/models", {
@@ -814,6 +881,155 @@ test("POST /ui/api/upstream/models requires a non-empty selection and keeps the 
     await upstream.close();
     fs.rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("Web UI 空上游选择允许 agent 静态目录，手动配置不写 TOML", async () => {
+  let upstreamReads = 0;
+  let agentFetches = 0;
+  const { handler, paths, home } = await makeFixture({
+    config: { upstreamOnly: true, opencodeZen: true },
+    webUi: {
+      upstreamDeps: { readKey: () => { upstreamReads++; return ""; } },
+      modelDeps: {
+        reloadModels: async () => ({ loaded: true, revision: "agent-only" }),
+        updateCodexCatalog: (modelPaths, config, _deps, options) => updateCodexModelCatalog(modelPaths, config, {
+          opencodeZen: {
+            fetch: async (url) => {
+              if (url.endsWith("/models")) agentFetches++;
+              return Response.json({ data: [{ id: "one-free" }] });
+            },
+            fetchMetadata: async () => ({ opencode: { models: {
+              "one-free": { cost: { input: 0, output: 0 }, provider: { npm: "@ai-sdk/openai-compatible" } },
+            } } }),
+          },
+        }, options),
+      },
+    },
+  });
+  try {
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ codexConfigManaged: false }));
+    const originalToml = "model = \"user-model\"\n";
+    fs.writeFileSync(paths.configToml, originalToml);
+    const response = await handler(authedRequest("/ui/api/upstream/models", { json: { selectedModels: [] } }));
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal(upstreamReads, 0);
+    assert.equal(agentFetches, 1);
+    assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")).models.map((m: { slug: string }) => m.slug), ["opencode-zen/one-free"]);
+    assert.equal(fs.readFileSync(paths.configToml, "utf8"), originalToml);
+    const guidance = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      readonly: { manualCodexConfig: { staticCatalogActive: boolean } };
+    };
+    assert.equal(guidance.readonly.manualCodexConfig.staticCatalogActive, true);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Web UI 排除变更热加载模型，不调度网关重启", async () => {
+  const calls: string[] = [];
+  const { handler, paths, home } = await makeFixture({ webUi: {
+    scheduleRestart: () => calls.push("restart"),
+    modelDeps: {
+      updateCodexCatalog: async (_paths, config) => {
+        calls.push(`update:${config.excludedModels?.join(",")}`);
+        return { catalogPath: "fixture", count: 1, manual: false, tomlChanged: false };
+      },
+      reloadModels: async () => { calls.push("reload"); return { loaded: true, revision: "exclude" }; },
+    },
+  } });
+  try {
+    fs.mkdirSync(path.dirname(paths.launchAgent), { recursive: true });
+    fs.writeFileSync(paths.launchAgent, "fixture");
+    const response = await handler(authedRequest("/ui/api/config", { json: { excludedModels: ["agy/hidden"] } }));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { restarting: boolean }).restarting, false);
+    assert.deepEqual(calls, ["update:agy/hidden", "reload"]);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Web UI 按已保存的静态模式组合保存选择与配置，等待新网关就绪后更新 Codex", async () => {
+  const calls: string[] = [];
+  const upstream = await startFakeUpstream((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ models: [{ slug: "selected-one" }] }));
+  });
+  const { handler, paths, home } = await makeFixture({
+    config: { upstreamBaseUrl: upstream.url, upstreamOnly: true },
+    webUi: {
+      upstreamDeps: { readKey: () => "", stopCodexServers: async () => { calls.push("codex"); return { scan: "ok", results: [] }; } },
+      scheduleRestart: () => { calls.push("gateway"); },
+      modelDeps: {
+        wait: async () => {},
+        reloadModels: async (_paths, config) => {
+          assert.equal(config.upstreamOnly, true);
+          assert.deepEqual(config.selectedModels, ["selected-one"]);
+          calls.push("ready"); return { loaded: true, revision: "combined" };
+        },
+        updateCodexCatalog: async (modelPaths, config, deps, options) => {
+          calls.push(`static:${options?.refreshAdapters}`);
+          return updateCodexModelCatalog(modelPaths, config, deps, options);
+        },
+      },
+    },
+  });
+  try {
+    fs.mkdirSync(path.dirname(paths.launchAgent), { recursive: true });
+    fs.writeFileSync(paths.launchAgent, "fixture");
+    const response = await handler(authedRequest("/ui/api/config", {
+      json: { requestLogging: false, selectedModels: ["selected-one"], excludedModels: ["agy/hidden"] },
+    }));
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json() as { restarting: boolean }).restarting, false);
+    assert.deepEqual(calls, ["gateway", "ready", "static:false"]);
+    assert.ok(fs.readFileSync(paths.configToml, "utf8").includes(codexCatalogFile(paths)));
+    assert.equal((await handler(authedRequest("/ui/api/codex/restart", { method: "POST" }))).status, 200);
+    assert.deepEqual(calls, ["gateway", "ready", "static:false", "ready", "codex"]);
+  } finally { await upstream.close(); fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Web UI 静态合成失败恢复配置、状态、目录与 TOML", async () => {
+  const { handler, paths, home } = await makeFixture({ config: { upstreamOnly: true } });
+  try {
+    fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [{ slug: "previous" }] }));
+    fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "previous-static" }] }));
+    fs.writeFileSync(paths.configToml, "model = \"previous\"\n");
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ codexConfigManaged: true, config: null }));
+    const files = [paths.gatewayConfig, paths.stateFile, paths.catalogFile, codexCatalogFile(paths), paths.configToml];
+    const before = files.map((file) => fs.readFileSync(file, "utf8"));
+    const response = await handler(authedRequest("/ui/api/config", { json: { selectedModels: [] } }));
+    assert.equal(response.status, 400);
+    const body = await response.json() as { error: { message: string } };
+    assert.match(body.error.message, /静态模型目录为空/);
+    assert.deepEqual(files.map((file) => fs.readFileSync(file, "utf8")), before);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Web UI 保存失败保留模型准备期间用户改写的 TOML", async () => {
+  const { handler, paths, home } = await makeFixture({ webUi: { modelDeps: {
+    updateCodexCatalog: async (modelPaths) => {
+      fs.writeFileSync(modelPaths.configToml, "model = \"user-updated\"\n");
+      throw new Error("模型刷新期间 Codex 配置发生变化");
+    },
+  } } });
+  try {
+    const configBefore = fs.readFileSync(paths.gatewayConfig, "utf8");
+    fs.writeFileSync(paths.configToml, "model = \"previous\"\n");
+    const response = await handler(authedRequest("/ui/api/config", { json: { excludedModels: ["agy/hidden"] } }));
+    assert.equal(response.status, 400);
+    assert.equal(fs.readFileSync(paths.configToml, "utf8"), "model = \"user-updated\"\n");
+    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), configBefore);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
+});
+
+test("Web UI 网关未就绪时拒绝重启 Codex", async () => {
+  let stopped = false;
+  const { handler, home } = await makeFixture({ webUi: {
+    upstreamDeps: { stopCodexServers: async () => { stopped = true; return { scan: "ok", results: [] }; } },
+    modelDeps: { reloadModels: async () => ({ loaded: false, revision: "not-running" }) },
+  } });
+  try {
+    const response = await handler(authedRequest("/ui/api/codex/restart", { method: "POST" }));
+    assert.equal(response.status, 400);
+    assert.equal(stopped, false);
+  } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
 test("POST /ui/api/upstream/models drops stale IDs and still rejects malformed payloads", async () => {
@@ -1316,6 +1532,7 @@ test("UI instance headers and async upstream lookups use request context while p
     const seen: string[] = [];
     const handle = (fixture: Fixture, pathname: string, options: Parameters<typeof authedRequest>[1] = {}) => {
       const config = { ...fixture.config, upstreamType: "newapi" as const, upstreamBaseUrl: upstream.url };
+      fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(config));
       return handleWebUiRequest(authedRequest(pathname, options), config, {
         paths: fixture.paths,
         uiHtmlPath: fixture.uiHtmlPath,

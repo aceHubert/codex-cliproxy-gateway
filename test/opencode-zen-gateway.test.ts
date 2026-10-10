@@ -10,7 +10,7 @@ import {
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
 } from "../src/opencode/fingerprint.ts";
 import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "../src/opencode/session.ts";
-import { normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "../src/opencode/index.ts";
+import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "../src/opencode/index.ts";
 import type { OpencodeZenDependencies } from "../src/opencode/index.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
@@ -153,6 +153,41 @@ test("普通兼容模型列表与排除选择器都包含 Zen", TIMEOUT, async (
   });
 });
 
+test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同一次启动更新", TIMEOUT, async () => {
+  await fixture(async ({ config, directory }) => {
+    let fetches = 0;
+    let uaRefreshes = 0;
+    let callback!: () => void;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const adapter = createOpencodeZenAdapter({ ...config, upstreamOnly: true }, {
+      catalogMode: "manual", cacheDirectory: directory,
+      fetch: async () => { fetches++; await gate; return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }); },
+      fetchMetadata: async () => ({}),
+      userAgentStore: { current: () => OPENCODE_ZEN_CLIENT_USER_AGENT, refresh: async () => { uaRefreshes++; } },
+      setInterval: ((fn: () => void) => { callback = fn; return { unref() {} }; }) as unknown as typeof setInterval,
+      clearInterval: (() => {}) as typeof clearInterval,
+    });
+    try {
+      const listed = adapter.catalog();
+      const explicit = adapter.refreshCatalog();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(fetches, 1);
+      release();
+      assert.equal((await listed).models[0]!.slug, MODEL);
+      assert.equal((await explicit).models[0]!.slug, MODEL);
+      callback();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(fetches, 1);
+      assert.equal(uaRefreshes, 2);
+      await adapter.refreshCatalog();
+      assert.equal(fetches, 2);
+      assert.equal((await adapter.reloadCatalog()).models[0]!.slug, MODEL);
+      assert.equal(fetches, 2);
+    } finally { release(); adapter.close(); }
+  });
+});
+
 test("zen 配置校验：类型、环回监听与前缀保留", () => {
   const base: GatewayConfig = {
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
@@ -160,11 +195,11 @@ test("zen 配置校验：类型、环回监听与前缀保留", () => {
   };
   assert.equal(opencodeZenEnabled(base), false);
   assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true }), true);
-  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), false);
+  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), true);
   assert.throws(() => validateOpencodeZenConfig({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
   assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true }), /环回/);
   assert.throws(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }), /前缀保留/);
-  validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true });
+  assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true }), /环回/);
 });
 
 test("上游错误归一化：FreeTierError/限流/模型失效给出明确指引", () => {

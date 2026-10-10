@@ -4,6 +4,9 @@ import { randomBytes } from "node:crypto";
 import { stopCodexAppServers } from "./app-server.ts";
 import { invalidateModelsCache } from "./catalog.ts";
 import { GATEWAY_CONFIG_VERSION } from "./config.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "./model-state.ts";
+import { reloadGatewayModels } from "./model-reload.ts";
+import { logConfigChange } from "./process-log.ts";
 import {
   applySelectedModelsPatch,
   applyWebUiConfigPatch,
@@ -35,8 +38,8 @@ import type { GatewayConfig, ResolvedPaths } from "./types.ts";
  * Web UI（/ui）服务端：网关的内建基础能力，运行在独立进程、独立端口（网关端口 + 1，
  * 见 webUiPort）：默认不启动，由 `codex-cliproxy web` 前台运行，或由 `web --daemon`
  * 拉起后台服务。与模型流量结构性隔离——模型端口的请求日志只含
- * 模型流量；UI 进程唯一的外呼是「拉取模型」的固定只读 GET {upstreamBaseUrl}/models
- * 与据此重建已选目录文件（经 keychain 分派取 key），不存在任意转发路径，也绝不把
+ * 模型流量；UI 通过共享模型流程拉取已配置上游与启用 agent 的目录，
+ * 据此重建已选目录文件（上游经 keychain 分派取 key），不存在任意转发路径，也绝不把
  * key、URL query 写进日志或响应。
  *
  * 安全边界（缺一不可）：
@@ -45,7 +48,7 @@ import type { GatewayConfig, ResolvedPaths } from "./types.ts";
  * - Origin 头存在且非同源即拒绝；不输出任何 CORS 头；
  * - /ui/api/* 一律要求 x-ccp-ui-token 匹配 ~/.codex-cliproxy-gateway/ui-token（0600）。
  *
- * 除「拉取模型」外，UI 进程对 provider 侧只有本地存在性探测（zcodeConfigPresent /
+ * 配置查询对 provider 侧只做本地存在性探测（zcodeConfigPresent /
  * codebuddyCredentialsPresent / qoderCredentialsPresent）与 CodeBuddy 账号标签的受限
  * 解析（codebuddyAccountLabel）：探测只看文件是否存在；标签解析按网关同一选取规则
  * 解析出实际命中的 .info 后只提取非敏感的账号标识（昵称、邮箱、uid）与地域，
@@ -95,6 +98,12 @@ export interface WebUiContext {
   upstreamDeps?: {
     readKey?: (optional?: boolean) => string;
     stopCodexServers?: typeof stopCodexAppServers;
+  };
+  /** 模型更新与进程就绪的注入边界，测试不得连接本机生产网关或读取真实 agent。 */
+  modelDeps?: {
+    updateCodexCatalog?: typeof updateCodexModelCatalog;
+    reloadModels?: typeof reloadGatewayModels;
+    wait?: (milliseconds: number) => Promise<void>;
   };
 }
 
@@ -326,8 +335,8 @@ function readCodexConfigManaged(stateFile: string): boolean {
 
 /**
  * 手动模式的 config.toml 配置指引（与 CLI install / models --sync 的提示同源同条件）：
- * 3 个服务键 = 网关地址；static 目录激活（upstreamOnly 且有已选模型）时追加
- * model_catalog_json = catalogPath；非 static 但用户 toml 仍残留该键时提示删除。
+ * 3 个服务键 = 网关地址；static 目录激活时追加合成后的 Codex 目录路径；
+ * 非 static 但用户 toml 仍残留该键时提示删除。
  * 只读取 4 个受管键做比对，URL 类当前值过 sanitizeUrlValue，不回显 toml 其他内容。
  */
 function manualCodexConfigGuidance(
@@ -341,8 +350,12 @@ function manualCodexConfigGuidance(
 } {
   const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  const staticCatalogActive = config.upstreamOnly === true
-    && Array.isArray(config.selectedModels) && config.selectedModels.length > 0;
+  let staticCatalogAvailable = false;
+  try {
+    const catalog = JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")) as { models?: unknown };
+    staticCatalogAvailable = Array.isArray(catalog.models) && catalog.models.length > 0;
+  } catch {}
+  const staticCatalogActive = config.upstreamOnly === true && staticCatalogAvailable;
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
   const serviceKeys = ["openai_base_url", "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url"];
   const keys: ManualCodexKeyRow[] = serviceKeys.map((key) => {
@@ -357,9 +370,9 @@ function manualCodexConfigGuidance(
   if (staticCatalogActive) {
     keys.push({
       key: "model_catalog_json",
-      expected: config.catalogPath,
+      expected: codexCatalogFile(paths),
       current: configuredCatalog === undefined ? null : String(sanitizeUrlValue(configuredCatalog)),
-      matches: configuredCatalog === config.catalogPath,
+      matches: configuredCatalog === codexCatalogFile(paths),
     });
   }
   return {
@@ -383,7 +396,7 @@ function statusResponse(config: GatewayConfig): Response {  const upstreamOnly =
     upstreamType: config.upstreamType === "newapi" ? "newapi" : "cliproxy",
     upstreamOnly,
     routing: upstreamOnly
-      ? [`all models -> ${upstreamBase}`]
+      ? [`default models -> ${upstreamBase}; enabled agent prefixes use their adapters`]
       : [
         `native models -> ${officialBase}`,
         `${config.prefix || "cliproxy/"}* -> ${upstreamBase}`,
@@ -553,6 +566,66 @@ function requestLogContentResponse(config: GatewayConfig, paths: ResolvedPaths, 
   return Response.json({ name, text: tail.text, truncated: tail.truncated });
 }
 
+/** 在触碰配置前完成选择解析；空选择不请求上游，允许静态目录仅含 agent。 */
+async function prepareModelSelection(ctx: WebUiContext, config: GatewayConfig, selected: string[]) {
+  if (!selected.length) return {
+    ordered: [],
+    rebuild: async () => { atomicWrite(config.catalogPath, `${JSON.stringify({ models: [] }, null, 2)}\n`); },
+  };
+  const { catalog, modelsConfigFile } = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
+  const entries = catalog.models.filter((model) => selected.includes(model.slug));
+  return {
+    ordered: entries.map((model) => model.slug),
+    rebuild: () => rebuildCatalog(ctx.paths, config, entries, modelsConfigFile),
+  };
+}
+
+/** 保存失败恢复同一实例的配置、目录和受管 TOML，不留下半轮模型变更。 */
+function modelSaveRollback(paths: ResolvedPaths, config: GatewayConfig) {
+  const files = [...new Set([
+    paths.gatewayConfig, paths.stateFile, config.catalogPath,
+    codexCatalogFile(paths), paths.configToml,
+  ])];
+  const previous = files.map((file) => ({ file, source: fs.existsSync(file) ? fs.readFileSync(file) : undefined }));
+  const readToml = () => fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : undefined;
+  let expectedToml = readToml();
+  const restore = () => {
+    for (const { file, source } of previous) {
+      // 共享写入器会守卫并回滚自己的 TOML；用户在准备期间修改的内容必须保留。
+      if (file === paths.configToml && readToml() !== expectedToml) continue;
+      if (source) atomicWrite(file, source.toString("utf8"));
+      else if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    logConfigChange(paths.stdoutLog, {
+      command: "webui model rollback",
+      changes: [{ field: "model transaction", before: "pending", after: "rolled back" }],
+    }, config.maxGatewayLogBytes ?? 0);
+  };
+  return Object.assign(restore, { recordToml: () => { expectedToml = readToml(); } });
+}
+
+async function updateUiModelCatalog(ctx: WebUiContext, config: GatewayConfig, refreshAdapters: boolean): Promise<void> {
+  await (ctx.modelDeps?.updateCodexCatalog ?? updateCodexModelCatalog)(ctx.paths, config, {}, {
+    refreshAdapters,
+    ...(ctx.instanceOnly ? { manual: true } : {}),
+  });
+}
+
+async function reloadUiModels(ctx: WebUiContext, config: GatewayConfig, restarting = false) {
+  const reload = ctx.modelDeps?.reloadModels ?? reloadGatewayModels;
+  if (!restarting) return reload(ctx.paths, config);
+  const wait = ctx.modelDeps?.wait ?? ((milliseconds: number) => Bun.sleep(milliseconds));
+  // kickstart 延后到响应窗口之外；独立 UI 进程保持运行，等待新网关健康且目录就绪。
+  await wait(RESTART_DELAY_MS + 100);
+  const deadline = Date.now() + 15_000;
+  while (true) {
+    const result = await reload(ctx.paths, config);
+    if (result.loaded) return result;
+    if (Date.now() >= deadline) throw new Error("网关重启后模型目录未就绪；请检查网关并重新保存，暂未重启 Codex。");
+    await wait(100);
+  }
+}
+
 /** 处理 UI 端口上的 /ui、/ui/* 与浏览器随 /ui 自动请求的 /favicon.ico；port 是 UI
  * 服务自己的监听端口（Host 头白名单按它校验）。任何情况下都返回 Response。 */
 export async function handleWebUiRequest(request: Request, config: GatewayConfig, ctx: WebUiContext, port: number): Promise<Response> {
@@ -587,7 +660,9 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
   }
   const route = pathname.slice("/ui/api/".length);
 
-  if (route === "status" && request.method === "GET") return statusResponse(config);
+  if (route === "status" && request.method === "GET") {
+    return statusResponse(readGatewayConfigFile(ctx.paths.gatewayConfig));
+  }
 
   if (route === "config" && request.method === "GET") {
     try {
@@ -610,32 +685,81 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
     if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
       return badRequest("Request body must be a JSON object");
     }
+    let rollback: ReturnType<typeof modelSaveRollback> | undefined;
+    let restartScheduled = false;
     try {
       const managesService = ctx.instanceOnly !== true;
-      const { applied } = applyWebUiConfigPatch(ctx.paths, patch as Record<string, unknown>, managesService);
-      // 排除规则改变目录内容：与 selectedModels 同策略，动态路由下失效 Codex 目录缓存
-      // 让下一次 /models 立即反映（upstream-only 由 Codex 静态加载目录文件，靠重启生效）。
-      if (applied.some((change) => change.field === "excludedModels") && config.upstreamOnly !== true) {
-        try {
-          invalidateModelsCache(ctx.paths.modelsCacheFile);
-        } catch {}
+      const { selectedModels, ...configPatch } = patch as Record<string, unknown>;
+      const current = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const prepared = Object.keys(configPatch).length
+        ? applyWebUiConfigPatch(ctx.paths, configPatch, managesService, { write: false })
+        : { config: current, applied: [] };
+      if (selectedModels === undefined && !Object.keys(configPatch).length) {
+        return badRequest("Request body contains no supported fields");
       }
-      const restarting = managesService && fs.existsSync(ctx.paths.launchAgent);
+      let selection: Awaited<ReturnType<typeof prepareModelSelection>> | undefined;
+      if (selectedModels !== undefined) {
+        const parsed = parseSelectedModels(selectedModels);
+        try {
+          selection = await prepareModelSelection(ctx, prepared.config, parsed);
+        } catch (error) {
+          return upstreamFailure(prepared.config, error);
+        }
+      }
+      if (JSON.stringify(readGatewayConfigFile(ctx.paths.gatewayConfig)) !== JSON.stringify(current)) {
+        return badRequest("模型准备期间网关配置发生变化；请重新加载页面后保存。");
+      }
+      rollback = modelSaveRollback(ctx.paths, current);
+      if (selection) await selection.rebuild();
+      const { config: next, applied } = Object.keys(configPatch).length
+        ? applyWebUiConfigPatch(ctx.paths, configPatch, managesService)
+        : prepared;
+      if (selection) {
+        applySelectedModelsPatch(ctx.paths, selection.ordered, managesService);
+        next.selectedModels = selection.ordered;
+      }
+      const structural = applied.some((change) => change.field !== "excludedModels");
+      const modelsChanged = selection !== undefined || applied.some((change) =>
+        change.field === "excludedModels"
+        || (next.upstreamOnly === true && ["zcode", "codebuddy", "qoder", "agy", "opencodeZen"].includes(change.field)));
+      const restarting = structural && managesService && fs.existsSync(ctx.paths.launchAgent);
       if (restarting) {
         markPendingRestart(ctx.paths.stateFile);
         (ctx.scheduleRestart ?? defaultScheduleRestart)(ctx.paths);
+        restartScheduled = true;
       }
-      return Response.json({ restarting, applied: applied.map((change) => change.field) });
+      if (modelsChanged) {
+        if (restarting) {
+          await reloadUiModels(ctx, next, true);
+          await updateUiModelCatalog(ctx, next, false);
+          rollback.recordToml();
+        } else {
+          await updateUiModelCatalog(ctx, next, true);
+          rollback.recordToml();
+          await reloadUiModels(ctx, next);
+        }
+        if (!next.upstreamOnly) {
+          try { invalidateModelsCache(ctx.paths.modelsCacheFile); } catch {}
+        }
+      }
+      return Response.json({
+        restarting: restarting && !modelsChanged,
+        applied: [...applied.map((change) => change.field), ...(selection ? ["selectedModels"] : [])],
+      });
     } catch (error) {
+      rollback?.();
+      // 新服务可能已经加载失败事务的配置，恢复文件后重启回原配置。
+      if (restartScheduled) (ctx.scheduleRestart ?? defaultScheduleRestart)(ctx.paths);
       return badRequest(error instanceof Error ? error.message : String(error));
     }
   }
 
   if (route === "upstream/models" && request.method === "GET") {
     try {
-      const { catalog } = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
+      const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const { catalog } = await fetchConfiguredUpstreamCatalog(ctx.paths, live, ctx.upstreamDeps);
       return Response.json({
-        upstreamType: configuredUpstreamType(config),
+        upstreamType: configuredUpstreamType(live),
         models: catalog.models.map((model) => ({
           slug: model.slug,
           displayName: model.display_name || model.slug,
@@ -662,36 +786,26 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
     } catch (error) {
       return badRequest(error instanceof Error ? error.message : String(error));
     }
-    if (config.upstreamOnly === true && selected.length === 0) {
-      return badRequest("Upstream-only mode requires at least one selected model; the catalog would be empty");
-    }
-    // 目录重建与配置写入必须是同一次保存：先按上游全量目录过滤出已选条目重建
-    // catalogPath，再走 selectedModels 的持久化路径，最后在动态路由模式下重置官方
-    // 目录缓存（Codex 约在 5 分钟内自动刷新 /models，无需重启）；upstream-only 模式
-    // 由 Codex 静态加载目录文件，需要用户确认后重启 Codex app-server。
-    let fetched: Awaited<ReturnType<typeof fetchConfiguredUpstreamCatalog>>;
+    const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+    let prepared: Awaited<ReturnType<typeof prepareModelSelection>>;
     try {
-      fetched = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
+      prepared = await prepareModelSelection(ctx, live, selected);
     } catch (error) {
-      return upstreamFailure(config, error);
+      return upstreamFailure(live, error);
     }
-    const { catalog, modelsConfigFile } = fetched;
-    const bySlug = new Map(catalog.models.map((model) => [model.slug, model]));
-    // 与 `models --sync` 的当前选择语义一致：上游已不存在的旧选择直接剔除，
-    // 而不是让整个保存失败；这样 UI 在保存后会自动收敛到最新可选目录。
-    const ordered = catalog.models
-      .map((model) => model.slug)
-      .filter((slug) => selected.includes(slug));
-    if (config.upstreamOnly === true && ordered.length === 0) {
-      return badRequest("Upstream-only mode requires at least one selected model; the catalog would be empty");
-    }
+    const rollback = modelSaveRollback(ctx.paths, live);
     try {
-      await rebuildCatalog(ctx.paths, config, ordered.map((slug) => bySlug.get(slug)!), modelsConfigFile);
-      applySelectedModelsPatch(ctx.paths, ordered, ctx.instanceOnly !== true);
+      await prepared.rebuild();
+      applySelectedModelsPatch(ctx.paths, prepared.ordered, ctx.instanceOnly !== true);
+      live.selectedModels = prepared.ordered;
+      await updateUiModelCatalog(ctx, live, true);
+      rollback.recordToml();
+      await reloadUiModels(ctx, live);
     } catch (error) {
+      rollback();
       return badRequest(error instanceof Error ? error.message : String(error));
     }
-    if (config.upstreamOnly !== true) {
+    if (live.upstreamOnly !== true) {
       // 重置官方目录缓存让网关下一次 /models 就反映新选择（Codex 约在 5 分钟内自动
       // 刷新）；写失败不回滚已保存的选择，与网关侧缓存写失败静默忽略同策略。
       try {
@@ -700,13 +814,20 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
     }
     return Response.json({
       applied: ["selectedModels"],
-      selected: ordered,
-      count: ordered.length,
-      upstreamOnly: config.upstreamOnly === true,
+      selected: prepared.ordered,
+      count: prepared.ordered.length,
+      upstreamOnly: live.upstreamOnly === true,
     });
   }
 
   if (route === "codex/restart" && request.method === "POST") {
+    try {
+      const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const ready = await reloadUiModels(ctx, live);
+      if (!ready.loaded) return badRequest("网关尚未运行，无法确认模型目录就绪；请先启动网关再重启 Codex。");
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
     // 停止当前用户的 Codex app-server；Codex 会自行拉起新进程并重读目录。
     const stopCodexServers = ctx.upstreamDeps?.stopCodexServers ?? stopCodexAppServers;
     const result = await stopCodexServers();

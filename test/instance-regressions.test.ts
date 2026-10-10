@@ -41,7 +41,10 @@ function isolatedScenario(scenario: string): void {
     const { runCli } = await import("./src/cli.ts");
     const printed = [];
     console.log = (value) => printed.push(String(value));
-    globalThis.fetch = async () => { throw new Error("测试禁止未模拟的网络请求"); };
+    globalThis.fetch = async (input) => {
+      if (String(input).endsWith("/healthz")) throw Object.assign(new Error("测试网关未启动"), { code: "ECONNREFUSED" });
+      throw new Error("测试禁止未模拟的网络请求");
+    };
     const configFor = (root) => ({
       configVersion: GATEWAY_CONFIG_VERSION, host: "127.0.0.1", port: 8399,
       mountPath: "/v1", prefix: "cliproxy/", officialBaseUrl: "https://official.invalid/v1",

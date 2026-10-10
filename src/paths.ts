@@ -136,6 +136,7 @@ export function managedCatalogFiles(paths: ResolvedPaths): string[] {
   return [
     catalogFileFor(paths, "cliproxy"),
     catalogFileFor(paths, "newapi"),
+    path.join(paths.runtimeHome, "codex-catalog.json"),
     path.join(paths.runtimeHome, "zcode-catalog.json"),
     path.join(paths.runtimeHome, "codebuddy-catalog.json"),
     path.join(paths.runtimeHome, "workbuddy-catalog.json"),

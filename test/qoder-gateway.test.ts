@@ -299,9 +299,9 @@ test("Qoder 国内版使用独立授权与端点生成 Qoder-CN 目录并完成�
   });
 });
 
-test("Qoder 禁用与 upstreamOnly 不读授权、不拉目录、不注册定时刷新", TIMEOUT, async () => {
+test("Qoder 禁用时不读授权、不拉目录、不注册定时刷新", TIMEOUT, async () => {
   await fixture(async ({ config, directory }) => {
-    for (const overrides of [{ qoder: false }, { qoder: true, upstreamOnly: true }]) {
+    for (const overrides of [{ qoder: false }, { qoder: false, upstreamOnly: true }]) {
       let operations = 0;
       const current = { ...config, ...overrides };
       const adapter = createQoderAdapter(current, {
@@ -319,15 +319,44 @@ test("Qoder 禁用与 upstreamOnly 不读授权、不拉目录、不注册定时
   });
 });
 
-test("Qoder 网关禁用及纯转发模式不会混入本地目录", TIMEOUT, async () => {
+test("Qoder 网关禁用时不会混入本地目录", TIMEOUT, async () => {
   await fixture(async ({ create, fetched, calls }) => {
-    for (const config of [{ qoder: false }, { upstreamOnly: true, prefix: "" }]) {
+    for (const config of [{ qoder: false }, { qoder: false, upstreamOnly: true, prefix: "" }]) {
       const handler = create(config);
       const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
       assert.ok(!(await response.text()).includes("qoder-intl/"));
     }
     assert.equal(fetched(), 0);
     assert.equal(calls.length, 0);
+  });
+});
+
+test("Qoder 手动目录保留启动一次刷新并等待结果，显式刷新复用启动请求", TIMEOUT, async () => {
+  await fixture(async ({ config, directory }) => {
+    let fetches = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const adapter = createQoderAdapter({ ...config, upstreamOnly: true }, {
+      catalogMode: "manual", cacheDirectory: directory, credentials: async () => credential(),
+      cn: { credentials: async () => null },
+      setInterval: (() => { throw new Error("手动目录不得注册模型 timer"); }) as typeof setInterval,
+      transport: { fetchCatalog: async () => { fetches++; await gate; return catalogData(); }, infer: async () => upstream() },
+    });
+    try {
+      assert.equal(qoderEnabled({ ...config, upstreamOnly: true }), true);
+      const listed = adapter.catalog();
+      const explicit = adapter.refreshCatalog();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      assert.equal(fetches, 1);
+      release();
+      assert.equal((await listed).models[0]!.slug, MODEL);
+      assert.equal((await explicit).models[0]!.slug, MODEL);
+      assert.equal(fetches, 1);
+      await adapter.refreshCatalog();
+      assert.equal(fetches, 2);
+      assert.equal((await adapter.reloadCatalog()).models[0]!.slug, MODEL);
+      assert.equal(fetches, 2);
+    } finally { release(); adapter.close(); }
   });
 });
 
@@ -626,7 +655,7 @@ test("Qoder 启用时仅允许环回监听并保留各地域模型前缀", TIMEO
     for (const host of ["localhost", "::1", "[::1]", "127.0.0.2"]) validateQoderConfig({ ...config, host });
     assert.throws(() => validateQoderConfig({ ...config, host: "0.0.0.0" }), /环回/);
     for (const prefix of ["qoder/", "qoder-intl/", "qoder-cn/"]) assert.throws(() => validateQoderConfig({ ...config, prefix }), /前缀保留/);
-    validateQoderConfig({ ...config, host: "0.0.0.0", upstreamOnly: true });
+    assert.throws(() => validateQoderConfig({ ...config, host: "0.0.0.0", upstreamOnly: true }), /环回/);
   });
 });
 

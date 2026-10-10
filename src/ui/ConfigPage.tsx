@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ApiError,
-  applyUpstreamModels,
   getUiConfig,
   getUiStatus,
   postUiConfig,
@@ -192,6 +191,14 @@ export function ConfigPage({
   }, [config, form]);
   const dirty = modelsDirty || genericDirty;
   const upstreamOnly = config?.readonly.upstreamOnly === true;
+  const adapterModelsDirty = Boolean(config && form && (
+    form.zcode !== config.editable.zcode || form.codebuddy !== config.editable.codebuddy
+    || form.qoder !== config.editable.qoder || form.agy !== config.editable.agy
+    || form.opencodeZen !== config.editable.opencodeZen
+    || excludedEntriesChanged(form.excludedEntries, config.editable.excludedGroups, config.editable.excludedEntries)
+  ));
+  const codexReloadNeeded = Boolean(config && form && (modelsDirty
+    || (upstreamOnly && adapterModelsDirty)));
   // 开关按本机配置探测结果显示：未检测到本地配置时隐藏，避免展示永远无法生效的入口；
   // 开关已开启时（例如用户删掉了本机配置）仍显示，便于在 UI 里关回。
   const showZcode = Boolean(config && (config.detected.zcode || config.editable.zcode));
@@ -246,9 +253,8 @@ export function ConfigPage({
   }, [phase, loadConfig, onStatusChange, onAuthExpired]);
 
   /**
-   * 保存序列：先重建模型目录并写入 selectedModels（模型选择走专用端点，目录文件与
-   * 配置必须一起变更），再写其余配置（可能触发网关重启，由轮询恢复），最后按用户在
-   * 弹窗里的选择决定是否停止 Codex app-server（Codex 重新拉起后加载新目录）。
+   * 一次提交最终配置与选择，服务端完成目录、网关加载和受管 TOML；
+   * 所有更新就绪后再按用户选择停止 Codex app-server。
    */
   const save = (restartCodex = false): void => {
     if (!config || !form || !logSize || invalidRequestLogCount) return;
@@ -257,26 +263,10 @@ export function ConfigPage({
     setSaveError(null);
     setCodexNotice(null);
     const run = async (): Promise<"restarting" | "done"> => {
-      if (!sameSelection(formSnapshot.selectedModels, config.editable.selectedModels)) {
-        const result = await applyUpstreamModels(formSnapshot.selectedModels);
-        setCodexNotice({
-          kind: result.upstreamOnly ? "warn" : "ok",
-          text: result.upstreamOnly ? t("config:modelsSavedUpstreamOnly") : t("config:modelsSavedDynamic"),
-        });
-        if (restartCodex) {
-          setCodexNotice({ kind: "warn", text: t("config:codexRestarting") });
-          const stop = await restartCodexAppServers();
-          setCodexNotice({
-            kind: stop.results.some(({ status }) => status !== "stopped") ? "error" : "ok",
-            text: stop.results.length === 0
-              ? t("config:codexRestartNone")
-              : stop.results.every(({ status }) => status === "stopped")
-              ? t("config:codexRestartDone")
-              : t("config:codexRestartFailed"),
-          });
-        }
-      }
       const changes: UiConfigChanges = {};
+      if (!sameSelection(formSnapshot.selectedModels, config.editable.selectedModels)) {
+        changes.selectedModels = formSnapshot.selectedModels;
+      }
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
       if (formSnapshot.qoder !== config.editable.qoder) changes.qoder = formSnapshot.qoder;
@@ -303,6 +293,20 @@ export function ConfigPage({
       }
       if (Object.keys(changes).length === 0) return "done";
       const result = await postUiConfig(changes);
+      if (codexReloadNeeded) {
+        setCodexNotice({ kind: upstreamOnly ? "warn" : "ok", text: upstreamOnly
+          ? t("config:modelsSavedUpstreamOnly") : t("config:modelsSavedDynamic") });
+      }
+      if (restartCodex) {
+        setCodexNotice({ kind: "warn", text: t("config:codexRestarting") });
+        const stop = await restartCodexAppServers();
+        setCodexNotice({
+          kind: stop.results.some(({ status }) => status !== "stopped") ? "error" : "ok",
+          text: stop.results.length === 0 ? t("config:codexRestartNone")
+            : stop.results.every(({ status }) => status === "stopped") ? t("config:codexRestartDone")
+            : t("config:codexRestartFailed"),
+        });
+      }
       return result.restarting ? "restarting" : "done";
     };
     void run().then((outcome) => {
@@ -476,21 +480,15 @@ export function ConfigPage({
                       <span className="field-keyname">zcode</span>
                     </div>
                     <div className="field-control-area">
-                      {/* upstream-only 模式下网关按禁用处理 zcode 入口（zcodeEnabled）：
-                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                      <label className="switch">
                         <input
                           type="checkbox"
                           checked={form.zcode}
-                          disabled={upstreamOnly}
                           onChange={(event) => setForm({ ...form, zcode: event.target.checked })}
                         />
                         <span className="slider" />
                       </label>
                       <p className="field-desc">{t("config:descZcode")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("config:zcodeDisabledHint")}</p>
-                      )}
                       {!config.detected.zcode && (
                         <p className="field-desc zcode-disabled-hint">{t("config:zcodeMissingHint")}</p>
                       )}
@@ -505,14 +503,11 @@ export function ConfigPage({
                       <span className="field-keyname">codebuddy</span>
                     </div>
                     <div className="field-control-area">
-                      {/* upstream-only 模式下网关按禁用处理 codebuddy 入口（codebuddyEnabled）：
-                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
                       <div className="field-switch-row">
-                        <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                        <label className="switch">
                           <input
                             type="checkbox"
                             checked={form.codebuddy}
-                            disabled={upstreamOnly}
                             onChange={(event) => setForm({ ...form, codebuddy: event.target.checked })}
                           />
                           <span className="slider" />
@@ -525,9 +520,6 @@ export function ConfigPage({
                       </div>
                       <p className="field-desc">{t("config:descCodebuddy")}</p>
                       <p className="field-desc">{t("config:descCodebuddyAccount")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("config:codebuddyDisabledHint")}</p>
-                      )}
                       {!config.detected.codebuddy && (
                         <p className="field-desc zcode-disabled-hint">{t("config:codebuddyMissingHint")}</p>
                       )}
@@ -542,13 +534,11 @@ export function ConfigPage({
                       <span className="field-keyname">qoder</span>
                     </div>
                     <div className="field-control-area">
-                      {/* 统一开关目前接入国际版；纯上游模式下保留配置值并禁用入口。 */}
                       <div className="field-switch-row">
-                        <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                        <label className="switch">
                           <input
                             type="checkbox"
                             checked={form.qoder}
-                            disabled={upstreamOnly}
                             onChange={(event) => setForm({ ...form, qoder: event.target.checked })}
                           />
                           <span className="slider" />
@@ -570,9 +560,6 @@ export function ConfigPage({
                       </div>
                       <p className="field-desc">{t("config:descQoder")}</p>
                       <p className="field-desc">{t("config:descQoderSources")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("config:qoderDisabledHint")}</p>
-                      )}
                       {!config.detected.qoder && (
                         <p className="field-desc zcode-disabled-hint">{t("config:qoderMissingHint")}</p>
                       )}
@@ -587,21 +574,15 @@ export function ConfigPage({
                       <span className="field-keyname">agy</span>
                     </div>
                     <div className="field-control-area">
-                      {/* upstream-only 模式下网关按禁用处理 agy 入口（agyEnabled）：
-                          开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                      <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                      <label className="switch">
                         <input
                           type="checkbox"
                           checked={form.agy}
-                          disabled={upstreamOnly}
                           onChange={(event) => setForm({ ...form, agy: event.target.checked })}
                         />
                         <span className="slider" />
                       </label>
                       <p className="field-desc">{t("config:descAgy")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("config:agyDisabledHint")}</p>
-                      )}
                       {!config.detected.agy && (
                         <p className="field-desc zcode-disabled-hint">{t("config:agyMissingHint")}</p>
                       )}
@@ -617,22 +598,16 @@ export function ConfigPage({
                     <span className="field-keyname">opencodeZen</span>
                   </div>
                   <div className="field-control-area">
-                    {/* upstream-only 模式下网关按禁用处理 zen 入口（opencodeZenEnabled）：
-                        开关值保留但不生效，UI 同步禁用，避免误以为已生效。 */}
-                    <label className={`switch${upstreamOnly ? " disabled" : ""}`}>
+                    <label className="switch">
                       <input
                         type="checkbox"
                         checked={form.opencodeZen}
-                        disabled={upstreamOnly}
                         onChange={(event) => setForm({ ...form, opencodeZen: event.target.checked })}
                       />
                       <span className="slider" />
                     </label>
                     <p className="field-desc">{t("config:descOpencodeZen")}</p>
                     <p className="field-desc">{t("config:descOpencodeZenAuth")}</p>
-                      {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("config:opencodeZenDisabledHint")}</p>
-                      )}
                     {renderExcludedGroups("opencodeZen")}
                   </div>
                 </div>
@@ -664,7 +639,6 @@ export function ConfigPage({
             <div className="card-header">
               <div className="card-title-group">
                 <h2 className="card-title">{t("config:card2Title")}</h2>
-                <span className="card-badge badge-readonly">{t("config:badgeReadonly")}</span>
               </div>
             </div>
             <div className="card-note-bar">
@@ -726,7 +700,7 @@ export function ConfigPage({
                   <p className="field-desc manual-codex-footnote">{t("config:manualConfigFootnote")}</p>
                 </div>
               )}
-              <ReadonlyRow label={t("config:labelRouterMode")} keyname="routerMode">
+              <ReadonlyRow label={t("config:labelRouterMode")} keyname="upstreamOnly">
                 <div className="readonly-box">
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span className={`pill-badge ${upstreamOnly ? "pill-purple" : "pill-green"}`}>
@@ -797,14 +771,14 @@ export function ConfigPage({
             </p>
             <div className="modal-actions">
               <button className="btn btn-secondary" onClick={() => setPhase("idle")}>{t("config:cancel")}</button>
-              {modelsDirty && upstreamOnly && (
+              {codexReloadNeeded && upstreamOnly && (
                 <button className="btn btn-secondary" onClick={() => save(false)}>{t("config:modalSkipRestart")}</button>
               )}
               <button
                 className="btn btn-save dirty"
-                onClick={() => save(modelsDirty && upstreamOnly)}
+                onClick={() => save(codexReloadNeeded && upstreamOnly)}
               >
-                {modelsDirty && upstreamOnly ? t("config:modalRestartCodex") : t("config:confirm")}
+                {codexReloadNeeded && upstreamOnly ? t("config:modalRestartCodex") : t("config:confirm")}
               </button>
             </div>
           </div>

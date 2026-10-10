@@ -18,6 +18,42 @@ import { loadAgyCredentials } from "../src/agy/credentials.ts";
 
 const TIMEOUT = { timeout: 30_000 };
 
+test("agy manual 目录查询不拉网络，reload 读取磁盘并校验账号身份", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-manual-"));
+  let now = 0;
+  let fetched = 0;
+  let identity = "first-account";
+  let id = "gemini-first";
+  const options = {
+    cacheDirectory: directory,
+    catalogMode: "manual" as const,
+    now: () => now,
+    credentials: async () => ({ accessToken: "fake", expiryMs: Date.now() + 60_000, identity, authMethod: "consumer" as const }),
+    fetchCatalog: async () => {
+      fetched++;
+      return { models: { [id]: { displayName: id } } };
+    },
+  };
+  try {
+    const store = createAgyCatalogStore(options);
+    await assert.rejects(store.catalog(), /没有可用的本地缓存/);
+    assert.equal(fetched, 0);
+    await store.refresh();
+    now = 24 * 60 * 60 * 1000;
+    assert.equal((await store.catalog()).models[0]!.slug, "agy/gemini-first");
+    assert.equal(fetched, 1);
+    id = "gemini-second";
+    await createAgyCatalogStore(options).refresh();
+    assert.equal((await store.reload()).models[0]!.slug, "agy/gemini-second");
+    assert.equal(fetched, 2);
+    identity = "second-account";
+    await assert.rejects(store.catalog(), /没有可用的本地缓存/);
+    assert.equal(fetched, 2);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function modelsResponse(): Record<string, unknown> {
   return {
     models: {

@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createGatewayHandler, isZcodeResponsesWebSocket, responsesWebSocketTarget } from "../src/gateway.ts";
+import { createZcodeAdapter } from "../src/zcode/index.ts";
+import { resolvePaths, runWithInstancePaths } from "../src/paths.ts";
 import { ZcodeConfigError, type ZcodeProviderSnapshot, type ZcodeFamily, type ZcodeSelection } from "../src/zcode/config.ts";
 import { ZcodeEndpointRouting } from "../src/zcode/endpoint-routing.ts";
 import { ZCODE_AGENT_SYSTEM_PROMPT } from "../src/zcode/request-context.ts";
@@ -56,6 +58,7 @@ async function fixture(run: (context: {
   create: (options?: { current?: () => Promise<Snapshot>; currentPlan?: ZcodeSelection["kind"]; fetch?: (url: string, init: RequestInit) => Promise<Response>; sticky?: boolean; onClose?: () => void; codexModelsCacheFile?: string; endpointRouting?: ZcodeEndpointRouting | null; planCaches?: Partial<Record<ZcodeSelection["kind"], { get: () => Promise<Snapshot>; close: () => void }>>; zcodeHome?: string }) => ReturnType<typeof createGatewayHandler>;
 }) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-gateway-"));
+  const paths = resolvePaths({ HOME: directory }, directory);
   const config: GatewayConfig = {
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
@@ -73,7 +76,9 @@ async function fixture(run: (context: {
   try {
     await run({ config, directory, cacheFile, create(options = {}) {
       const currentCache = { get: options.current ?? (async () => snapshot()), close: options.onClose ?? (() => {}) };
-      const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new Set(options.sticky ? ["sticky-thread"] : []), new Set<string>(), cacheFile, {
+      const override = process.env.CODEX_CLIPROXY_HOME;
+      const handlerPaths = override?.startsWith(`${directory}${path.sep}`) ? resolvePaths({ HOME: directory }, override) : paths;
+      const handler = runWithInstancePaths(handlerPaths, () => createGatewayHandler(config, "fake-cpa-key", "invalid", new Set(options.sticky ? ["sticky-thread"] : []), new Set<string>(), cacheFile, {
         ...(options.zcodeHome
           ? { zcodeHome: options.zcodeHome }
           : options.planCaches
@@ -87,7 +92,7 @@ async function fixture(run: (context: {
         cacheDirectory: directory,
         // 默认禁用端点重映射：既有用例断言上游 URL 与调用次数，重映射行为由专属用例覆盖。
         endpointRouting: options.endpointRouting ?? null,
-      });
+      }, undefined, undefined, undefined, undefined, undefined, handlerPaths));
       handlers.push(handler);
       return handler;
     } });
@@ -163,7 +168,7 @@ test("端点重映射命中时上游请求改发 ultra 地址，配置拉取走�
   });
 });
 
-test("upstream-only 下 ZCode 按禁用处理：保留上游裸条目并直通第三方上游", async () => {
+test("upstream-only 保留上游裸条目并继续通过 ZCode 插件处理保留前缀", async () => {
   const originalFetch = globalThis.fetch;
   try {
     await fixture(async ({ config, create, directory }) => {
@@ -183,34 +188,125 @@ test("upstream-only 下 ZCode 按禁用处理：保留上游裸条目并直通�
         current: async () => { reads++; return snapshot(); },
         fetch: async () => { zcodeCalls++; return upstream(); },
       });
+      await handler.modelsReady();
 
-      // 坏配置也不影响目录：上游的裸 z.ai 条目既不被剥离也不被替换成 ZCode 目录。
+      // 上游的裸 z.ai 条目与插件的 zcode/ 条目分别暴露。
       const list = await (await handler(new Request("http://127.0.0.1:8320/v1/models"))).json() as Json;
       const zai = list.data.filter((item: Json) => item.id === "z.ai/glm-5.3");
       assert.equal(zai.length, 1);
       assert.equal(zai[0].owned_by, "cliproxy");
       assert.ok(list.data.some((item: Json) => item.id === "test-cpa"));
 
-      // 请求交给 upstream-only 直通，不落到 ZCode 的 Anthropic 适配器。
+      // default 请求由 upstream-only 直通，插件保留前缀仍由 ZCode 处理。
       const response = await handler(request("z.ai/glm-5.3"));
       assert.equal(response.status, 200);
       assert.equal(zcodeCalls, 0);
       assert.equal(passthrough.length, 1);
       assert.match(passthrough[0]!, /^https:\/\/cpa\.invalid\/v1\/responses/);
 
-      // 禁用意味着不建凭证缓存、也不写厂商目录文件。
-      assert.equal(reads, 0);
-      assert.equal(fs.existsSync(path.join(directory, "zcode-catalog.json")), false);
+      assert.equal((await handler(request("zcode/glm-5.3"))).status, 200);
+      assert.equal(zcodeCalls, 1);
+      assert.ok(reads > 0);
+      assert.equal(fs.existsSync(path.join(directory, "zcode-catalog.json")), true);
     });
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("upstream-only 下 ZCode 的环回监听与保留前缀约束不再生效", async () => {
+test("upstream-only 下启用 ZCode 仍要求环回监听与保留前缀约束", async () => {
   await fixture(async ({ config, create }) => {
     config.upstreamOnly = true;
     config.host = "0.0.0.0";
     config.prefix = "zcode/";
-    assert.doesNotThrow(() => create());
+    assert.throws(() => create(), /只能监听环回地址/);
+    config.host = "127.0.0.1";
+    assert.throws(() => create(), /前缀保留给 ZCode/);
+  });
+});
+
+test("ZCode 手动目录只在显式刷新后发布模型变化，推理继续读取最新凭据", async () => {
+  await fixture(async ({ config, directory }) => {
+    let current = snapshot();
+    let reads = 0;
+    const keys: string[] = [];
+    const adapter = createZcodeAdapter(config, {
+      catalogMode: "manual", cacheDirectory: directory, endpointRouting: null, clientSigning: null,
+      configCache: { get: async () => { reads++; return current; }, close() {} },
+      fetch: async (_url, init) => { keys.push(new Headers(init.headers).get("x-api-key")!); return upstream(); },
+    });
+    try {
+      const first = await adapter.catalog();
+      assert.ok(first.models.some((model) => model.slug.endsWith("/glm-5.3")));
+      const startupReads = reads;
+      current = { ...current, apiKey: "new-test-key", modelIds: ["glm-5.3-flash"] };
+      assert.deepEqual(await adapter.catalog(), first);
+      assert.equal(reads, startupReads, "目录查询不隐式读取模型缓存");
+      const response = await adapter.forward(request("zcode/glm-5.3"), { model: "zcode/glm-5.3", input: "测试" });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.deepEqual(keys, ["new-test-key"], "目录冻结不能冻结凭据维护");
+      const updated = await adapter.refreshCatalog();
+      assert.equal(updated.models.some((model) => model.slug.endsWith("/glm-5.3")), false);
+      assert.ok(updated.models.some((model) => model.slug.endsWith("/glm-5.3-flash")));
+    } finally { adapter.close(); }
+  });
+});
+
+test("ZCode 目录刷新复用启动与并发更新，本地重载调用只读接口", async () => {
+  await fixture(async ({ config, directory }) => {
+    let finish!: (value: Snapshot) => void;
+    let reads = 0;
+    let refreshes = 0;
+    let reloads = 0;
+    const pending = new Promise<Snapshot>((resolve) => { finish = resolve; });
+    const adapter = createZcodeAdapter(config, {
+      catalogMode: "manual", refreshCatalogOnStart: false,
+      cacheDirectory: directory, endpointRouting: null, clientSigning: null,
+      configCache: {
+        get: async () => { reads++; return snapshot(); },
+        refresh: async () => { refreshes++; return pending; },
+        reload: async () => { reloads++; return { ...snapshot(), modelIds: ["glm-5.3-flash"] }; },
+        close() {},
+      },
+    });
+    try {
+      assert.deepEqual(await adapter.catalog(), { models: [] });
+      assert.equal(reads + refreshes + reloads, 0);
+      const first = adapter.refreshCatalog();
+      const second = adapter.refreshCatalog();
+      assert.equal(first, second);
+      assert.equal(refreshes, 1);
+      finish(snapshot());
+      const published = await first;
+      assert.ok(published.models.some((model) => model.slug.endsWith("/glm-5.3")));
+      const reloaded = await adapter.reloadCatalog();
+      assert.equal(reloaded.models.some((model) => model.slug.endsWith("/glm-5.3")), false);
+      assert.equal(reloads, 1);
+      assert.equal(reads, 0);
+    } finally { adapter.close(); }
+  });
+});
+
+test("ZCode 手动目录首次刷新失败拒绝发布，已有目录失败保留最后有效快照", async () => {
+  await fixture(async ({ config, directory }) => {
+    let broken = true;
+    const adapter = createZcodeAdapter(config, {
+      catalogMode: "manual", refreshCatalogOnStart: false,
+      cacheDirectory: directory, endpointRouting: null, clientSigning: null,
+      configCache: {
+        get: async () => { if (broken) throw new ZcodeConfigError("测试授权失败"); return snapshot(); },
+        close() {},
+      },
+    });
+    try {
+      await assert.rejects(adapter.refreshCatalog(), /测试授权失败/);
+      assert.deepEqual(await adapter.catalog(), { models: [] });
+      assert.equal(fs.existsSync(path.join(directory, "zcode-catalog.json")), false);
+      broken = false;
+      const valid = await adapter.refreshCatalog();
+      broken = true;
+      assert.deepEqual(await adapter.refreshCatalog(), valid);
+      assert.deepEqual(await adapter.reloadCatalog(), valid);
+    } finally { adapter.close(); }
   });
 });
 

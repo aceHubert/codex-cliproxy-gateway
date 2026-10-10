@@ -156,18 +156,24 @@ test("误改的 codex-restart 参数不再作为别名接受", async () => {
   }
 });
 
-test("models cpa-only switch requires sync", async () => {
-  await assert.rejects(
-    runCli(["models", "--upstream-only"]),
-    /--upstream-only.*only supported by install or models --sync/,
-  );
+test("models 模式参数统一引导迁移到 config", async () => {
+  for (const option of ["--upstream-only", "--cpa-only"]) {
+    for (const arguments_ of [["models", option], ["models", "--sync", option]]) {
+      await assert.rejects(runCli(arguments_), /models no longer accepts.*config --upstream-only on\|off/);
+    }
+  }
+});
+
+test("config upstream-only 要求 on 或 off，restart-codex 要求同时修改配置", async () => {
+  await assert.rejects(runCli(["config", "--upstream-only"]), /--upstream-only requires a value/);
+  await assert.rejects(runCli(["config", "--upstream-only", "true"]), /--upstream-only expects on or off/);
+  await assert.rejects(runCli(["config", "--restart-codex"]), /config --restart-codex requires a configuration change/);
 });
 
 test("unknown options are rejected instead of silently ignored", async () => {
   await assert.rejects(runCli(["models", "--log", "on"]), /Unknown option --log for command "models"/);
   await assert.rejects(runCli(["models", "--sync", "--websocket", "on"]), /Unknown option --websocket for command "models"/);
   await assert.rejects(runCli(["config", "--logg", "on"]), /Unknown option --logg for command "config"/);
-  await assert.rejects(runCli(["config", "--upstream-only"]), /Unknown option --upstream-only for command "config"/);
   // 隔离 HOME 确认 config 命令止步于未安装错误，而非参数报错。
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "config-command-"));
   const previousHome = process.env.HOME;
@@ -176,6 +182,9 @@ test("unknown options are rejected instead of silently ignored", async () => {
   delete process.env.CODEX_HOME;
   try {
     await assert.rejects(runCli(["config", "--log", "on"]), /Gateway is not installed/);
+    for (const mode of ["on", "off"]) {
+      await assert.rejects(runCli(["config", "--upstream-only", mode, "--restart-codex"]), /Gateway is not installed/);
+    }
   } finally {
     if (previousHome === undefined) delete process.env.HOME;
     else process.env.HOME = previousHome;

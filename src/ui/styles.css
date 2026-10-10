@@ -507,14 +507,6 @@ input:checked + .slider:before {
   transform: translateX(16px);
   background-color: #042f1f;
 }
-/* upstream-only 模式下禁用的开关：视觉压暗并明确不可点 */
-.switch.disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-.switch.disabled .slider {
-  cursor: not-allowed;
-}
 .zcode-disabled-hint {
   color: #f59e0b;
 }

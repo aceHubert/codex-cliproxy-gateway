@@ -33,6 +33,7 @@ export interface QoderDependencies extends QoderRegionDependencies {
   codexModelsCacheFile?: string;
   fetch?: typeof fetch;
   catalogRefreshIntervalMs?: number;
+  catalogMode?: "dynamic" | "manual";
   refreshCatalogOnStart?: boolean;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
@@ -42,7 +43,7 @@ export interface QoderDependencies extends QoderRegionDependencies {
 }
 
 export function qoderEnabled(config: GatewayConfig): boolean {
-  return config.qoder === true && config.upstreamOnly !== true;
+  return config.qoder === true;
 }
 
 export function validateQoderConfig(config: GatewayConfig): void {
@@ -131,6 +132,7 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
         transport,
         store: createQoderCatalogStore({
           region,
+          catalogMode: dependencies.catalogMode,
           cacheDirectory,
           credentials,
           codexModelsCacheFile: dependencies.codexModelsCacheFile,
@@ -145,6 +147,10 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
   let timer: ReturnType<typeof setInterval> | undefined;
   const schedule = dependencies.setInterval ?? setInterval;
   const cancel = dependencies.clearInterval ?? clearInterval;
+  let startup: Promise<void> | undefined;
+  async function refreshAll(): Promise<void> {
+    await Promise.all(regions.map((runtime) => runtime.store.refresh()));
+  }
   function backgroundRefresh(): void {
     if (closed) return;
     for (const runtime of regions) {
@@ -157,14 +163,21 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
     }
   }
   if (regions.length) {
-    if (dependencies.refreshCatalogOnStart !== false) backgroundRefresh();
-    timer = schedule(backgroundRefresh, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? 120_000));
-    timer.unref?.();
+    if (dependencies.refreshCatalogOnStart !== false) {
+      startup = refreshAll();
+      void startup.catch(() => {});
+      void startup.finally(() => { startup = undefined; }).catch(() => {});
+    }
+    if (dependencies.catalogMode !== "manual") {
+      timer = schedule(backgroundRefresh, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? 120_000));
+      timer.unref?.();
+    }
   }
 
   return {
     async catalog(): Promise<ModelCatalog> {
       if (!regions.length || closed) return { models: [] };
+      await startup?.catch(() => {});
       const models = [];
       for (const runtime of regions) {
         try {
@@ -179,6 +192,16 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
       }
       // 系统提示词已在 buildQoderCatalog 合成时替换（含 model_messages 模板），缓存即成品。
       return { models };
+    },
+    async refreshCatalog(): Promise<ModelCatalog> {
+      if (!regions.length || closed) return { models: [] };
+      await (startup ?? refreshAll());
+      return { models: (await Promise.all(regions.map((runtime) => runtime.store.catalog()))).flatMap((catalog) => catalog.models) };
+    },
+    async reloadCatalog(): Promise<ModelCatalog> {
+      if (!regions.length || closed) return { models: [] };
+      await startup?.catch(() => {});
+      return { models: (await Promise.all(regions.map((runtime) => runtime.store.reload()))).flatMap((catalog) => catalog.models) };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       if (!regions.length || closed) return qoderError(404, "Qoder 适配器未启用");

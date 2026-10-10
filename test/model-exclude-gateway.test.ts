@@ -40,6 +40,7 @@ async function gatewayFixture(
     ...overrides,
   };
   fs.writeFileSync(config.catalogPath, JSON.stringify({ models: CPA_MODELS }));
+  fs.writeFileSync(path.join(directory, "codex-catalog.json"), JSON.stringify({ models: CPA_MODELS }));
   const upstreamCalls: string[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -106,9 +107,9 @@ test("out-of-scope exclusion rules never block upstream or official inference re
   });
 });
 
-test("upstream-only mode leaves the catalog and requests untouched by exclusion rules", TIMEOUT, async () => {
+test("upstream-only exclusion rules still leave upstream models and requests untouched", TIMEOUT, async () => {
   await gatewayFixture(async ({ create, upstreamCalls }) => {
-    // upstream-only 没有本地兼容端：排除规则整体不生效。
+    // upstream-only 只过滤本地兼容端，上游裸 ID 不参与排除。
     const handler = create({ upstreamOnly: true, excludedModels: ["gamma", "test-cpa", "agy/x"] });
     const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
     const models = ((await codex.json()) as Json).models as Json[];
@@ -309,6 +310,7 @@ function webUiFixture(): { handler: (request: Request) => Promise<Response>; pat
     excludedModels: ["qoder-cn/qoder-code", "zcode-team-coding-plan/glm-5.3"],
   };
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify(config, null, 2));
+  fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [{ slug: "upstream-test" }] }));
   fs.writeFileSync(paths.uiTokenFile, `${UI_TOKEN}\n`, { mode: 0o600 });
   fs.writeFileSync(paths.modelsCacheFile, JSON.stringify({
     fetched_at: new Date().toISOString(), client_version: "0.150.0", models: [{ slug: "qoder-cn/x" }],
@@ -316,7 +318,9 @@ function webUiFixture(): { handler: (request: Request) => Promise<Response>; pat
   const uiHtmlPath = path.join(home, "ui-index.html");
   fs.writeFileSync(uiHtmlPath, "<!doctype html><html><body><div id=\"root\"></div></body></html>");
   const handler = (request: Request) =>
-    handleWebUiRequest(request, config, { paths, uiHtmlPath }, config.port);
+    handleWebUiRequest(request, config, { paths, uiHtmlPath,
+      modelDeps: { reloadModels: async () => ({ loaded: false, revision: "test-revision" }) },
+    }, config.port);
   return { handler, paths, home };
 }
 
@@ -353,7 +357,7 @@ test("web ui config api splits excluded rules into prefix groups and expands the
         excludedModelGroups: { qoder: ["qoder-code-x", "  "], agy: ["gemini-2.5-flash"], zcode: ["glm-5.3"] },
       },
     }));
-    assert.equal(posted.status, 200);
+    assert.equal(posted.status, 200, await posted.clone().text());
     const payload = (await posted.json()) as Json;
     assert.deepEqual(payload.applied, ["excludedModels"]);
     const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as GatewayConfig;

@@ -27,6 +27,40 @@ import type { ModelCatalog } from "../src/types.ts";
 const freeMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0, output: 0 }, ...extra });
 const paidMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0.5, output: 1.5 }, ...extra });
 
+test("Zen 手动目录查询不发网，显式刷新及磁盘重载同步协议、端点和档位", { timeout: 60_000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-manual-"));
+  try {
+    let time = 1_000;
+    let calls = 0;
+    let npm = "@ai-sdk/openai-compatible";
+    let levels = ["low"];
+    const options = { cacheDirectory: directory, now: () => time,
+      fetchCatalog: async () => { calls++; return { data: [{ id: "one-free" }] }; },
+      fetchMetadata: async () => { calls++; return { opencode: { api: "https://zen.invalid/v1", models: { "one-free": freeMeta({
+        provider: { npm }, reasoning_options: [{ type: "effort", values: levels }],
+      }) } } }; } };
+    const store = createOpencodeZenCatalogStore({ ...options, catalogMode: "manual" });
+    assert.deepEqual(await store.catalog(), []);
+    assert.equal(calls, 0);
+    await store.refresh();
+    time += 700_000;
+    assert.equal((await store.catalog())[0]!.slug, "opencode-zen/one-free");
+    assert.equal(calls, 2);
+    npm = "@ai-sdk/anthropic";
+    levels = ["high", "max"];
+    await createOpencodeZenCatalogStore(options).refresh(true);
+    await store.reload();
+    assert.equal(store.protocol("one-free"), "anthropic");
+    assert.equal(store.endpoint("one-free"), "https://zen.invalid/v1");
+    assert.deepEqual(store.effortLevels("one-free"), ["high", "max"]);
+    assert.equal(calls, 4);
+    const missing = createOpencodeZenCatalogStore({ cacheDirectory: path.join(directory, "missing"), catalogMode: "manual",
+      fetchCatalog: async () => { throw new Error("离线"); } });
+    await assert.rejects(missing.refresh(), /没有可用缓存/);
+    assert.deepEqual(await missing.catalog(), []);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("模型前缀识别与剥除：opencode-zen/ 前缀大小写不敏感", () => {
   assert.equal(isOpencodeZenModel("opencode-zen/nemotron-3.5-lightning-free"), true);
   assert.equal(isOpencodeZenModel("OPENCODE-ZEN/glm-5-free"), true);
