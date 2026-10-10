@@ -10,7 +10,7 @@ import {
 import { Header } from "./Header.tsx";
 import { TextView } from "./TextView.tsx";
 import { navigate } from "./hash-router.ts";
-import { useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 
 type LogTab = "gateway" | "requests";
 
@@ -222,11 +222,11 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
           <button
             className={`drawer-tab-btn${tab === "gateway" ? " active" : ""}`}
             onClick={() => setTab("gateway")}
-          >{t("tabGateway")}</button>
+          >{t("logs:tabGateway")}</button>
           <button
             className={`drawer-tab-btn${tab === "requests" ? " active" : ""}`}
             onClick={() => setTab("requests")}
-          >{t("tabRequests")}</button>
+          >{t("logs:tabRequests")}</button>
         </div>
 
         {tab === "gateway" ? (
@@ -235,7 +235,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
               className="btn btn-secondary"
               style={{ padding: "4px 8px", fontSize: 11 }}
               onClick={refreshGateway}
-              title={t("refreshTail")}
+              title={t("logs:refreshTail")}
             >
               <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <polyline points="23 4 23 10 17 10" />
@@ -248,29 +248,29 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
                 checked={autoRefresh}
                 onChange={(event) => setAutoRefresh(event.target.checked)}
               />
-              <span>{t("autoRefresh")}</span>
+              <span>{t("logs:autoRefresh")}</span>
             </label>
-            {gatewayLog?.truncated && <span className="truncated-note">{t("logTruncated")}</span>}
+            {gatewayLog?.truncated && <span className="truncated-note">{t("logs:logTruncated")}</span>}
           </div>
         ) : (
           <button
             className="btn btn-secondary"
             style={{ padding: "4px 8px", fontSize: 11 }}
             onClick={() => loadFilesPage(page, pageSize)}
-            title={t("refreshListTitle")}
+            title={t("logs:refreshListTitle")}
           >
             <svg style={{ width: 12, height: 12 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="23 4 23 10 17 10" />
               <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
             </svg>
-            <span>{t("refreshList")}</span>
+            <span>{t("logs:refreshList")}</span>
           </button>
         )}
       </div>
 
       {loadError && (
         <div className="restart-banner error">
-          <span>{t("loadFailed")}: {loadError}</span>
+          <span>{t("common:loadFailed")}: {loadError}</span>
         </div>
       )}
 
@@ -280,7 +280,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
             lines={gatewayLines}
             className="terminal-view"
             lineClass={gatewayLineClass}
-            emptyLabel={t("emptyLog")}
+            emptyLabel={t("logs:emptyLog")}
             autoScrollBottom
             open={gatewayFindOpen}
             onOpenChange={setGatewayFindOpen}
@@ -289,16 +289,16 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
       ) : (
         <div ref={requestsViewRef} className="requests-view">
           <div className="file-table-container">
-            {!logging && <div className="requests-empty">{t("loggingOffHint")}</div>}
-            {logging && files && files.length === 0 && <div className="requests-empty">{t("requestsEmpty")}</div>}
+            {!logging && <div className="requests-empty">{t("logs:loggingOffHint")}</div>}
+            {logging && files && files.length === 0 && <div className="requests-empty">{t("logs:requestsEmpty")}</div>}
             {files && files.length > 0 && (
               <table className="file-table">
                 <thead>
                   <tr>
-                    <th>{t("thFilename")}</th>
+                    <th>{t("logs:thFilename")}</th>
                     <th>Type</th>
-                    <th>{t("thSize")}</th>
-                    <th>{t("thUpdated")}</th>
+                    <th>{t("logs:thSize")}</th>
+                    <th>{t("logs:thUpdated")}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -328,9 +328,9 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
                   className="btn btn-secondary pager-btn"
                   disabled={page <= 1}
                   onClick={() => setPage((current) => Math.max(1, current - 1))}
-                >{t("pagerPrev")}</button>
+                >{t("logs:pagerPrev")}</button>
                 <span className="pager-status">
-                  {t("pagerStatus", { page, pages: maxPage, total: totalFiles })}
+                  {t("logs:pagerStatus", { page, pages: maxPage, count: totalFiles })}
                 </span>
                 <select
                   className="pager-size"
@@ -341,7 +341,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
                   }}
                 >
                   {REQUEST_LOG_PAGE_SIZES.map((size) => (
-                    <option key={size} value={size}>{size} / {t("perPage")}</option>
+                    <option key={size} value={size}>{size} / {t("logs:perPage")}</option>
                   ))}
                 </select>
                 <button
@@ -349,7 +349,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
                   className="btn btn-secondary pager-btn"
                   disabled={page >= maxPage}
                   onClick={() => setPage((current) => Math.min(maxPage, current + 1))}
-                >{t("pagerNext")}</button>
+                >{t("logs:pagerNext")}</button>
               </div>
             )}
           </div>
@@ -358,7 +358,7 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
             <>
               <div
                 className={`pane-splitter${dragging ? " dragging" : ""}`}
-                title={t("splitterTitle")}
+                title={t("logs:splitterTitle")}
                 onPointerDown={onSplitterPointerDown}
                 onPointerMove={onSplitterPointerMove}
                 onPointerUp={onSplitterPointerUp}
@@ -372,16 +372,16 @@ export function LogsPage({ status, onAuthExpired }: { status: UiStatus; onAuthEx
               >
                 <div className="preview-header">
                   <span style={{ fontFamily: "var(--font-mono)", color: "var(--fg-primary)" }}>
-                    {selected?.name ?? t("selectFile")}
+                    {selected?.name ?? t("logs:selectFile")}
                   </span>
-                  {selected?.truncated && <span style={{ color: "#fbbf24" }}>{t("previewTruncated")}</span>}
+                  {selected?.truncated && <span style={{ color: "#fbbf24" }}>{t("logs:previewTruncated")}</span>}
                 </div>
                 <div className="preview-fill">
                   <TextView
                     lines={previewLines}
                     className="preview-body"
                     lineClass={previewLineClass}
-                    emptyLabel={t("selectFile")}
+                    emptyLabel={t("logs:selectFile")}
                     open={requestFindOpen}
                     onOpenChange={setRequestFindOpen}
                   />

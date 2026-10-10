@@ -1,0 +1,20 @@
+/** common 命名空间（zh）：Header/App/TokenPrompt/TextView 页面文案。 */
+export default {
+  brandBadge: "Web UI",
+  localBadge: "仅本机",
+  logsBtn: "日志",
+  backToConfig: "返回配置",
+  langZh: "中",
+  langEn: "EN",
+  tokenTitle: "需要访问令牌",
+  tokenDesc: "Web UI 需要令牌鉴权。请运行 codex-cliproxy web 获取带令牌的地址，或粘贴令牌：",
+  tokenPlaceholder: "ccp_…",
+  tokenSubmit: "继续",
+  tokenInvalid: "令牌无效",
+  loadFailed: "加载失败",
+  retry: "重试",
+  findPlaceholder: "查找…",
+  prevMatch: "上一个",
+  nextMatch: "下一个",
+  closeFind: "关闭",
+} as const;

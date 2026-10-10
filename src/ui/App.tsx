@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { captureTokenFromUrl, getUiStatus, setUiToken, ApiError, type UiStatus } from "./api.ts";
 import { useHashRoute } from "./hash-router.ts";
-import { LangProvider, useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 import { ConfigPage } from "./ConfigPage.tsx";
 import { LogsPage } from "./LogsPage.tsx";
 
@@ -18,18 +18,18 @@ function TokenPrompt({ onDone }: { onDone: () => void }) {
   return (
     <div className="token-screen">
       <div className="card token-card">
-        <h2 className="card-title">{t("tokenTitle")}</h2>
-        <p className="field-desc">{t("tokenDesc")}</p>
+        <h2 className="card-title">{t("common:tokenTitle")}</h2>
+        <p className="field-desc">{t("common:tokenDesc")}</p>
         <input
           className="input-text"
           style={{ maxWidth: "100%" }}
           value={value}
-          placeholder={t("tokenPlaceholder")}
+          placeholder={t("common:tokenPlaceholder")}
           onChange={(event) => { setValue(event.target.value); setInvalid(false); }}
           onKeyDown={(event) => { if (event.key === "Enter") submit(); }}
         />
-        {invalid && <p className="field-desc error-text">{t("tokenInvalid")}</p>}
-        <button className="btn btn-save dirty" onClick={submit}>{t("tokenSubmit")}</button>
+        {invalid && <p className="field-desc error-text">{t("common:tokenInvalid")}</p>}
+        <button className="btn btn-save dirty" onClick={submit}>{t("common:tokenSubmit")}</button>
       </div>
     </div>
   );
@@ -40,9 +40,9 @@ function ErrorScreen({ message, onRetry }: { message: string; onRetry: () => voi
   return (
     <div className="token-screen">
       <div className="card token-card">
-        <h2 className="card-title">{t("loadFailed")}</h2>
+        <h2 className="card-title">{t("common:loadFailed")}</h2>
         <p className="field-desc">{message}</p>
-        <button className="btn btn-secondary" onClick={onRetry}>{t("retry")}</button>
+        <button className="btn btn-secondary" onClick={onRetry}>{t("common:retry")}</button>
       </div>
     </div>
   );
@@ -83,16 +83,14 @@ export function App() {
   }, []);
 
   return (
-    <LangProvider>
-      {authFailed
-        ? <TokenPrompt onDone={reload} />
-        : error
-          ? <ErrorScreen message={error} onRetry={reload} />
-          : status
-            ? (route === "/logs"
-              ? <LogsPage status={status} onAuthExpired={handleAuthExpired} />
-              : <ConfigPage status={status} onStatusChange={setStatus} onAuthExpired={handleAuthExpired} />)
-            : <BootSplash />}
-    </LangProvider>
+    authFailed
+      ? <TokenPrompt onDone={reload} />
+      : error
+        ? <ErrorScreen message={error} onRetry={reload} />
+        : status
+          ? (route === "/logs"
+            ? <LogsPage status={status} onAuthExpired={handleAuthExpired} />
+            : <ConfigPage status={status} onStatusChange={setStatus} onAuthExpired={handleAuthExpired} />)
+          : <BootSplash />
   );
 }

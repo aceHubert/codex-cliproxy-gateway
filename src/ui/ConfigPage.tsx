@@ -12,7 +12,7 @@ import {
 } from "./api.ts";
 import { Header } from "./Header.tsx";
 import { ModelPicker } from "./ModelPicker.tsx";
-import { useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 import type { ExcludedModelGroup } from "./api.ts";
 import { joinExcludedLines, splitExcludedLines } from "./excluded-models-field.ts";
 import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize, type LogSizeUnit } from "./log-size-field.ts";
@@ -79,7 +79,7 @@ function CopyButton({ text, title }: { text: string; title: string }) {
         });
       }}
     >
-      {copied ? <span style={{ fontSize: 11 }}>{t("copied")}</span> : (
+      {copied ? <span style={{ fontSize: 11 }}>{t("config:copied")}</span> : (
         <svg style={{ width: 13, height: 13 }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
@@ -211,8 +211,8 @@ export function ConfigPage({
         {groups.map((group) => (
           <ExcludedGroupInput
             key={group.key}
-            label={t("excludedGroupLabel")}
-            placeholder={t("excludedGroupPlaceholder", {
+            label={t("config:excludedGroupLabel")}
+            placeholder={t("config:excludedGroupPlaceholder", {
               example: EXCLUDED_GROUP_EXAMPLES[group.key] ?? "gemini-2.5-flash",
             })}
             value={form.excludedEntries[group.key] ?? ""}
@@ -222,7 +222,7 @@ export function ConfigPage({
               : current)}
           />
         ))}
-        <p className="field-desc">{t("descExcludedGroup")}</p>
+        <p className="field-desc">{t("config:descExcludedGroup")}</p>
       </div>
     );
   };
@@ -261,18 +261,18 @@ export function ConfigPage({
         const result = await applyUpstreamModels(formSnapshot.selectedModels);
         setCodexNotice({
           kind: result.upstreamOnly ? "warn" : "ok",
-          text: result.upstreamOnly ? t("modelsSavedUpstreamOnly") : t("modelsSavedDynamic"),
+          text: result.upstreamOnly ? t("config:modelsSavedUpstreamOnly") : t("config:modelsSavedDynamic"),
         });
         if (restartCodex) {
-          setCodexNotice({ kind: "warn", text: t("codexRestarting") });
+          setCodexNotice({ kind: "warn", text: t("config:codexRestarting") });
           const stop = await restartCodexAppServers();
           setCodexNotice({
             kind: stop.results.some(({ status }) => status !== "stopped") ? "error" : "ok",
             text: stop.results.length === 0
-              ? t("codexRestartNone")
+              ? t("config:codexRestartNone")
               : stop.results.every(({ status }) => status === "stopped")
-              ? t("codexRestartDone")
-              : t("codexRestartFailed"),
+              ? t("config:codexRestartDone")
+              : t("config:codexRestartFailed"),
           });
         }
       }
@@ -331,13 +331,13 @@ export function ConfigPage({
           disabled={!dirty || invalidLogSize || invalidRequestLogCount || (phase !== "idle" && phase !== "failed")}
           onClick={() => setPhase("confirm")}
         >
-          <span>{phase === "saving" ? t("saving") : t("saveBtn")}</span>
+          <span>{phase === "saving" ? t("config:saving") : t("config:saveBtn")}</span>
         </button>
       </Header>
       {restartBanner && (
         <div className="restart-banner">
           <span className="status-dot" />
-          {phase === "saving" ? t("saving") : t("savedRestarting")}
+          {phase === "saving" ? t("config:saving") : t("config:savedRestarting")}
         </div>
       )}
       {codexNotice && (
@@ -348,18 +348,18 @@ export function ConfigPage({
       )}
       {phase === "failed" && saveError && (
         <div className="restart-banner error">
-          {t("saveFailed")}: {saveError}
+          {t("config:saveFailed")}: {saveError}
         </div>
       )}
       {loadError && (
         <div className="restart-banner error">
-          <span>{t("loadFailed")}: {loadError}</span>
+          <span>{t("common:loadFailed")}: {loadError}</span>
           <button
             className="btn btn-secondary"
             style={{ padding: "4px 10px", fontSize: 11 }}
             onClick={loadConfig}
           >
-            {t("retry")}
+            {t("common:retry")}
           </button>
         </div>
       )}
@@ -367,8 +367,8 @@ export function ConfigPage({
         <section className="card">
           <div className="card-header">
             <div className="card-title-group">
-              <h2 className="card-title">{t("card1Title")}</h2>
-              <span className="card-badge badge-editable">{t("badgeEditable")}</span>
+              <h2 className="card-title">{t("config:card1Title")}</h2>
+              <span className="card-badge badge-editable">{t("config:badgeEditable")}</span>
             </div>
           </div>
           <div className="card-body">
@@ -376,7 +376,7 @@ export function ConfigPage({
               <>
                 <div className="field-row">
                   <div className="field-label-group">
-                    <span className="field-label">{t("labelReqLogging")}</span>
+                    <span className="field-label">{t("config:labelReqLogging")}</span>
                     <span className="field-keyname">requestLogging</span>
                   </div>
                   <div className="field-control-area">
@@ -389,18 +389,18 @@ export function ConfigPage({
                       />
                       <span className="slider" />
                     </label>
-                    <p className="field-desc">{t("descReqLogging")}</p>
+                    <p className="field-desc">{t("config:descReqLogging")}</p>
                     {form.requestLogging && (
                       <div className="log-dir-line">
                         <code>{config.editable.logDir}</code>
-                        <span className="field-desc">{t("pathNote")}</span>
+                        <span className="field-desc">{t("config:pathNote")}</span>
                       </div>
                     )}
                   </div>
                 </div>
                 <div className="field-row">
                   <div className="field-label-group">
-                    <span className="field-label">{t("labelMaxReqLogs")}</span>
+                    <span className="field-label">{t("config:labelMaxReqLogs")}</span>
                     <span className="field-keyname">maxRequestLogs</span>
                   </div>
                   <div className="field-control-area">
@@ -411,19 +411,19 @@ export function ConfigPage({
                       max={1000}
                       step={10}
                       required
-                      aria-label={t("labelMaxReqLogs")}
+                      aria-label={t("config:labelMaxReqLogs")}
                       aria-invalid={invalidRequestLogCount}
                       aria-describedby={invalidRequestLogCount ? "request-log-count-error" : undefined}
                       value={form.maxRequestLogs}
                       onChange={(event) => setForm({ ...form, maxRequestLogs: event.target.value })}
                     />
-                    <p className="field-desc">{t("descMaxReqLogs")}</p>
-                    {invalidRequestLogCount && <p id="request-log-count-error" className="field-desc error-text" role="alert">{t("requestLogCountInvalid")}</p>}
+                    <p className="field-desc">{t("config:descMaxReqLogs")}</p>
+                    {invalidRequestLogCount && <p id="request-log-count-error" className="field-desc error-text" role="alert">{t("config:requestLogCountInvalid")}</p>}
                   </div>
                 </div>
                 <div className="field-row">
                   <div className="field-label-group">
-                    <span className="field-label">{t("labelMaxGwBytes")}</span>
+                    <span className="field-label">{t("config:labelMaxGwBytes")}</span>
                     <span className="field-keyname">maxGatewayLogBytes</span>
                   </div>
                   <div className="field-control-area">
@@ -435,7 +435,7 @@ export function ConfigPage({
                         max={1024}
                         step="any"
                         required
-                        aria-label={t("labelMaxGwBytes")}
+                        aria-label={t("config:labelMaxGwBytes")}
                         aria-invalid={invalidLogSize}
                         aria-describedby={invalidLogSize ? "log-size-error" : undefined}
                         value={form.maxGatewayLogBytes}
@@ -443,20 +443,20 @@ export function ConfigPage({
                       />
                       <select
                         className="input-text"
-                        aria-label={t("logSizeUnit")}
+                        aria-label={t("config:logSizeUnit")}
                         value={form.maxGatewayLogUnit}
                         onChange={(event) => setForm({ ...form, maxGatewayLogUnit: event.target.value as LogSizeUnit })}
                       >
                         {LOG_SIZE_UNITS.map((unit) => <option key={unit} value={unit}>{unit}</option>)}
                       </select>
                     </div>
-                    <p className="field-desc">{t("descMaxGwBytes")}</p>
-                    {invalidLogSize && <p id="log-size-error" className="field-desc error-text" role="alert">{t("logSizeInvalid")}</p>}
+                    <p className="field-desc">{t("config:descMaxGwBytes")}</p>
+                    {invalidLogSize && <p id="log-size-error" className="field-desc error-text" role="alert">{t("config:logSizeInvalid")}</p>}
                   </div>
                 </div>
                 <div className="field-row">
                   <div className="field-label-group">
-                    <span className="field-label">{t("labelModelSelect")}</span>
+                    <span className="field-label">{t("config:labelModelSelect")}</span>
                     <span className="field-keyname">selectedModels</span>
                   </div>
                   <div className="field-control-area">
@@ -472,7 +472,7 @@ export function ConfigPage({
                 {showZcode && (
                   <div className="field-row">
                     <div className="field-label-group">
-                      <span className="field-label">{t("labelZcode")}</span>
+                      <span className="field-label">{t("config:labelZcode")}</span>
                       <span className="field-keyname">zcode</span>
                     </div>
                     <div className="field-control-area">
@@ -487,12 +487,12 @@ export function ConfigPage({
                         />
                         <span className="slider" />
                       </label>
-                      <p className="field-desc">{t("descZcode")}</p>
+                      <p className="field-desc">{t("config:descZcode")}</p>
                       {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("zcodeDisabledHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:zcodeDisabledHint")}</p>
                       )}
                       {!config.detected.zcode && (
-                        <p className="field-desc zcode-disabled-hint">{t("zcodeMissingHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:zcodeMissingHint")}</p>
                       )}
                       {renderExcludedGroups("zcode")}
                     </div>
@@ -501,7 +501,7 @@ export function ConfigPage({
                 {showCodebuddy && (
                   <div className="field-row">
                     <div className="field-label-group">
-                      <span className="field-label">{t("labelCodebuddy")}</span>
+                      <span className="field-label">{t("config:labelCodebuddy")}</span>
                       <span className="field-keyname">codebuddy</span>
                     </div>
                     <div className="field-control-area">
@@ -519,17 +519,17 @@ export function ConfigPage({
                         </label>
                         {/* 账号选择只在 CLI（codebuddy --switch）：这里只读显示后端实时
                             解析的实际命中账号，无交互态、不进 changes、不写配置。 */}
-                        <span className="account-readonly" aria-label={t("labelCodebuddyAccount")}>
-                          {config.detected.codebuddyAccountLabel ?? t("codebuddyAccountNone")}
+                        <span className="account-readonly" aria-label={t("config:labelCodebuddyAccount")}>
+                          {config.detected.codebuddyAccountLabel ?? t("config:codebuddyAccountNone")}
                         </span>
                       </div>
-                      <p className="field-desc">{t("descCodebuddy")}</p>
-                      <p className="field-desc">{t("descCodebuddyAccount")}</p>
+                      <p className="field-desc">{t("config:descCodebuddy")}</p>
+                      <p className="field-desc">{t("config:descCodebuddyAccount")}</p>
                       {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("codebuddyDisabledHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:codebuddyDisabledHint")}</p>
                       )}
                       {!config.detected.codebuddy && (
-                        <p className="field-desc zcode-disabled-hint">{t("codebuddyMissingHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:codebuddyMissingHint")}</p>
                       )}
                       {renderExcludedGroups("codebuddy")}
                     </div>
@@ -538,7 +538,7 @@ export function ConfigPage({
                 {showQoder && (
                   <div className="field-row">
                     <div className="field-label-group">
-                      <span className="field-label">{t("labelQoder")}</span>
+                      <span className="field-label">{t("config:labelQoder")}</span>
                       <span className="field-keyname">qoder</span>
                     </div>
                     <div className="field-control-area">
@@ -554,7 +554,7 @@ export function ConfigPage({
                           <span className="slider" />
                         </label>
                         {/* 只展示当前实际生效的来源（CLI 优先、桌面回退），不允许修改。 */}
-                        <div className="qoder-source-options" role="group" aria-label={t("labelQoderSources")}>
+                        <div className="qoder-source-options" role="group" aria-label={t("config:labelQoderSources")}>
                           {qoderSources.map((label) => (
                             <label key={label} className="qoder-source-option">
                               <input
@@ -568,13 +568,13 @@ export function ConfigPage({
                           ))}
                         </div>
                       </div>
-                      <p className="field-desc">{t("descQoder")}</p>
-                      <p className="field-desc">{t("descQoderSources")}</p>
+                      <p className="field-desc">{t("config:descQoder")}</p>
+                      <p className="field-desc">{t("config:descQoderSources")}</p>
                       {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("qoderDisabledHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:qoderDisabledHint")}</p>
                       )}
                       {!config.detected.qoder && (
-                        <p className="field-desc zcode-disabled-hint">{t("qoderMissingHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:qoderMissingHint")}</p>
                       )}
                       {renderExcludedGroups("qoder")}
                     </div>
@@ -583,7 +583,7 @@ export function ConfigPage({
                 {showAgy && (
                   <div className="field-row">
                     <div className="field-label-group">
-                      <span className="field-label">{t("labelAgy")}</span>
+                      <span className="field-label">{t("config:labelAgy")}</span>
                       <span className="field-keyname">agy</span>
                     </div>
                     <div className="field-control-area">
@@ -598,12 +598,12 @@ export function ConfigPage({
                         />
                         <span className="slider" />
                       </label>
-                      <p className="field-desc">{t("descAgy")}</p>
+                      <p className="field-desc">{t("config:descAgy")}</p>
                       {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("agyDisabledHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:agyDisabledHint")}</p>
                       )}
                       {!config.detected.agy && (
-                        <p className="field-desc zcode-disabled-hint">{t("agyMissingHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:agyMissingHint")}</p>
                       )}
                       {renderExcludedGroups("agy")}
                     </div>
@@ -613,7 +613,7 @@ export function ConfigPage({
                     官方门禁策略调整导致 403 时靠错误信息指引，不在此做可用性探测。 */}
                 <div className="field-row">
                   <div className="field-label-group">
-                    <span className="field-label">{t("labelOpencodeZen")}</span>
+                    <span className="field-label">{t("config:labelOpencodeZen")}</span>
                     <span className="field-keyname">opencodeZen</span>
                   </div>
                   <div className="field-control-area">
@@ -628,10 +628,10 @@ export function ConfigPage({
                       />
                       <span className="slider" />
                     </label>
-                    <p className="field-desc">{t("descOpencodeZen")}</p>
-                    <p className="field-desc">{t("descOpencodeZenAuth")}</p>
+                    <p className="field-desc">{t("config:descOpencodeZen")}</p>
+                    <p className="field-desc">{t("config:descOpencodeZenAuth")}</p>
                       {upstreamOnly && (
-                        <p className="field-desc zcode-disabled-hint">{t("opencodeZenDisabledHint")}</p>
+                        <p className="field-desc zcode-disabled-hint">{t("config:opencodeZenDisabledHint")}</p>
                       )}
                     {renderExcludedGroups("opencodeZen")}
                   </div>
@@ -646,7 +646,7 @@ export function ConfigPage({
                   .map((endpoint) => (
                     <div className="field-row" key={endpoint}>
                       <div className="field-label-group">
-                        <span className="field-label">{t("labelExcludedModels")}</span>
+                        <span className="field-label">{t("config:labelExcludedModels")}</span>
                         <span className="field-keyname">{endpoint}</span>
                       </div>
                       <div className="field-control-area">
@@ -663,8 +663,8 @@ export function ConfigPage({
           <section className="card">
             <div className="card-header">
               <div className="card-title-group">
-                <h2 className="card-title">{t("card2Title")}</h2>
-                <span className="card-badge badge-readonly">{t("badgeReadonly")}</span>
+                <h2 className="card-title">{t("config:card2Title")}</h2>
+                <span className="card-badge badge-readonly">{t("config:badgeReadonly")}</span>
               </div>
             </div>
             <div className="card-note-bar">
@@ -672,43 +672,43 @@ export function ConfigPage({
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
-              <span>{t("card2Note")}</span>
+              <span>{t("config:card2Note")}</span>
             </div>
             <div className="card-body">
-              <ReadonlyRow label={t("labelCodexConfig")} keyname={t("keynameCodexConfig")}>
+              <ReadonlyRow label={t("config:labelCodexConfig")} keyname={t("config:keynameCodexConfig")}>
                 <div className="readonly-box">
                   <span className={`pill-badge ${config.readonly.codexConfigManaged ? "pill-green" : "pill-amber"}`}>
-                    {config.readonly.codexConfigManaged ? t("badgeCodexManaged") : t("badgeCodexManual")}
+                    {config.readonly.codexConfigManaged ? t("config:badgeCodexManaged") : t("config:badgeCodexManual")}
                   </span>
                   <span className="codex-config-desc">
-                    {config.readonly.codexConfigManaged ? t("descCodexManaged") : t("descCodexManual")}
+                    {config.readonly.codexConfigManaged ? t("config:descCodexManaged") : t("config:descCodexManual")}
                   </span>
                 </div>
               </ReadonlyRow>
 
               {config.readonly.manualCodexConfig && (
                 <div className="manual-codex-block">
-                  <div className="manual-codex-title">{t("manualConfigTitle")}</div>
+                  <div className="manual-codex-title">{t("config:manualConfigTitle")}</div>
                   <div className="manual-codex-keys">
                     {config.readonly.manualCodexConfig.keys.map((row) => (
                       <div key={row.key} className="manual-codex-key">
                         <code className="manual-codex-keyname">{row.key}</code>
                         <div className="manual-codex-expected">
                           <span>= {row.expected}</span>
-                          <CopyButton text={`${row.key} = "${row.expected}"`} title={t("copyPath")} />
+                          <CopyButton text={`${row.key} = "${row.expected}"`} title={t("config:copyPath")} />
                         </div>
                         <span className={`pill-badge ${
                           row.matches ? "pill-green" : row.current === null ? "pill-red" : "pill-amber"
                         }`}>
                           {row.matches
-                            ? `✓ ${t("manualKeyOk")}`
+                            ? `✓ ${t("config:manualKeyOk")}`
                             : row.current === null
-                              ? `✗ ${t("manualKeyMissing")}`
-                              : `⚠ ${t("manualKeyMismatch")}`}
+                              ? `✗ ${t("config:manualKeyMissing")}`
+                              : `⚠ ${t("config:manualKeyMismatch")}`}
                         </span>
                         {row.current !== null && !row.matches && (
                           <span className="manual-codex-current">
-                            {t("manualKeyCurrent")}: <code>{row.current}</code>
+                            {t("config:manualKeyCurrent")}: <code>{row.current}</code>
                           </span>
                         )}
                       </div>
@@ -718,57 +718,57 @@ export function ConfigPage({
                     && !config.readonly.manualCodexConfig.keys.some(
                       (row) => row.key === "model_catalog_json" && row.matches,
                     ) && (
-                      <p className="field-desc zcode-disabled-hint">{t("manualStaticNote")}</p>
+                      <p className="field-desc zcode-disabled-hint">{t("config:manualStaticNote")}</p>
                   )}
                   {config.readonly.manualCodexConfig.removeModelCatalogJson && (
-                    <p className="field-desc zcode-disabled-hint">{t("manualRemoveCatalogKey")}</p>
+                    <p className="field-desc zcode-disabled-hint">{t("config:manualRemoveCatalogKey")}</p>
                   )}
-                  <p className="field-desc manual-codex-footnote">{t("manualConfigFootnote")}</p>
+                  <p className="field-desc manual-codex-footnote">{t("config:manualConfigFootnote")}</p>
                 </div>
               )}
-              <ReadonlyRow label={t("labelRouterMode")} keyname="routerMode">
+              <ReadonlyRow label={t("config:labelRouterMode")} keyname="routerMode">
                 <div className="readonly-box">
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span className={`pill-badge ${upstreamOnly ? "pill-purple" : "pill-green"}`}>
-                      {upstreamOnly ? t("badgePureUpstream") : t("badgeDynamicRouting")}
+                      {upstreamOnly ? t("config:badgePureUpstream") : t("config:badgeDynamicRouting")}
                     </span>
                   </div>
                   <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    {upstreamOnly ? t("descPureUpstream") : t("descUpstreamOnly")}
+                    {upstreamOnly ? t("config:descPureUpstream") : t("config:descUpstreamOnly")}
                   </span>
                 </div>
               </ReadonlyRow>
-              <ReadonlyRow label={t("labelUpstreamUrl")} keyname="upstreamBaseUrl">
+              <ReadonlyRow label={t("config:labelUpstreamUrl")} keyname="upstreamBaseUrl">
                 <div className="readonly-box">
                   <span>{config.readonly.upstreamBaseUrl}</span>
-                  <CopyButton text={config.readonly.upstreamBaseUrl} title="Copy URL" />
+                  <CopyButton text={config.readonly.upstreamBaseUrl} title={t("config:copyUrl")} />
                 </div>
               </ReadonlyRow>
-              <ReadonlyRow label={t("labelUpstreamType")} keyname="upstreamType">
+              <ReadonlyRow label={t("config:labelUpstreamType")} keyname="upstreamType">
                 <div className="readonly-box">
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ color: "var(--fg-primary)", fontWeight: 600 }}>{config.readonly.upstreamType}</span>
                     <span className="pill-badge pill-cyan">active</span>
                   </div>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("hintOtherType")}</span>
+                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("config:hintOtherType")}</span>
                 </div>
               </ReadonlyRow>
-              <ReadonlyRow label={t("labelHostPort")} keyname="host / port">
+              <ReadonlyRow label={t("config:labelHostPort")} keyname="host / port">
                 <div className="readonly-box">
                   <span>{config.readonly.host} : {config.readonly.port}</span>
-                  <span className="pill-badge pill-purple">{t("badgeLoopback")}</span>
+                  <span className="pill-badge pill-purple">{t("config:badgeLoopback")}</span>
                 </div>
               </ReadonlyRow>
-              <ReadonlyRow label={t("labelPrefix")} keyname="prefix">
+              <ReadonlyRow label={t("config:labelPrefix")} keyname="prefix">
                 <div className="readonly-box">
                   <code style={{ color: "var(--accent)", fontWeight: 600 }}>{config.readonly.prefix}</code>
-                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("descPrefix")}</span>
+                  <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{t("config:descPrefix")}</span>
                 </div>
               </ReadonlyRow>
-              <ReadonlyRow label={t("labelCatalogPath")} keyname="catalogPath">
+              <ReadonlyRow label={t("config:labelCatalogPath")} keyname="catalogPath">
                 <div className="readonly-box">
                   <span style={{ fontSize: 11.5 }}>{config.readonly.catalogPath}</span>
-                  <CopyButton text={config.readonly.catalogPath} title="Copy Path" />
+                  <CopyButton text={config.readonly.catalogPath} title={t("config:copyPath")} />
                 </div>
               </ReadonlyRow>
             </div>
@@ -785,26 +785,26 @@ export function ConfigPage({
                 <line x1="12" y1="9" x2="12" y2="13" />
                 <line x1="12" y1="17" x2="12.01" y2="17" />
               </svg>
-              <span>{modelsDirty ? t("modalTitleModels") : t("modalTitle")}</span>
+              <span>{modelsDirty ? t("config:modalTitleModels") : t("config:modalTitle")}</span>
             </div>
             <p className="modal-body">
               {[
                 modelsDirty
-                  ? upstreamOnly ? t("modalBodyModelsUpstreamOnly") : t("modalBodyModelsDynamic")
+                  ? upstreamOnly ? t("config:modalBodyModelsUpstreamOnly") : t("config:modalBodyModelsDynamic")
                   : null,
-                genericDirty ? t("modalBody") : null,
-              ].filter(Boolean).join(" ") || t("modalBody")}
+                genericDirty ? t("config:modalBody") : null,
+              ].filter(Boolean).join(" ") || t("config:modalBody")}
             </p>
             <div className="modal-actions">
-              <button className="btn btn-secondary" onClick={() => setPhase("idle")}>{t("cancel")}</button>
+              <button className="btn btn-secondary" onClick={() => setPhase("idle")}>{t("config:cancel")}</button>
               {modelsDirty && upstreamOnly && (
-                <button className="btn btn-secondary" onClick={() => save(false)}>{t("modalSkipRestart")}</button>
+                <button className="btn btn-secondary" onClick={() => save(false)}>{t("config:modalSkipRestart")}</button>
               )}
               <button
                 className="btn btn-save dirty"
                 onClick={() => save(modelsDirty && upstreamOnly)}
               >
-                {modelsDirty && upstreamOnly ? t("modalRestartCodex") : t("confirm")}
+                {modelsDirty && upstreamOnly ? t("config:modalRestartCodex") : t("config:confirm")}
               </button>
             </div>
           </div>

@@ -1,0 +1,23 @@
+/** logs 命名空间（zh）：LogsPage 页面文案。 */
+export default {
+  tabGateway: "网关日志",
+  tabRequests: "请求日志",
+  refreshTail: "刷新文本",
+  refreshList: "刷新目录",
+  refreshListTitle: "刷新目录列表（不重载已打开的预览）",
+  splitterTitle: "拖动调整宽度",
+  autoRefresh: "自动刷新",
+  logTruncated: "仅显示末尾 256KB",
+  previewTruncated: "仅显示末尾 64KB",
+  requestsEmpty: "开启请求日志后，这里会出现按请求写下的完整交换记录",
+  loggingOffHint: "请求日志未开启——在配置页打开「请求日志」，或运行 codex-cliproxy config --log on",
+  thFilename: "日志文件",
+  thSize: "大小",
+  thUpdated: "修改时间",
+  pagerPrev: "上一页",
+  pagerNext: "下一页",
+  pagerStatus: "第 {{page}}/{{pages}} 页 · 共 {{count}} 条",
+  perPage: "页",
+  selectFile: "点击左侧文件查看内容",
+  emptyLog: "（暂无日志）",
+} as const;

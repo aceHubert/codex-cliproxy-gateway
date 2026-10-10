@@ -1,0 +1,21 @@
+/** models namespace (en): strings for the ModelPicker component. */
+export default {
+  fetchModels: "Fetch from Upstream",
+  fetchingModels: "Fetching…",
+  modelsFetchHint: "Select upstream models and apply them to your selection, then save your changes.",
+  modelsFetchFailed: "Fetch failed",
+  modelsFilterPlaceholder: "Search models",
+  modelsSelectAll: "All",
+  modelsReload: "Reload",
+  modelsAdded: "Added",
+  modelsApply: "Apply",
+  modelsClose: "Close",
+  modelsRemove: "Remove model",
+  modelsNoResults: "No matching models",
+  modelsNoUpstream: "No upstream models available",
+  modelsPending: "to add",
+  modelsSelectedTitle: "Selected models",
+  modelsCount: "models selected",
+  modelsNone: "No models selected",
+  descModelSelect: "Selected models are always listed below and can be removed directly. Use Save to persist changes.",
+} as const;

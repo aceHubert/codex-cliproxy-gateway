@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 
 /**
  * 共享文本视图（text-view-wrap）：滚动容器 + 浮动查找框 + 组件级快捷键。
@@ -168,7 +168,7 @@ export function TextView({
             ref={inputRef}
             type="text"
             className="find-input"
-            placeholder={t("findPlaceholder")}
+            placeholder={t("common:findPlaceholder")}
             value={rawQuery}
             onChange={(event) => setRawQuery(event.target.value)}
             onKeyDown={(event) => {
@@ -187,7 +187,7 @@ export function TextView({
           <button
             type="button"
             className="find-nav-btn"
-            title={t("prevMatch")}
+            title={t("common:prevMatch")}
             onClick={() => step(-1)}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -197,14 +197,14 @@ export function TextView({
           <button
             type="button"
             className="find-nav-btn"
-            title={t("nextMatch")}
+            title={t("common:nextMatch")}
             onClick={() => step(1)}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
-          <button type="button" className="find-nav-btn" title={t("closeFind")} onClick={close}>
+          <button type="button" className="find-nav-btn" title={t("common:closeFind")} onClick={close}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
