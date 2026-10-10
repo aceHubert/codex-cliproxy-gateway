@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.10.0 (2026-10-10)
+
+#### :rocket: New Feature
+* [#12](https://github.com/aceHubert/codex-cliproxy-gateway/pull/12) feat(upstream-only): 重构 upstream-only 模式并支持模型配置热加载 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.9.1 (2026-10-10)
 
 #### :bug: Bug Fix
