@@ -79,10 +79,21 @@
       },
       "uniqueItems": true
     },
+    "excludedModels": {
+      "description": "排除模型规则：仅对本地兼容端生效——网关在所有适配器与上游目录合并后统一过滤 /models，命中模型的推理请求返回 404；上游 cliproxy/new-api 模型的可选性由 selectedModels（models --sync）管理，官方原生模型不参与排除。每条规则必须以确定的适配器前缀开始（zcode/、zcode-<plan>/、codebuddy-intl|cn/、workbuddy-intl|cn/、qoder-intl|cn/、agy/、opencode-zen/，含 codebuddy/、workbuddy/、qoder/ 旧前缀），另接受产品级家族通配 zcode*/、codebuddy-*/、workbuddy-*/、qoder-*/ 加模型名（各覆盖该产品的全部套餐/地域/旧前缀，Web 分组即保存此形态）；通配只允许出现在前缀之后，大小写不敏感。整族形态（prefix/ 或 prefix/*）、裸 *、无/不完整前缀与作用域外规则会被写入路径拒绝（运行期对存量值宽松：整族仍被识别，作用域外规则被忽略，Web 分组保存会移除归不进分组的存量规则）；Web UI 按兼容端分组编辑，前缀由网关保存时补全；默认空数组。",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true,
+      "default": []
+    },
     "requestLogging": {
       "type": "boolean"
     },
     "logDir": {
+      "description": "请求日志与调试转储目录；缺省时回退运行主目录（~/.codex-cliproxy-gateway，或环境变量 CODEX_CLIPROXY_HOME 指定的目录）下的 logs/。",
       "type": "string",
       "minLength": 1
     },
@@ -95,6 +106,11 @@
       "description": "网关进程日志 gateway.log 与 gateway.error.log 的最大字节数；超限时当前内容复制为时间戳备份（每个文件保留最新 5 个）并原地清空活跃文件，进程持有的句柄继续有效；设置上限同时约束 gateway.log 中配置审计的可追溯深度；0 表示不限制。",
       "type": "integer",
       "minimum": 0
+    },
+    "debug": {
+      "description": "是否开启调试转储：上游错误时把完整请求体落盘到日志目录（当前覆盖 agy 上游 400 的 agy-debug-400.json，含提示词，仅限本机排查）。与 requestLogging 互相独立；默认关闭。",
+      "type": "boolean",
+      "default": false
     },
     "upstreamOnly": {
       "description": "是否只使用第三方上游并纯转发模型名，不添加 cliproxy/ 前缀。",
@@ -128,6 +144,11 @@
     },
     "agy": {
       "description": "是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录（令牌由 agy 进程负责刷新，网关过期即失败不刷新）。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "type": "boolean",
+      "default": false
+    },
+    "opencodeZen": {
+      "description": "是否启用 OpenCode Zen（opencode-zen/ 前缀）Chat Completions 入口；默认关闭。经客户端指纹转发消费 Zen 免费模型（公共鉴权 Bearer public，可用环境变量 OPENCODE_API_KEY 覆盖）。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
       "type": "boolean",
       "default": false
     },

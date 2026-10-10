@@ -35,17 +35,32 @@ export interface ManualCodexConfig {
   keys: ManualCodexKeyRow[];
 }
 
+/** 排除模型分组定义：条目由用户填写模型名（不带前缀），保存时网关自动补全 prefixes
+ * （CodeBuddy 框同时补双产品前缀）。分组即本地适配器前缀的权威清单（含 zcode 各套餐
+ * 前缀）；排除不涉及上游与官方模型。 */
+export interface ExcludedModelGroup {
+  key: string;
+  endpoint: "zcode" | "codebuddy" | "qoder" | "agy" | "opencodeZen";
+  prefixes: string[];
+}
+
 export interface UiConfig {
   editable: {
     zcode: boolean;
     codebuddy: boolean;
     qoder: boolean;
     agy: boolean;
+    /** OpenCode Zen 免费模型入口（公共鉴权，无本机凭据依赖）。 */
+    opencodeZen: boolean;
     requestLogging: boolean;
     logDir: string;
     maxRequestLogs: number;
     maxGatewayLogBytes: number;
     selectedModels: string[];
+    /** 排除模型分组定义（固定顺序，按兼容端排列）。 */
+    excludedGroups: ExcludedModelGroup[];
+    /** 分组 key → 去掉前缀的规则条目（每条一个模型名，允许前缀后的字面量通配）。 */
+    excludedEntries: Record<string, string[]>;
   };
   /** 本机 provider 配置的存在性探测结果：决定对应开关是否显示。 */
   detected: {
@@ -90,9 +105,12 @@ export interface UiConfigChanges {
   codebuddy?: boolean;
   qoder?: boolean;
   agy?: boolean;
+  opencodeZen?: boolean;
   requestLogging?: boolean;
   maxRequestLogs?: string;
   maxGatewayLogBytes?: 0 | string;
+  /** 排除模型：按分组提交（key → 模型名数组，前缀由服务端补全），整组替换。 */
+  excludedModelGroups?: Record<string, string[]>;
 }
 
 export interface RequestLogFile {

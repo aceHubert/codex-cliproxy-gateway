@@ -1,0 +1,21 @@
+/** models 命名空间（zh）：ModelPicker 组件文案。 */
+export default {
+  fetchModels: "从上游拉取",
+  fetchingModels: "拉取中…",
+  modelsFetchHint: "从上游列表勾选模型，点击「应用」加入当前选择，再统一保存。",
+  modelsFetchFailed: "拉取失败",
+  modelsFilterPlaceholder: "搜索模型",
+  modelsSelectAll: "全选",
+  modelsReload: "重新加载",
+  modelsAdded: "已添加",
+  modelsApply: "应用",
+  modelsClose: "关闭",
+  modelsRemove: "移除模型",
+  modelsNoResults: "没有匹配的模型",
+  modelsNoUpstream: "上游暂无可用模型",
+  modelsPending: "待添加",
+  modelsSelectedTitle: "当前已选模型",
+  modelsCount: "个模型已选择",
+  modelsNone: "未选择模型",
+  descModelSelect: "当前已选模型始终显示在下方，可直接移除；点击页面「保存」后生效。",
+} as const;

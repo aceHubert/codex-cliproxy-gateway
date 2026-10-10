@@ -12,7 +12,9 @@ import {
   LEGACY_FIELD_MIGRATIONS,
   migrateLegacyConfig,
 } from "./config.ts";
-import { realPathOrResolve, resolvePaths, catalogFileFor, managedCatalogFiles, LEGACY_STDERR_LOG } from "./paths.ts";
+import { realPathOrResolve, resolvePaths, catalogFileFor, managedCatalogFiles, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker } from "./paths.ts";
+import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
+import { resolveInstalledCodexPaths, assertCodexHomeAvailable, claimCodexHome, releaseCodexHome } from "./codex-ownership.ts";
 import {
   patchRootToml,
   restoreRootTomlKeys,
@@ -33,17 +35,29 @@ import {
 } from "./upstream-catalog.ts";
 import { isLoopbackUrl, startGateway } from "./gateway.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
-import { clearPendingRestart, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
+import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
+import { requestLogDir } from "./request-log.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
-import { validateZcodeConfig, zcodeEnabled } from "./zcode/index.ts";
-import { codebuddyEnabled, validateCodebuddyConfig } from "./codebuddy/index.ts";
+import { validateZcodeConfig, zcodeEnabled, createZcodeAdapter, type ZcodeDependencies } from "./zcode/index.ts";
+import {
+  codebuddyEnabled,
+  createCodebuddyAdapter,
+  validateCodebuddyConfig,
+  type CodebuddyDependencies,
+} from "./codebuddy/index.ts";
 import {
   defaultAuthDirectory,
   listCodebuddyAccounts,
   resolveCodebuddyAccountFile,
 } from "./codebuddy/credentials.ts";
-import { qoderEnabled, validateQoderConfig } from "./qoder/index.ts";
-import { agyEnabled, validateAgyConfig } from "./agy/index.ts";
+import {
+  createQoderAdapter,
+  qoderEnabled,
+  validateQoderConfig,
+  type QoderDependencies,
+} from "./qoder/index.ts";
+import { agyEnabled, createAgyAdapter, validateAgyConfig, type AgyDependencies } from "./agy/index.ts";
+import { opencodeZenEnabled, createOpencodeZenAdapter, validateOpencodeZenConfig, type OpencodeZenDependencies } from "./opencode/index.ts";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -57,11 +71,14 @@ import {
   restartLaunchAgent,
   reloadLaunchAgent,
   launchAgentStatus,
+  gatewayServiceLabel,
+  webUiServiceLabel,
 } from "./launchd.ts";
 import type {
   CliOptions,
   GatewayConfig,
   ModelCatalog,
+  ModelEntry,
   ResolvedPaths,
   UpstreamType,
 } from "./types.ts";
@@ -82,6 +99,7 @@ const DEFAULTS = {
   codebuddy: false,
   qoder: false,
   agy: false,
+  opencodeZen: false,
 } satisfies Omit<GatewayConfig, "catalogPath" | "selectedModels">;
 
 interface BackupRecord {
@@ -92,6 +110,10 @@ interface BackupRecord {
 interface InstallState {
   version: number;
   installedAt: string;
+  /** 安装时绑定的客户端目录；后续管理不随调用者遗漏环境变量而改变。 */
+  codexHome?: string;
+  /** 卸载的客户端阶段已完成；重试时只清理本网关，不再改写已交还的客户端。 */
+  uninstallClientRestored?: boolean;
   /** 首次托管安装前的 config.toml 纯净备份；手动模式安装（codexConfigManaged=false）没有。 */
   configBackup?: BackupRecord;
   /** 最近一次写入 config.toml 后的哈希；手动模式安装不跟踪。 */
@@ -129,8 +151,8 @@ Usage:
   codex-cliproxy start|stop
   codex-cliproxy restart [--restart-codex]
   codex-cliproxy serve [--config PATH]
-  codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--restart-codex]
-  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--log on|off] [--max-request-logs N] [--max-log-size SIZE]
+  codex-cliproxy models [--sync] [--upstream-only] [--select SELECTOR] [--exclude [PATTERNS]] [--restart-codex]
+  codex-cliproxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--opencode-zen on|off] [--log on|off] [--debug on|off] [--max-request-logs N] [--max-log-size SIZE]
   codex-cliproxy codebuddy --switch
   codex-cliproxy web
   codex-cliproxy status
@@ -163,14 +185,33 @@ Install options:
   Refusing leaves the existing installation untouched.
 
 Models:
-  models                list models currently shown through CLIProxy
+  models                list active compatible models (full IDs with vendor
+                        prefixes and display names) plus the current exclusion
+                        rules
   models --sync         refresh models in dynamic split routing
   models --sync --upstream-only
                         switch to a static upstream-only catalog with original model IDs
   --select SELECTOR     model numbers/ranges, IDs/globs, all, or none
+  --exclude [PATTERNS]  manage excluded models for the local compatibility
+                        endpoints; every rule must start with a full adapter
+                        prefix (zcode/, zcode-<plan>/, codebuddy-intl|cn/,
+                        workbuddy-intl|cn/, qoder-intl|cn/, agy/,
+                        opencode-zen/; the product family globs zcode*/,
+                        codebuddy-*/, workbuddy-*/, qoder-*\/ cover every
+                        plan/region prefix at once) and wildcards may only
+                        follow it (e.g. codebuddy-intl/gpt-4o, qoder-cn/qoder-*);
+                        upstream models are selected via
+                        models --sync and official models are not excludable;
+                        family-wide patterns (prefix/ or prefix/*) are
+                        rejected — turn that endpoint off instead;
+                        --exclude none (or "") clears it; without a value an
+                        interactive checkbox picker lists every local
+                        compatibility model (space toggles exclusion, enter
+                        saves)
   --model-merge-json URL  update the cached models.json override
-  --restart-codex       stop Codex app-server after sync to refresh the model picker;
-                        active tasks may error and require recovery or reopening
+  --restart-codex       stop Codex app-server after sync or exclusion changes
+                        to refresh the model picker; active tasks may error
+                        and require recovery or reopening
 
 Config:
   config                print the current gateway settings
@@ -180,7 +221,11 @@ Config:
                         (account selection lives in codebuddy --switch)
   config --qoder on|off toggle local Qoder Responses compatibility (intl + China editions)
   config --agy on|off    toggle local Antigravity (agy/) Responses compatibility
+  config --opencode-zen on|off
+                        toggle OpenCode Zen (opencode-zen/) free-model chat-completions compatibility
   config --log on|off   toggle request logging
+  config --debug on|off toggle debug dumps (full request body on upstream
+                        errors, e.g. agy 400; written to the log directory)
   config --max-request-logs N
                         max request log files kept across the directory; 0 (default) means unlimited
   config --max-log-size SIZE
@@ -236,6 +281,16 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       continue;
     }
     const next = args[i + 1];
+    if (key === "exclude") {
+      // --exclude 的值可选：无值进入交互勾选，有值按逗号/空白拆分为追加规则；
+      // 空串与 none 是清空排除列表的显式哨兵，必须在取值阶段原样保留。
+      if (next === undefined || next.startsWith("--")) options.exclude = true;
+      else {
+        options.exclude = next;
+        i += 1;
+      }
+      continue;
+    }
     if (next === undefined || next.startsWith("--")) throw new Error(`--${key} requires a value`);
     options[key] = next;
     i += 1;
@@ -523,11 +578,11 @@ function writeGatewayConfig(file: string, value: GatewayConfig): void {
 
 export function removeManagedRuntimeFiles(
   paths: ResolvedPaths,
-  options: { preserveGatewayConfig?: boolean } = {},
+  options: { preserveGatewayConfig?: boolean; preserveState?: boolean } = {},
 ): void {
   for (const file of [
     ...(options.preserveGatewayConfig ? [] : [paths.gatewayConfig]),
-    paths.stateFile,
+    ...(options.preserveState ? [] : [paths.stateFile]),
     ...managedCatalogFiles(paths),
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
@@ -540,14 +595,20 @@ export function removeManagedRuntimeFiles(
   }
 }
 
-async function waitForHealth(url: string, attempts = 100): Promise<void> {
+/**
+ * 等待网关 healthz 就绪。expectedMarker 是本进程实例的标记（主目录哈希）；
+ * 响应携带实例标记时必须一致——端口被另一个 codex-cliproxy 实例占用时，把它的
+ * 健康响应当作本实例启动成功是误判。无标记进程需要更新并重启，不能凭 HTTP 200 放行。
+ */
+export async function waitForHealth(url: string, attempts = 100, expectedMarker = instanceMarker(resolvePaths().runtimeHome)): Promise<void> {
   let lastError: unknown;
   for (let i = 0; i < attempts; i += 1) {
     try {
       const response = await fetch(url);
-      if (response.ok) return;
-      lastError = new Error(`HTTP ${response.status}`);
+      assertHealthyInstance(response, expectedMarker);
+      return;
     } catch (error) {
+      if (error instanceof InstanceHealthError) throw error;
       lastError = error;
     }
     await Bun.sleep(300);
@@ -558,7 +619,7 @@ async function waitForHealth(url: string, attempts = 100): Promise<void> {
 }
 
 function gatewayStartupDiagnostics(paths: ResolvedPaths): string {
-  const status = launchAgentStatus();
+  const status = launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix));
   const details: string[] = [];
   if (status) {
     const state = status.match(/\bstate = ([^\n]+)/)?.[1]?.trim();
@@ -600,10 +661,12 @@ const AUDITED_FIELDS = [
   "codebuddy",
   "qoder",
   "agy",
+  "opencodeZen",
   "codebuddyAccount",
   "upstreamOnly",
   "requestLogging",
   "logDir",
+  "debug",
   "maxRequestLogs",
   "maxGatewayLogBytes",
   "port",
@@ -614,6 +677,7 @@ const AUDITED_FIELDS = [
   "catalogPath",
   "model_merge_json",
   "selectedModels",
+  "excludedModels",
 ] as const;
 
 function diffConfig(
@@ -678,7 +742,7 @@ async function restartGatewayOnce(paths: ResolvedPaths, config: GatewayConfig): 
   };
   markPending(true);
   try {
-    restartLaunchAgent(paths.launchAgent);
+    restartLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
     await waitForHealth(`http://${config.host}:${config.port}/healthz`);
   } catch (error) {
     // 标记保留：重跑同一命令或 codex-cliproxy restart 都会补上这次重启。
@@ -785,6 +849,7 @@ async function install(options: CliOptions): Promise<void> {
     console.log("Managing ~/.codex/config.toml for this installation (--manual-codex-config ignored).");
   }
   const paths = resolvePaths();
+  assertCodexHomeAvailable(paths, manualCodexConfig);
   const switching = fs.existsSync(paths.stateFile);
 
   const portValue = stringOption(options, "port");
@@ -903,22 +968,27 @@ async function install(options: CliOptions): Promise<void> {
   // 切换模式不动纯净备份；旧密钥/旧 state 先留底，失败时恢复。
   const previousState = switching ? fs.readFileSync(paths.stateFile, "utf8") : undefined;
   const previousApiKey = switching ? readApiKey(true) : undefined;
-  const previousManaged = switching ? isCodexConfigManaged(loadJson<InstallState>(paths.stateFile)) : true;
+  const priorState = switching ? loadJson<InstallState>(paths.stateFile) : undefined;
+  const previousManaged = priorState ? isCodexConfigManaged(priorState) && priorState.uninstallClientRestored !== true : true;
   // 手动模式不写 config.toml、不需要备份；手动切回托管时从「开始托管那一刻」重新取
   // 纯净备份，让 uninstall 的还原语义从新的托管周期重新起算。
-  const configBackup = !manualCodexConfig && (!switching || !previousManaged)
-    ? backupConfig(paths.configToml)
-    : undefined;
+  let configBackup: BackupRecord | undefined;
+  let rollbackCodexClaim: (() => void) | undefined;
+  let installationTouched = false;
   let launchInstalled = false;
   // LaunchAgent 的恢复责任从开始替换 plist 时即成立：installLaunchAgent 内部会先覆盖
   // plist 并 bootout 原服务，若 bootstrap/kickstart 抛错，launchInstalled 尚未置位，
   // 但旧 plist 已被覆盖、原服务已停止——先留底原内容与加载态，失败时回写并拉回服务。
   const previousPlist = fs.existsSync(paths.launchAgent) ? fs.readFileSync(paths.launchAgent, "utf8") : undefined;
-  const previousServiceLoaded = previousPlist !== undefined && launchAgentStatus() !== null;
+  const previousServiceLoaded = previousPlist !== undefined && launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix)) !== null;
   let launchTouched = false;
   let tomlUnchanged = false;
 
   try {
+    // 独占声明先于备份和任何配置写入；失败时不碰另一实例的客户端目录。
+    if (!manualCodexConfig) rollbackCodexClaim = claimCodexHome(paths);
+    if (!manualCodexConfig && (!switching || !previousManaged)) configBackup = backupConfig(paths.configToml);
+    installationTouched = true;
     if (apiKey) saveApiKey(apiKey);
     else deleteApiKey();
     if (reuseCatalog) {
@@ -964,6 +1034,8 @@ async function install(options: CliOptions): Promise<void> {
       state.gatewayBaseUrl = gatewayBaseUrl;
       state.config = config;
       state.codexConfigManaged = !manualCodexConfig;
+      state.codexHome = paths.codexHome;
+      delete state.uninstallClientRestored;
       if (manualCodexConfig) {
         // 手动模式不再跟踪 config.toml：uninstall/restart/models --sync 依据
         // codexConfigManaged=false 跳过改写与还原，备份与 hash 一并作废。
@@ -986,6 +1058,7 @@ async function install(options: CliOptions): Promise<void> {
         gatewayBaseUrl,
         config,
         codexConfigManaged: !manualCodexConfig,
+        codexHome: paths.codexHome,
       };
       if (!manualCodexConfig) {
         state.configBackup = configBackup!;
@@ -1003,14 +1076,24 @@ async function install(options: CliOptions): Promise<void> {
       codexHome: paths.codexHome,
       logPath: paths.stdoutLog,
       plistPath: paths.launchAgent,
+      // 非默认实例把运行主目录写进 plist：launchd 进程与本次安装解析到同一目录；
+      // 默认实例保持历史 plist 形状（不嵌入该变量）。
+      label: gatewayServiceLabel(paths.instanceSuffix),
+      ...(paths.instanceSuffix ? { runtimeHome: paths.runtimeHome } : {}),
     });
     launchInstalled = true;
 
     await waitForHealth(`http://${config.host}:${config.port}/healthz`);
     if (!upstreamOnly) invalidateModelsCache(paths.modelsCacheFile);
     recordConfigAudit(switching ? "install (in-place)" : "install", config, currentGatewayConfig, paths);
+    // 也回收此前托管转手动或卸载中断留下的自身声明，绝不释放其他实例的归属。
+    if (manualCodexConfig) releaseCodexHome(paths);
 
   } catch (error) {
+    if (!installationTouched) {
+      rollbackCodexClaim?.();
+      throw error;
+    }
     const diagnostics = launchInstalled ? gatewayStartupDiagnostics(paths) : "";
     const restoreIssues: string[] = [];
     if (switching) {
@@ -1028,10 +1111,10 @@ async function install(options: CliOptions): Promise<void> {
             // launchd 里已加载的是新任务定义：kickstart 只会按它重启，必须
             // bootout + bootstrap 才能让恢复到磁盘的旧 plist 重新生效；旧任务
             // 本就未加载时只需卸载新任务，回到安装前的未加载状态。
-            if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent);
+            if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
             else stopLaunchAgent(paths.launchAgent);
           } else {
-            restartLaunchAgent(paths.launchAgent);
+            restartLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
           }
         } catch (restoreError) {
           restoreIssues.push(restoreError instanceof Error ? restoreError.message : String(restoreError));
@@ -1052,7 +1135,7 @@ async function install(options: CliOptions): Promise<void> {
           atomicWrite(paths.launchAgent, previousPlist, 0o644);
           // 安装尝试已 bootout 原服务：若它之前处于加载态，按旧 plist 重新加载拉回；
           // 本就未加载的残留 plist 只恢复文件并卸载新任务，不凭空拉起服务。
-          if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent);
+          if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
           else stopLaunchAgent(paths.launchAgent);
         } else {
           uninstallLaunchAgent(paths.launchAgent);
@@ -1063,6 +1146,9 @@ async function install(options: CliOptions): Promise<void> {
       deleteApiKey();
       removeManagedRuntimeFiles(paths);
       if (previousGatewayConfig !== undefined) atomicWrite(paths.gatewayConfig, previousGatewayConfig);
+    }
+    try { rollbackCodexClaim?.(); } catch (restoreError) {
+      restoreIssues.push(restoreError instanceof Error ? restoreError.message : String(restoreError));
     }
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(composeInstallFailureMessage(message, { diagnostics, restoreIssues }));
@@ -1107,21 +1193,29 @@ async function uninstall(options: CliOptions): Promise<void> {
   if (!fs.existsSync(paths.stateFile)) throw new Error("No managed installation found");
   const state = loadJson<InstallState>(paths.stateFile);
 
+  const restoresClient = isCodexConfigManaged(state) && state.uninstallClientRestored !== true;
+  if (restoresClient) assertCodexHomeAvailable(paths, false);
+
   uninstallLaunchAgent(paths.launchAgent);
   // Web UI 是独立 LaunchAgent：卸载时一并回收其任务与 plist（未安装时静默忽略）。
   uninstallLaunchAgent(paths.webUiLaunchAgent);
-  const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
   // 手动模式的 config.toml 属于用户：不还原受管键，也不清理其引用的目录文件。
-  if (isCodexConfigManaged(state)) {
+  if (restoresClient) {
+    const currentToml = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
     restoreManagedCodexToml(paths, state, currentToml);
     if (readRootTomlString(currentToml, "model_catalog_json") === legacyCatalogFile) {
       fs.rmSync(legacyCatalogFile, { force: true });
     }
+    invalidateModelsCache(paths.modelsCacheFile);
+    state.uninstallClientRestored = true;
+    writeJson(paths.stateFile, state);
   }
   deleteApiKey();
-  invalidateModelsCache(paths.modelsCacheFile);
-  removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true });
+  // 状态保留到所有清理结束，便于重试；手动模式也清理上次转换中断遗留的自身声明。
+  removeManagedRuntimeFiles(paths, { preserveGatewayConfig: true, preserveState: true });
+  releaseCodexHome(paths);
+  fs.rmSync(paths.stateFile, { force: true });
 
   if (isCodexConfigManaged(state)) {
     console.log("Uninstalled. Managed config.toml values were restored; config.json was preserved.");
@@ -1158,6 +1252,187 @@ function printCurrentModels(config: GatewayConfig, selectedModels: string[]): vo
   }
 }
 
+/** 适配器依赖注入：CLI 直连收集目录时保持与网关一致的缺省行为，测试可整体替换。 */
+export interface CompatibleModelsDependencies {
+  zcode?: ZcodeDependencies;
+  codebuddy?: CodebuddyDependencies;
+  qoder?: QoderDependencies;
+  agy?: AgyDependencies;
+  opencodeZen?: OpencodeZenDependencies;
+}
+
+export interface CompatibleModelsSnapshot {
+  /** 当前可用的全部兼容模型（完整 ID 含厂商前缀，zcode/、codebuddy-intl/、qoder-cn/、agy/、cliproxy/）。 */
+  entries: ModelEntry[];
+  /** 收集失败的来源标签；单个来源失败只提示，不影响其余来源。 */
+  failures: string[];
+}
+
+/**
+ * 收集当前启用的所有兼容模型：上游目录读 catalogPath 落盘文件（models --sync 的
+ * 产物，动态路由按配置补 prefix），各适配器按网关同一入口拉取（带本地缓存）。
+ * 与网关 /models 的合并口径一致，但不做 excludedModels 过滤——排除配置的勾选与
+ * 展示需要看到完整目录。`includeUpstream: false` 时只收集本地适配器模型：排除
+ * 仅作用于本地兼容转发，上游模型的选择由 `models --sync`（selectedModels）管理。
+ */
+export async function collectCompatibleModels(
+  config: GatewayConfig,
+  dependencies: CompatibleModelsDependencies = {},
+  { includeUpstream = true }: { includeUpstream?: boolean } = {},
+): Promise<CompatibleModelsSnapshot> {
+  const entries: ModelEntry[] = [];
+  const failures: string[] = [];
+
+  if (includeUpstream) {
+    try {
+      const proxy = JSON.parse(fs.readFileSync(config.catalogPath, "utf8")) as ModelCatalog;
+      if (!Array.isArray(proxy.models)) throw new Error("catalog file does not contain a models array");
+      const prefix = config.upstreamOnly === true ? "" : config.prefix;
+      entries.push(...proxy.models.map((model) => ({ ...model, slug: `${prefix}${model.slug}` })));
+    } catch {
+      failures.push(upstreamLabel(config));
+    }
+  }
+
+  const collect = async (
+    label: string,
+    enabled: boolean,
+    create: () => { catalog(): Promise<ModelCatalog>; close(): void },
+  ): Promise<void> => {
+    if (!enabled) return;
+    const adapter = create();
+    try {
+      entries.push(...(await adapter.catalog()).models);
+    } catch {
+      failures.push(label);
+    } finally {
+      adapter.close();
+    }
+  };
+
+  await collect("zcode", zcodeEnabled(config), () => createZcodeAdapter(config, dependencies.zcode));
+  await collect("codebuddy", codebuddyEnabled(config), () =>
+    createCodebuddyAdapter(config, { refreshCatalogOnStart: false, ...dependencies.codebuddy }));
+  await collect("qoder", qoderEnabled(config), () =>
+    createQoderAdapter(config, { refreshCatalogOnStart: false, ...dependencies.qoder }));
+  await collect("agy", agyEnabled(config), () =>
+    createAgyAdapter(config, { refreshCatalogOnStart: false, ...dependencies.agy }));
+  // Zen 与其余兼容端同权：普通列表与排除选择器都包含（Zen 在排除作用域内）。
+  await collect("opencode-zen", opencodeZenEnabled(config), () =>
+    createOpencodeZenAdapter(config, { refreshCatalogOnStart: false, ...dependencies.opencodeZen }));
+  return { entries, failures };
+}
+
+function printExcludedModels(config: GatewayConfig): void {
+  const patterns = Array.isArray(config.excludedModels) ? config.excludedModels : [];
+  console.log(`Excluded models (${patterns.length} rule${patterns.length === 1 ? "" : "s"}):`);
+  if (patterns.length === 0) {
+    console.log("  (none)");
+    return;
+  }
+  for (const pattern of patterns) console.log(`  ${pattern}`);
+}
+
+/** models 无参视图：活跃兼容模型（完整 ID + 显示名称，显示名自带地域标签）与排除规则。 */
+async function printCompatibleModels(config: GatewayConfig): Promise<void> {
+  const { entries, failures } = await collectCompatibleModels(config);
+  const sorted = [...entries].sort((left, right) => left.slug.localeCompare(right.slug));
+  console.log(`Active compatible models (${sorted.length}):`);
+  if (sorted.length === 0) console.log("  (none)");
+  for (const model of sorted) {
+    console.log(`  ${model.display_name || model.slug} (${model.slug})`);
+  }
+  for (const failure of failures) {
+    console.log(`WARNING: ${failure} catalog unavailable; its models are not listed.`);
+  }
+  printExcludedModels(config);
+}
+
+/** models --exclude 的依赖注入：交互选择器的输入输出可替换（测试用）。 */
+export interface ExcludeModelsDependencies extends CompatibleModelsDependencies {
+  input?: typeof process.stdin;
+  output?: typeof process.stdout;
+}
+
+/**
+ * `models --exclude` 的统一落地：option 为 true 走交互勾选（当前精确 ID 规则预勾选，
+ * 前缀族/通配规则保留），为字符串时按逗号/空白拆分追加（none 或空串清空）。结果经
+ * parseExcludedModels 归一后走 writeConfigAndRestart：写盘、审计、失效 Codex 目录
+ * 缓存并热重启网关；值未变化时不写盘。
+ */
+export async function excludeModels(
+  paths: ResolvedPaths,
+  config: GatewayConfig,
+  option: true | string,
+  restartCodex = false,
+  dependencies: ExcludeModelsDependencies = {},
+): Promise<void> {
+  const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
+  // 存量规则宽松归一（早期版本的整族规则仍被引擎识别，不能把用户锁在配置外）；
+  // 只有本次新输入走 parseExcludedModels 的严格校验（拒绝整族形态）。
+  const current = normalizeExcludedModels(Array.isArray(config.excludedModels) ? config.excludedModels : []);
+  let appliedLine: string;
+  let next: string[];
+
+  if (option === true) {
+    const input = dependencies.input ?? process.stdin;
+    const output = dependencies.output ?? process.stdout;
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error(
+        "models --exclude requires an interactive terminal; pass patterns directly, e.g. models --exclude codebuddy-intl/gpt-4o",
+      );
+    }
+    // 排除仅作用于本地兼容端：勾选列表不含上游目录（其选择由 models --sync 管理）。
+    const { entries, failures } = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
+    if (entries.length === 0) {
+      throw new Error("No local compatibility models to list; enable an adapter (config --zcode on, …) first");
+    }
+    for (const failure of failures) {
+      console.log(`WARNING: ${failure} catalog unavailable; its models are not listed.`);
+    }
+    // 交互勾选只能表达精确 ID：仍在目录里的旧精确规则进入预勾选；前缀族/通配/已下线
+    // 的规则勾选表达不了，一律保留，由结果合并带回。
+    const listedLower = new Set(entries.map((model) => model.slug.toLowerCase()));
+    const preselected = current.filter((pattern) => listedLower.has(pattern.toLowerCase()));
+    const preserved = current.filter((pattern) => !listedLower.has(pattern.toLowerCase()));
+    const selected = await chooseModels({
+      availableModels: entries,
+      currentSelection: preselected,
+      requireNonEmpty: false,
+      input,
+      output,
+      title: "Local compatibility models - space marks exclusion",
+    });
+    next = normalizeExcludedModels([...preserved, ...selected]);
+    appliedLine = `Exclusion rules saved from selection: ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
+  } else {
+    const trimmed = option.trim();
+    if (trimmed === "" || trimmed.toLowerCase() === "none") {
+      next = [];
+      appliedLine = "Excluded models cleared.";
+    } else {
+      const incoming = parseExcludedModels(trimmed.split(/[\s,]+/));
+      next = normalizeExcludedModels([...current, ...incoming]);
+      const added = next.length - current.length;
+      appliedLine = `Exclusion rules updated: ${added} added, ${next.length} rule${next.length === 1 ? "" : "s"} active.`;
+    }
+  }
+
+  if (JSON.stringify(current) === JSON.stringify(next)) {
+    console.log("Excluded models unchanged; nothing to save.");
+    printExcludedModels(config);
+    return;
+  }
+  config.excludedModels = next;
+  await writeConfigAndRestart(paths, config, auditBefore, "models --exclude", [appliedLine], {
+    // 与 models --sync 同一策略：动态路由失效 Codex 目录缓存即可；upstream-only 由
+    // Codex 静态加载目录文件，靠用户确认后的 --restart-codex 重读。
+    invalidateModels: config.upstreamOnly !== true,
+  });
+  printExcludedModels(config);
+  if (restartCodex) await refreshCodexAppServer();
+}
+
 async function models(options: CliOptions): Promise<void> {
   const restartCodex = options["restart-codex"] === true;
   // 模式由 flag 显式选择：带 --upstream-only（旧别名 --cpa-only）即 upstream-only，不带即 split 动态目录。
@@ -1173,8 +1448,18 @@ async function models(options: CliOptions): Promise<void> {
   if (modelMergeJson) config.model_merge_json = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
 
+  if (options.exclude !== undefined) {
+    if (options.sync === true) throw new Error("--exclude cannot be combined with --sync");
+    // --upstream-only 与 --model-merge-json 已被 runCli 的前置守卫拒绝（要求 --sync）；
+    // --select 语义属于上游模型选择，与排除规则无关，显式拒绝避免静默忽略。
+    if (options.select !== undefined) throw new Error("--select cannot be combined with --exclude");
+    await excludeModels(paths, config, options.exclude as true | string, restartCodex);
+    return;
+  }
+
   if (options.sync !== true) {
     printCurrentModels(config, currentSelection);
+    await printCompatibleModels(config);
     return;
   }
 
@@ -1296,7 +1581,7 @@ async function status(): Promise<void> {
   const paths = resolvePaths();
   const installed = fs.existsSync(paths.stateFile);
   const config = fs.existsSync(paths.gatewayConfig) ? loadGatewayConfig(paths.gatewayConfig) : undefined;
-  const service = process.platform === "darwin" ? launchAgentStatus() : null;
+  const service = process.platform === "darwin" ? launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix)) : null;
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const configuredBaseUrl = readRootTomlString(source, "openai_base_url");
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
@@ -1314,7 +1599,8 @@ async function status(): Promise<void> {
     const healthConfig = config ?? state.config;
     try {
       const response = await fetch(`http://${healthConfig.host}:${healthConfig.port}/healthz`);
-      if (response.ok) health = "ok";
+      assertHealthyInstance(response, instanceMarker(paths.runtimeHome));
+      health = "ok";
     } catch {}
   }
   console.log(JSON.stringify({
@@ -1337,14 +1623,17 @@ async function status(): Promise<void> {
 
 function serve(options: CliOptions): void {
   requireBun();
+  // runCli 已在同步前建立调用上下文；服务的异步资源继承同一快照，不改变全局环境。
   const paths = resolvePaths();
-  // 真实路径比较：软链到默认 config.json 时仍按生产实例写日志、清 pendingRestart。
   const configPath = realPathOrResolve(stringOption(options, "config") || paths.gatewayConfig);
   if (!fs.existsSync(configPath)) throw new Error(`Gateway config not found: ${configPath}`);
   const config = loadGatewayConfig(configPath);
-  const isProductionInstance = configPath === realPathOrResolve(paths.gatewayConfig);
-  // 只有默认配置对应的生产实例才写 gateway.log：--config 的临时实例输出留在终端，
-  // 不碰生产进程日志（也不会把临时实例的请求摘要混进去）。
+  // 配置即本实例主目录的 config.json：它就是该主目录的生产实例（写 gateway.log、
+  // 清自己的 pendingRestart）。--config 指到别处的文件（如主目录里的 test.json）
+  // 仍是临时实例：不写进程日志、不动 state。
+  const isProductionInstance = configPath === realPathOrResolve(path.join(paths.runtimeHome, "config.json"));
+  // 生产实例写本主目录的 gateway.log；--config 指到主目录内其他文件（test.json）的
+  // 临时实例输出留在终端，不写进程日志、不动 state。
   const processLog = isProductionInstance
     ? { file: paths.stdoutLog, maxBytes: config.maxGatewayLogBytes ?? 0 }
     : undefined;
@@ -1354,6 +1643,7 @@ function serve(options: CliOptions): void {
     paths.upstreamModelsCacheFile,
     { codexModelsCacheFile: paths.modelsCacheFile },
     processLog,
+    { codexModelsCacheFile: paths.modelsCacheFile },
     { codexModelsCacheFile: paths.modelsCacheFile },
     { codexModelsCacheFile: paths.modelsCacheFile },
     { codexModelsCacheFile: paths.modelsCacheFile },
@@ -1378,7 +1668,9 @@ async function fetchWebUi(port: number): Promise<Response | undefined> {
 
 async function isWebUiRunning(port: number): Promise<boolean> {
   const response = await fetchWebUi(port);
-  return response !== undefined && response.ok;
+  if (!response || !response.ok) return false;
+  assertHealthyInstance(response, instanceMarker(resolvePaths().runtimeHome));
+  return true;
 }
 
 async function waitForWebUi(port: number, timeoutMs = 10_000): Promise<void> {
@@ -1424,9 +1716,10 @@ async function ensureGatewayRunning(paths: ResolvedPaths, config: GatewayConfig)
   const base = `http://${config.host}:${config.port}`;
   try {
     const response = await fetch(`${base}/healthz`);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  } catch {
-    startLaunchAgent(paths.launchAgent);
+    assertHealthyInstance(response, instanceMarker(paths.runtimeHome));
+  } catch (error) {
+    if (error instanceof InstanceHealthError) throw error;
+    startLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
     await waitForHealth(`${base}/healthz`);
     console.log("Gateway started.");
   }
@@ -1439,6 +1732,8 @@ async function startWebUiService(paths: ResolvedPaths, config: GatewayConfig): P
     cliPath: fs.realpathSync(process.argv[1]),
     codexHome: paths.codexHome,
     logPath: webUiLogPath(paths),
+    label: webUiServiceLabel(paths.instanceSuffix),
+    ...(paths.instanceSuffix ? { runtimeHome: paths.runtimeHome } : {}),
   });
   await waitForWebUi(webUiPort(config));
 }
@@ -1496,8 +1791,10 @@ async function webCommand(options: CliOptions): Promise<void> {
     return;
   }
   if (options.restart === true) {
-    stopLaunchAgent(paths.webUiLaunchAgent);
-    await startWebUiService(paths, config);
+    // 纯重启：不重写 plist——启动定义只在 install / web --daemon 写入。已加载则按当前
+    // 定义 kickstart，未加载则从磁盘 plist 拉起（缺失时报「未安装」）。
+    restartLaunchAgent(paths.webUiLaunchAgent, webUiServiceLabel(paths.instanceSuffix));
+    await waitForWebUi(uiPort);
     console.log(`Web UI restarted at http://127.0.0.1:${uiPort}/ui`);
     return;
   }
@@ -1651,6 +1948,7 @@ async function writeConfigAndRestart(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
+  validateOpencodeZenConfig(config);
   writeGatewayConfig(paths.gatewayConfig, config);
   if (fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
@@ -1681,7 +1979,9 @@ async function configCommand(options: CliOptions): Promise<void> {
   const codebuddyTarget = onOffValue(options, "codebuddy");
   const qoderTarget = onOffValue(options, "qoder");
   const agyTarget = onOffValue(options, "agy");
+  const opencodeZenTarget = onOffValue(options, "opencode-zen");
   const logTarget = onOffValue(options, "log");
+  const debugTarget = onOffValue(options, "debug");
   const maxLogsOption = stringOption(options, "max-request-logs");
   const maxLogSizeOption = stringOption(options, "max-log-size");
   const paths = resolvePaths();
@@ -1689,11 +1989,12 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && logTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && opencodeZenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = zcodeEnabled(config);
     const codebuddyActive = codebuddyEnabled(config);
     const qoderActive = qoderEnabled(config);
     const agyActive = agyEnabled(config);
+    const opencodeZenActive = opencodeZenEnabled(config);
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
       zcode: zcodeActive,
@@ -1706,12 +2007,17 @@ async function configCommand(options: CliOptions): Promise<void> {
       ...(config.qoder === true && !qoderActive ? { qoderConfigured: true } : {}),
       agy: agyActive,
       ...(config.agy === true && !agyActive ? { agyConfigured: true } : {}),
+      opencodeZen: opencodeZenActive,
+      ...(config.opencodeZen === true && !opencodeZenActive ? { opencodeZenConfigured: true } : {}),
       requestLogging: config.requestLogging === true,
-      logDir: config.logDir || paths.logDir,
+      debug: config.debug === true,
+      logDir: requestLogDir(config),
       maxRequestLogs: config.maxRequestLogs ?? 0,
       maxGatewayLogBytes: config.maxGatewayLogBytes ?? 0,
       catalogPath: config.catalogPath,
       selectedModels: Array.isArray(config.selectedModels) ? config.selectedModels.length : 0,
+      // 排除规则条数少且就是观测对象本身，直接回显规则（selectedModels 可能上百条才折成计数）。
+      excludedModels: Array.isArray(config.excludedModels) ? config.excludedModels : [],
     }, null, 2));
     return;
   }
@@ -1744,6 +2050,12 @@ async function configCommand(options: CliOptions): Promise<void> {
       ? "Antigravity 开关已保存；upstream-only 模式下暂不生效。"
       : `Antigravity（agy/）适配${agyTarget ? "已启用" : "已禁用"}。`);
   }
+  if (opencodeZenTarget !== undefined) {
+    config.opencodeZen = opencodeZenTarget;
+    applied.push(opencodeZenTarget && !opencodeZenEnabled(config)
+      ? "OpenCode Zen 开关已保存；upstream-only 模式下暂不生效。"
+      : `OpenCode Zen（opencode-zen/）适配${opencodeZenTarget ? "已启用" : "已禁用"}。`);
+  }
   if (maxLogsOption !== undefined) {
     config.maxRequestLogs = parseMaxRequestLogs(maxLogsOption);
     applied.push(`Max log files per group set to ${
@@ -1758,16 +2070,23 @@ async function configCommand(options: CliOptions): Promise<void> {
   }
   if (logTarget !== undefined) {
     config.requestLogging = logTarget;
-    if (logTarget) config.logDir ||= paths.logDir;
+    // 回填值必须是运行时实际会用的目录（requestLogDir），而不是默认安装目录：
+    // 自定义 catalogPath 时两者不同，回填 paths.logDir 会把日志悄悄挪到默认目录。
+    if (logTarget) config.logDir ||= requestLogDir(config);
     applied.push(`Request logging ${logTarget ? "enabled" : "disabled"}.`);
   }
+  if (debugTarget !== undefined) {
+    config.debug = debugTarget;
+    applied.push(`Debug dump ${debugTarget ? "enabled" : "disabled"} `
+      + `(upstream error request bodies go to: ${requestLogDir(config)}).`);
+  }
   await writeConfigAndRestart(paths, config, auditBefore, "config", applied, {
-    // zcode/codebuddy/qoder/agy 开关会改变 /models 的目录内容：写盘时同步失效
+    // zcode/codebuddy/qoder/agy/opencode-zen 开关会改变 /models 的目录内容：写盘时同步失效
     // Codex 的 models_cache.json（对齐 install / models --sync），让重拉起的
     // app-server 一启动就重新拉取，而不是等网关目录刷新完成后才被动失效；
     // 纯日志选项不影响目录，不触发失效。
     invalidateModels: zcodeTarget !== undefined || codebuddyTarget !== undefined || qoderTarget !== undefined
-      || agyTarget !== undefined,
+      || agyTarget !== undefined || opencodeZenTarget !== undefined,
     logDirLine: logTarget ? `Request logs will be written to: ${config.logDir}` : undefined,
   });
 }
@@ -1812,7 +2131,7 @@ async function controlGateway(
 
   const config = loadGatewayConfig(paths.gatewayConfig);
   if (action === "start") {
-    startLaunchAgent(paths.launchAgent);
+    startLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
   } else {
     const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
     const gatewayBaseUrl = `http://${config.host}:${config.port}${config.mountPath}`;
@@ -1844,6 +2163,8 @@ async function controlGateway(
 
 export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.gatewayConfig): void {
   if (!fs.existsSync(configFile)) return;
+  // 临时替代配置与同目录的受管 config.json 不能共享安装状态。
+  const managesState = realPathOrResolve(configFile) === realPathOrResolve(path.join(paths.runtimeHome, "config.json"));
 
   const raw = loadJson<unknown>(configFile);
   if (!isJsonObject(raw)) throw new Error(`Gateway config must be a JSON object: ${configFile}`);
@@ -1905,9 +2226,13 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
       current.qoder = false;
       dirty = true;
     }
+    if (!Object.hasOwn(current, "opencodeZen")) {
+      current.opencodeZen = false;
+      dirty = true;
+    }
     if (dirty) {
       writeGatewayConfig(configFile, current);
-      if (configFile === paths.gatewayConfig && fs.existsSync(paths.stateFile)) {
+      if (managesState && fs.existsSync(paths.stateFile)) {
         const state = loadJson<InstallState>(paths.stateFile);
         state.config = current;
         writeJson(paths.stateFile, state);
@@ -1932,7 +2257,7 @@ export function syncGatewayConfigFile(paths: ResolvedPaths, configFile = paths.g
   }
   writeGatewayConfig(configFile, merged.config);
 
-  if (configFile === paths.gatewayConfig && fs.existsSync(paths.stateFile)) {
+  if (managesState && fs.existsSync(paths.stateFile)) {
     const state = loadJson<InstallState>(paths.stateFile);
     state.version = 4;
     state.config = merged.config;
@@ -1959,8 +2284,8 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   uninstall: ["restart-codex"],
   restart: ["restart-codex"],
   serve: ["config"],
-  models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json"],
-  config: ["zcode", "codebuddy", "qoder", "agy", "log", "max-request-logs", "max-log-size"],
+  models: ["sync", "upstream-only", "cpa-only", "select", "restart-codex", "model-merge-json", "exclude"],
+  config: ["zcode", "codebuddy", "qoder", "agy", "opencode-zen", "log", "debug", "max-request-logs", "max-log-size"],
   codebuddy: ["switch"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };
@@ -1985,8 +2310,8 @@ export async function runCli(args: string[]): Promise<void> {
       throw new Error(`Unknown option --${key} for command "${command}"`);
     }
   }
-  if (command === "models" && options["restart-codex"] === true && options.sync !== true) {
-    throw new Error("--restart-codex requires models --sync");
+  if (command === "models" && options["restart-codex"] === true && options.sync !== true && options.exclude === undefined) {
+    throw new Error("--restart-codex requires models --sync or models --exclude");
   }
   if (command === "models" && stringOption(options, "model-merge-json") && options.sync !== true) {
     throw new Error("--model-merge-json requires models --sync");
@@ -2004,41 +2329,64 @@ export async function runCli(args: string[]): Promise<void> {
   if (command === "codebuddy" && options.switch !== true) {
     throw new Error("The codebuddy command requires --switch");
   }
-  if (["start", "stop", "restart", "serve", "models", "config", "codebuddy", "status", "web"].includes(command)) {
-    syncGatewayConfig(command, options);
-  }
+  const configOption = command === "serve" ? stringOption(options, "config") : undefined;
+  const configPath = configOption ? realPathOrResolve(configOption) : undefined;
+  let paths = configPath
+    ? { ...resolvePaths(process.env, path.dirname(configPath)), gatewayConfig: configPath }
+    : resolvePaths();
+  paths = resolveInstalledCodexPaths(paths);
 
-  switch (command) {
-    case "install":
-      await install(options);
-      break;
-    case "uninstall":
-      await uninstall(options);
-      break;
-    case "start":
-    case "stop":
-    case "restart":
-      await controlGateway(command, command === "restart" && options["restart-codex"] === true);
-      break;
-    case "serve":
-      serve(options);
-      break;
-    case "models":
-      await models(options);
-      break;
-    case "config":
-      await configCommand(options);
-      break;
-    case "codebuddy":
-      await codebuddyCommand();
-      break;
-    case "web":
-      await webCommand(options);
-      break;
-    case "status":
-      await status();
-      break;
-    default:
-      throw new Error(`Unknown command: ${command}`);
-  }
+  // 路径快照先于迁移、审计与启动建立；异常退出和并行调用均不会残留进程绑定。
+  return runWithInstancePaths(paths, async () => {
+    if (fs.existsSync(paths.stateFile)) {
+      const state = loadJson<InstallState>(paths.stateFile);
+      if (state.uninstallClientRestored === true && !["install", "uninstall", "status"].includes(command)) {
+        throw new Error("An uninstall is unfinished; rerun uninstall or install --yes before managing this instance");
+      }
+    }
+    const writesClient = command === "restart" || command === "codebuddy"
+      || (command === "models" && (options.sync === true || options.exclude !== undefined))
+      || (command === "config" && Object.keys(options).length > 0);
+    if (writesClient && fs.existsSync(paths.stateFile)) {
+      const state = loadJson<InstallState>(paths.stateFile);
+      if (isCodexConfigManaged(state)) assertCodexHomeAvailable(paths, false);
+    }
+    if (["start", "stop", "restart", "serve", "models", "config", "codebuddy", "status", "web"].includes(command)) {
+      syncGatewayConfig(command, options);
+    }
+
+    switch (command) {
+      case "install":
+        await install(options);
+        break;
+      case "uninstall":
+        await uninstall(options);
+        break;
+      case "start":
+      case "stop":
+      case "restart":
+        await controlGateway(command, command === "restart" && options["restart-codex"] === true);
+        break;
+      case "serve":
+        serve(options);
+        break;
+      case "models":
+        await models(options);
+        break;
+      case "config":
+        await configCommand(options);
+        break;
+      case "codebuddy":
+        await codebuddyCommand();
+        break;
+      case "web":
+        await webCommand(options);
+        break;
+      case "status":
+        await status();
+        break;
+      default:
+        throw new Error(`Unknown command: ${command}`);
+    }
+  });
 }

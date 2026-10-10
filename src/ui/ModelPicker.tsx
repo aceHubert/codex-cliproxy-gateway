@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, fetchUpstreamModels, type UpstreamModel } from "./api.ts";
-import { useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 
 interface ModelPickerProps {
   selectedModels: string[];
@@ -159,8 +159,8 @@ export function ModelPicker({
   };
 
   const emptyText = availableModels?.length === 0
-    ? t("modelsNoUpstream")
-    : t("modelsNoResults");
+    ? t("models:modelsNoUpstream")
+    : t("models:modelsNoResults");
   const loading = fetchPhase === "loading";
 
   return (
@@ -168,10 +168,10 @@ export function ModelPicker({
       <div className="model-picker-heading">
         <div>
           <div className="model-picker-title-row">
-            <span className="model-picker-title">{t("modelsSelectedTitle")}</span>
-            <span className="model-picker-count">{selected.length} {t("modelsCount")}</span>
+            <span className="model-picker-title">{t("models:modelsSelectedTitle")}</span>
+            <span className="model-picker-count">{selected.length} {t("models:modelsCount")}</span>
           </div>
-          <p className="field-desc">{t("descModelSelect")}</p>
+          <p className="field-desc">{t("models:descModelSelect")}</p>
         </div>
         <button
           type="button"
@@ -184,7 +184,7 @@ export function ModelPicker({
             <path d="m7 10 5 5 5-5" />
             <path d="M5 21h14" />
           </svg>
-          {loading && open ? t("fetchingModels") : t("fetchModels")}
+          {loading && open ? t("models:fetchingModels") : t("models:fetchModels")}
         </button>
       </div>
 
@@ -192,15 +192,15 @@ export function ModelPicker({
         <div className="model-fetch-panel">
           <div className="model-fetch-panel-head">
             <div>
-              <div className="model-picker-title">{t("fetchModels")}</div>
-              <p className="field-desc">{t("modelsFetchHint")}</p>
+              <div className="model-picker-title">{t("models:fetchModels")}</div>
+              <p className="field-desc">{t("models:modelsFetchHint")}</p>
             </div>
             <button
               type="button"
               className="model-panel-close"
               disabled={disabled}
               onClick={closePanel}
-              aria-label={t("modelsClose")}
+              aria-label={t("models:modelsClose")}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
                 <path d="m6 6 12 12" />
@@ -219,7 +219,7 @@ export function ModelPicker({
                 type="search"
                 value={filter}
                 disabled={disabled || loading}
-                placeholder={t("modelsFilterPlaceholder")}
+                placeholder={t("models:modelsFilterPlaceholder")}
                 onChange={(event) => setFilter(event.target.value)}
               />
             </label>
@@ -233,7 +233,7 @@ export function ModelPicker({
                 <path d="M20 11a8 8 0 1 0-2.3 5.7" />
                 <path d="M20 4v7h-7" />
               </svg>
-              {loading ? t("fetchingModels") : t("modelsReload")}
+              {loading ? t("models:fetchingModels") : t("models:modelsReload")}
             </button>
           </div>
 
@@ -246,22 +246,22 @@ export function ModelPicker({
                 disabled={disabled || loading || selectableFiltered.length === 0}
                 onChange={toggleAllFiltered}
               />
-              <span>{t("modelsSelectAll")}</span>
+              <span>{t("models:modelsSelectAll")}</span>
             </label>
             <span>{selectedFilteredCount} / {selectableFiltered.length}</span>
           </div>
 
           {fetchError && (
             <div className="model-fetch-error" role="alert">
-              <span>{t("modelsFetchFailed")}: {fetchError}</span>
+              <span>{t("models:modelsFetchFailed")}: {fetchError}</span>
               <button type="button" className="btn btn-secondary" disabled={disabled || loading} onClick={loadModels}>
-                {t("modelsReload")}
+                {t("models:modelsReload")}
               </button>
             </div>
           )}
 
           <div className={`upstream-model-list${loading && !availableModels ? " loading" : ""}`}>
-            {loading && !availableModels && <div className="models-empty">{t("fetchingModels")}</div>}
+            {loading && !availableModels && <div className="models-empty">{t("models:fetchingModels")}</div>}
             {!loading && availableModels && filteredModels.length === 0 && (
               <div className="models-empty">{emptyText}</div>
             )}
@@ -279,16 +279,16 @@ export function ModelPicker({
                     <code>{model.slug}</code>
                     {model.displayName && model.displayName !== model.slug && <span>{model.displayName}</span>}
                   </span>
-                  {added && <span className="model-added-badge">{t("modelsAdded")}</span>}
+                  {added && <span className="model-added-badge">{t("models:modelsAdded")}</span>}
                 </label>
               );
             })}
           </div>
 
           <div className="model-fetch-actions">
-            <span className="model-pending-count">{pendingModels.length} {t("modelsPending")}</span>
+            <span className="model-pending-count">{pendingModels.length} {t("models:modelsPending")}</span>
             <button type="button" className="btn btn-secondary" disabled={disabled} onClick={closePanel}>
-              {t("modelsClose")}
+              {t("models:modelsClose")}
             </button>
             <button
               type="button"
@@ -296,7 +296,7 @@ export function ModelPicker({
               disabled={disabled || loading || pendingModels.length === 0}
               onClick={applyPending}
             >
-              {t("modelsApply")} ({pendingModels.length})
+              {t("models:modelsApply")} ({pendingModels.length})
             </button>
           </div>
         </div>
@@ -309,8 +309,8 @@ export function ModelPicker({
               type="button"
               className="model-remove-btn"
               disabled={disabled || loading}
-              aria-label={`${t("modelsRemove")}: ${slug}`}
-              title={t("modelsRemove")}
+              aria-label={`${t("models:modelsRemove")}: ${slug}`}
+              title={t("models:modelsRemove")}
               onClick={() => removeSelected(slug)}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -320,7 +320,7 @@ export function ModelPicker({
             </button>
           </div>
         ))}
-        {selected.length === 0 && <div className="models-empty">{t("modelsNone")}</div>}
+        {selected.length === 0 && <div className="models-empty">{t("models:modelsNone")}</div>}
       </div>
     </div>
   );

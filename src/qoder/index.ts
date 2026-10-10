@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isIP } from "node:net";
+import { resolvePaths } from "../paths.ts";
 import { loadQoderCredentials, QoderCredentialError, QODER_REGION_LABELS } from "./credentials.ts";
 import type { QoderCredentials, QoderRegion } from "./credentials.ts";
 import { createQoderTransport, QoderTransportError } from "./transport.ts";
@@ -8,7 +9,7 @@ import { createQoderCatalogStore, qoderModelConfig, qoderModelSlug } from "./cat
 import { translateQoderRequest, QoderRequestError } from "./request.ts";
 import { translateQoderResponse } from "./response.ts";
 import { createQueueAwareInfer, QoderQueueError } from "./queue.ts";
-import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
+import { localTime, logExchange, logGroupFromPath, requestLogDir } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
 import { logGatewayError, logRequestSummary } from "../process-log.ts";
 import type { GatewayConfig, ModelCatalog, ProcessLogTarget } from "../types.ts";
@@ -110,10 +111,10 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
   const lifecycle = new AbortController();
   const active = new Set<AbortController>();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    dir: requestLogDir(config),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
   } : undefined;
-  const cacheDirectory = dependencies.cacheDirectory ?? path.dirname(config.catalogPath);
+  const cacheDirectory = dependencies.cacheDirectory ?? resolvePaths().runtimeHome;
 
   const regions: RegionRuntime[] = [];
   if (enabled) {
@@ -176,6 +177,7 @@ export function createQoderAdapter(config: GatewayConfig, dependencies: QoderDep
           });
         }
       }
+      // 系统提示词已在 buildQoderCatalog 合成时替换（含 model_messages 模板），缓存即成品。
       return { models };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {

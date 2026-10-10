@@ -1,0 +1,20 @@
+/** common namespace (en): strings for Header/App/TokenPrompt/TextView. */
+export default {
+  brandBadge: "Web UI",
+  localBadge: "localhost only",
+  logsBtn: "Logs",
+  backToConfig: "Back",
+  langZh: "中",
+  langEn: "EN",
+  tokenTitle: "Access token required",
+  tokenDesc: "The Web UI requires a token. Run codex-cliproxy web for a ready link, or paste the token:",
+  tokenPlaceholder: "ccp_…",
+  tokenSubmit: "Continue",
+  tokenInvalid: "Invalid token",
+  loadFailed: "Failed to load",
+  retry: "Retry",
+  findPlaceholder: "Find…",
+  prevMatch: "Previous",
+  nextMatch: "Next",
+  closeFind: "Close",
+} as const;

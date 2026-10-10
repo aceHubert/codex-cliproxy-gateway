@@ -1,4 +1,23 @@
 import type { AgyCredentials } from "./credentials.ts";
+import fingerprintData from "./fingerprint-data.json";
+
+/**
+ * Antigravity 客户端指纹（`fingerprint-data.json`，按本机 agy 1.3.1 构建
+ * 与内嵌提示词分析提取）：版本与 changelist 成对轮换，UA 格式源自抓包；
+ * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
+ */
+interface AgyFingerprint {
+  version: string;
+  /** 与 version 成对的构建 changelist（go version -m 的 cl/ 段），UA 内上报。 */
+  changelist: string;
+  agentSystemPrompt: string;
+  agentSystemPromptVariant: string;
+  titleSystemPrompt: string;
+}
+const FINGERPRINT = fingerprintData as AgyFingerprint;
+
+/** Antigravity 内置系统提示词（Go 模板剥离变量后），供目录条目的 base_instructions 使用。 */
+export const AGY_AGENT_SYSTEM_PROMPT = FINGERPRINT.agentSystemPrompt;
 
 /**
  * Antigravity 上游传输：Cloud Code Assist 内部 REST（`/v1internal:*`）。
@@ -18,12 +37,13 @@ export const AGY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const AGY_DEFAULT_PROJECT = "aicode-consumers";
 /**
  * 指纹对齐用的客户端标识。上游鉴权只依赖 Bearer token；UA 与 body 内 userAgent
- * 字段按 MITM 抓包的真实 CLI 形态（2026-10-06，agy 1.2.17）固定。
+ * 字段按官方 CLI 形态对齐（版本与 changelist 成对取自本机 agy 构建，见
+ * fingerprint-data.json；格式源自 2026-10-06 MITM 抓包）。
  */
-export const AGY_CLIENT_VERSION = "1.2.17";
+export const AGY_CLIENT_VERSION = FINGERPRINT.version;
 export const AGY_USER_AGENT =
   `antigravity/cli/${AGY_CLIENT_VERSION} (aidev_client; os_type=${process.platform === "darwin" ? "darwin" : process.platform}; `
-  + `arch=${process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : process.arch}; cl=993434119; auth_method=consumer)`;
+  + `arch=${process.arch === "arm64" ? "arm64" : process.arch === "x64" ? "amd64" : process.arch}; cl=${FINGERPRINT.changelist}; auth_method=consumer)`;
 
 export class AgyTransportError extends Error {
   readonly status: number;

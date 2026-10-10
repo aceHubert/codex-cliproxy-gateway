@@ -6,6 +6,7 @@ import path from "node:path";
 import { createGatewayHandler, isZcodeResponsesWebSocket, responsesWebSocketTarget } from "../src/gateway.ts";
 import { ZcodeConfigError, type ZcodeProviderSnapshot, type ZcodeFamily, type ZcodeSelection } from "../src/zcode/config.ts";
 import { ZcodeEndpointRouting } from "../src/zcode/endpoint-routing.ts";
+import { ZCODE_AGENT_SYSTEM_PROMPT } from "../src/zcode/request-context.ts";
 import type { ZcodeIdentity } from "../src/zcode/request-context.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
@@ -82,6 +83,8 @@ async function fixture(run: (context: {
             : { configCache: currentCache }),
         fetch: options.fetch ?? (async () => upstream()),
         ...(options.codexModelsCacheFile ? { codexModelsCacheFile: options.codexModelsCacheFile } : {}),
+        // 自管目录文件（zcode-catalog.json 等）注入到测试目录；生产缺省为运行主目录。
+        cacheDirectory: directory,
         // 默认禁用端点重映射：既有用例断言上游 URL 与调用次数，重映射行为由专属用例覆盖。
         endpointRouting: options.endpointRouting ?? null,
       });
@@ -256,6 +259,16 @@ test("ZCode 基础模型列表按 API provider 前缀并标记 owned_by zcode", 
       const models = list.data.filter((item: Json) => item.id.startsWith(`zcode-${family}-test/`));
       assert.equal(models.length, 2);
       assert.ok(models.every((item: Json) => item.owned_by === "zcode"));
+      // Codex 形态目录原样透出 base_instructions：Codex 按此字段发送系统提示词。
+      const codex = await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json;
+      const codexModels = (codex.models as Json[]).filter((item) => String(item.slug).startsWith(`zcode-${family}-test/`));
+      assert.equal(codexModels.length, 2);
+      assert.ok(codexModels.every((item) => item.base_instructions === ZCODE_AGENT_SYSTEM_PROMPT));
+      // zcode 合成条目本就不带 model_messages；若带模板必须一并替换（客户端优先按模板渲染）。
+      assert.ok(codexModels.every((item) => {
+        const template = (item.model_messages as { instructions_template?: string } | undefined)?.instructions_template;
+        return template === undefined || template === ZCODE_AGENT_SYSTEM_PROMPT;
+      }));
     }
   });
 });
@@ -602,10 +615,19 @@ test("ZCode 请求日志沿用缺省日志目录", async () => {
   await fixture(async ({ config, directory, create }) => {
     config.requestLogging = true;
     delete config.logDir;
-    const handler = create();
-    await (await handler(request("zcode/glm-5.3"))).text();
-    const files = fs.readdirSync(path.join(directory, "logs"));
-    assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
+    // 缺省日志目录回退运行主目录（不再从 catalogPath 倒推）；用环境变量钉住测试位置。
+    const envHome = path.join(directory, "env-home");
+    const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+    process.env.CODEX_CLIPROXY_HOME = envHome;
+    try {
+      const handler = create();
+      await (await handler(request("zcode/glm-5.3"))).text();
+      const files = fs.readdirSync(path.join(envHome, "logs"));
+      assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
+    } finally {
+      if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+      else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    }
   });
 });
 
@@ -637,7 +659,7 @@ for (const family of ["zai", "bigmodel"] as const) {
           assert.equal(call.url, `${selected.baseURL}/v1/messages`);
           assert.equal(call.headers.get("authorization"), `Bearer ${selected.apiKey}`);
           assert.equal(call.headers.get("x-api-key"), selected.apiKey);
-          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+ ai-sdk\/anthropic\/3\.0\.81$/);
+          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+$/);
           assert.equal(call.headers.get("http-referer"), "https://zcode.z.ai");
           assert.equal(call.headers.get("x-title"), "Z Code@cli");
           assert.equal(call.headers.get("x-zcode-agent"), "glm");

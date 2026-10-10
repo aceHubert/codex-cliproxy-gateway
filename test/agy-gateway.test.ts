@@ -6,6 +6,8 @@ import test from "node:test";
 import { createGatewayHandler, isAgyResponsesWebSocket } from "../src/gateway.ts";
 import { agyEnabled, safeAgyUpstreamError, validateAgyConfig } from "../src/agy/index.ts";
 import type { AgyDependencies } from "../src/agy/index.ts";
+import fingerprintData from "../src/agy/fingerprint-data.json";
+import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "../src/agy/transport.ts";
 import type { AgyCredentials } from "../src/agy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
 
@@ -174,6 +176,9 @@ test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async (
     assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
     assert.equal(flash.prefer_websockets, false);
     assert.equal(flash.context_window, 1_000_000);
+    assert.equal(flash.base_instructions, AGY_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
+    const messages = flash.model_messages as { instructions_template?: string } | undefined;
+    assert.equal(messages?.instructions_template, AGY_AGENT_SYSTEM_PROMPT, "instructions_template 必须替换，否则客户端仍发官方提示词");
   });
 });
 
@@ -239,6 +244,53 @@ test("agy 未登录返回 401 且带 agy 登录指引", TIMEOUT, async () => {
     assert.equal(response.status, 401);
     assert.match(JSON.stringify(await response.json()), /agy/);
   });
+});
+
+test("agy 上游 400 的调试转储受 debug 开关控制并写入日志目录", TIMEOUT, async () => {
+  const failing = () => new Response("SECRET context length exceeded", { status: 400 });
+  await fixture(async ({ directory, create }) => {
+    // debug 缺省关闭：任何位置都不落调试文件，错误仍按预定义分类返回。
+    const handler = create();
+    await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    const response = await handler(request(MODEL));
+    assert.equal(response.status, 502);
+    assert.match(JSON.stringify(await response.json()), /上下文长度/);
+    assert.equal(fs.existsSync(path.join(directory, "logs", "agy-debug-400.json")), false);
+    assert.equal(fs.existsSync(path.join(directory, "agy-debug-400.json")), false);
+  }, failing);
+
+  await fixture(async ({ directory, create }) => {
+    const handler = create({ debug: true });
+    await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    const response = await handler(request(MODEL));
+    assert.equal(response.status, 502);
+    // 完整请求体落日志目录，runtimeHome 根目录不再出现调试文件。
+    const dump = JSON.parse(fs.readFileSync(path.join(directory, "logs", "agy-debug-400.json"), "utf8")) as Json;
+    assert.equal(dump.model, MODEL);
+    assert.equal(dump.resolved_model, "gemini-3.8-flash");
+    assert.deepEqual(dump.upstream_error, { status: 400, body: "SECRET context length exceeded" });
+    assert.match(JSON.stringify(dump.request_body), /TIME_WAIT/);
+    assert.equal(fs.existsSync(path.join(directory, "agy-debug-400.json")), false);
+  }, failing);
+
+  await fixture(async ({ directory, create }) => {
+    // logDir 未配置时回退运行主目录（CODEX_CLIPROXY_HOME 可重定向），目录不存在也能直写。
+    const envHome = path.join(directory, "env-home");
+    const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+    process.env.CODEX_CLIPROXY_HOME = envHome;
+    try {
+      const handler = create({ debug: true, logDir: undefined });
+      await handler(new Request("http://127.0.0.1:8327/v1/models"));
+      const response = await handler(request(MODEL));
+      assert.equal(response.status, 502);
+      assert.ok(fs.existsSync(path.join(envHome, "logs", "agy-debug-400.json")));
+      // 不再从 catalogPath 位置倒推：catalog 同目录不产生调试文件。
+      assert.equal(fs.existsSync(path.join(directory, "agy-debug-400.json")), false);
+    } finally {
+      if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+      else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    }
+  }, failing);
 });
 
 test("agy WebSocket 升级一律本地 426", TIMEOUT, async () => {
@@ -362,4 +414,23 @@ test("agy 工具调用往返：Responses 工具声明映射并还原 function_ca
     const declarations = inferBodies.at(-1)!.request.tools[0].functionDeclarations;
     assert.equal(declarations[0].name, "shell");
   });
+});
+
+test("Antigravity UA 与内置提示词取自本模块指纹数据文件，版本和 changelist 成对", () => {
+  const data = fingerprintData as {
+    version: string; changelist: string;
+    agentSystemPrompt: string; agentSystemPromptVariant: string; titleSystemPrompt: string;
+  };
+  assert.ok(AGY_USER_AGENT.startsWith(`antigravity/cli/${data.version} (`), "UA 版本段必须取数据文件");
+  assert.ok(AGY_USER_AGENT.includes(`cl=${data.changelist}`), "UA changelist 必须与版本成对");
+  assert.ok(AGY_USER_AGENT.endsWith("auth_method=consumer)"));
+  assert.match(data.version, /^\d+\.\d+\.\d+$/);
+  assert.match(data.changelist, /^\d+$/);
+  // 内置提示词按二进制内嵌原文提取：agent 主模板（Go text/template 原文）/ 短身份行 / 标题生成。
+  assert.ok(data.agentSystemPrompt.startsWith("You are Antigravity, a powerful agentic AI coding assistant"));
+  assert.ok(!data.agentSystemPrompt.includes("{{") && !data.agentSystemPrompt.includes("{%"), "Go 模板变量已剥离");
+  assert.ok(data.agentSystemPrompt.includes("You are pair programming with a USER"), "if/else 保留 else（默认）分支");
+  assert.ok(!data.agentSystemPrompt.includes("Work autonomously"), "autonomous 守卫块整块删除");
+  assert.ok(data.agentSystemPromptVariant.startsWith("You are Antigravity Agent,"));
+  assert.ok(data.titleSystemPrompt.startsWith("You are a conversation title generator."));
 });

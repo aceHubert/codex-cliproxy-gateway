@@ -1,9 +1,10 @@
 import os from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
+import { resolvePaths } from "../paths.ts";
 import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "./config.ts";
 import type { ZcodeAPIKeyProvider, ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
-import { clearModelsCacheEntries, invalidateModelsCache } from "../catalog.ts";
+import { clearModelsCacheEntries, invalidateModelsCache, withAgentSystemPrompt } from "../catalog.ts";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -19,9 +20,9 @@ import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
 import { isZcodeRecord } from "./wire.ts";
-import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
+import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
-import { localTime, logExchange, logGroupFromPath } from "../request-log.ts";
+import { localTime, logExchange, logGroupFromPath, requestLogDir } from "../request-log.ts";
 import type { RequestLogSink } from "../request-log.ts";
 import { logGatewayError, logRequestSummary } from "../process-log.ts";
 import type { GatewayConfig, ModelCatalog, ProcessLogTarget } from "../types.ts";
@@ -37,6 +38,8 @@ export interface ZcodeDependencies {
   identity?: ZcodeIdentity;
   /** Codex 自己的目录缓存；zcode-catalog.json 重建时过期它，让 Codex 重新拉取 /models。 */
   codexModelsCacheFile?: string;
+  /** 自管目录文件（models.json 覆盖、zcode-catalog.json）的目录；缺省为运行主目录。 */
+  cacheDirectory?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** 端点动态重映射；传 null 禁用（测试用），默认按官方客户端行为启用。 */
   endpointRouting?: ZcodeEndpointRouting | null;
@@ -76,9 +79,11 @@ export function zcodeError(status: number, message: string, type = "invalid_requ
 export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDependencies = {}) {
   validateZcodeConfig(config);
   const enabled = zcodeEnabled(config);
+  // 自管目录文件一律放运行主目录，不从 catalogPath 位置倒推。
+  const cacheDirectory = dependencies.cacheDirectory ?? resolvePaths().runtimeHome;
   // 厂商全量目录只依赖构建期静态数据与可选覆盖规则，先建好再挂 watch 回调。
   const vendorCatalog = enabled
-    ? buildZcodeVendorCatalog(path.join(path.dirname(config.catalogPath), "models.json"))
+    ? buildZcodeVendorCatalog(path.join(cacheDirectory, "models.json"))
     : undefined;
   /** 套餐或选择变化时立即撤下 Codex 缓存里的旧 ZCode 条目，避免旧套餐模型继续可选。 */
   const dropCachedZcodeModels = () => {
@@ -86,7 +91,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       clearModelsCacheEntries(dependencies.codexModelsCacheFile, isZcodeModel);
     }
   };
-  const servedCatalogFile = path.join(path.dirname(config.catalogPath), "zcode-catalog.json");
+  const servedCatalogFile = path.join(cacheDirectory, "zcode-catalog.json");
   /** 当前对外目录（各套餐作用域前缀的并集）。watch 或启动时重建，/v1/models 只读取这里。 */
   let servedCatalog: ModelCatalog = { models: [] };
   /** 已发布目录对应的各套餐快照；仅在身份变化时才重算，避免每次 /v1/models 重新求交集。 */
@@ -101,11 +106,14 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     );
   };
   const publishServedCatalog = (catalog: ModelCatalog) => {
-    servedCatalog = catalog;
-    const changed = writeZcodeServedCatalog(servedCatalogFile, catalog);
+    // 系统提示词在发布成品时替换（含 model_messages 模板）：zcode-catalog.json 落盘即终态，
+    // 与其它适配器的合成期替换对齐；Codex 客户端优先按模板渲染系统提示词，只改
+    // base_instructions 无效（2026-10-09 实测）。
+    servedCatalog = { models: catalog.models.map((entry) => withAgentSystemPrompt(entry, ZCODE_AGENT_SYSTEM_PROMPT)) };
+    const changed = writeZcodeServedCatalog(servedCatalogFile, servedCatalog);
     if (!changed || !dependencies.codexModelsCacheFile) return;
     // 目录变化：既撤下已下线条目，也过期新鲜度让 Codex 主动重拉一次。
-    pruneCodexCache(catalog);
+    pruneCodexCache(servedCatalog);
     invalidateModelsCache(dependencies.codexModelsCacheFile);
   };
   /**
@@ -234,7 +242,7 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
     : undefined;
   const contexts = createZcodeContexts();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    dir: requestLogDir(config),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
@@ -265,7 +273,8 @@ export function createZcodeAdapter(config: GatewayConfig, dependencies: ZcodeDep
       // 所有套餐都失效且从未发布过目录时，撤下 Codex 缓存里的遗留 ZCode 条目。
       if (neverPublished && !planRoutes.some((route) => route.snapshot)) dropCachedZcodeModels();
       republishFromPlans();
-      return servedCatalog;
+      // 系统提示词已在发布成品（publishServedCatalog → zcode-catalog.json）时替换。
+      return { models: servedCatalog.models };
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();

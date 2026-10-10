@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
 import { readApiKey } from "./keychain.ts";
+import { instanceMarker, resolvePaths } from "./paths.ts";
 import { createZcodeAdapter, validateZcodeConfig, zcodeEnabled, zcodeError } from "./zcode/index.ts";
 import type { ZcodeDependencies, GatewayHandler } from "./zcode/index.ts";
 import { isZcodeModel, mergeZcodeCatalog } from "./zcode/catalog.ts";
@@ -19,6 +20,15 @@ import { isQoderModel, mergeQoderCatalog } from "./qoder/catalog.ts";
 import { agyEnabled, agyError, createAgyAdapter, isAgyModel, mergeAgyCatalog, validateAgyConfig } from "./agy/index.ts";
 import type { AgyDependencies } from "./agy/index.ts";
 import {
+  createOpencodeZenAdapter,
+  isOpencodeZenModel,
+  mergeOpencodeZenCatalog,
+  validateOpencodeZenConfig,
+  opencodeZenEnabled,
+  opencodeZenError,
+} from "./opencode/index.ts";
+import type { OpencodeZenDependencies } from "./opencode/index.ts";
+import {
   dialUpstreamWebSocket,
   forwardedHeaders,
   isRealtimeCallRequest,
@@ -29,13 +39,15 @@ import {
   websocketUrl,
 } from "./realtime.ts";
 import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
-import { mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { isLocalAdapterModel } from "./config-update.ts";
 import { atomicWrite } from "./toml.ts";
 import {
   logExchange,
   logGroupFromPath,
   logRealtimeEvent,
   pruneLogDir,
+  requestLogDir,
   retainLogFile,
   websocketLogFile,
   localTime,
@@ -540,7 +552,7 @@ export function isLoopbackUrl(value: string): boolean {
 function resolveLogSink(config: GatewayConfig, processLog?: ProcessLogTarget): RequestLogSink | undefined {
   if (config.requestLogging !== true) return undefined;
   return {
-    dir: config.logDir || path.join(path.dirname(config.catalogPath), "logs"),
+    dir: requestLogDir(config),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog,
   };
@@ -746,6 +758,14 @@ export function isQoderResponsesWebSocket(request: Request, config: GatewayConfi
     && isQoderModel(modelFromRoutingHint(request));
 }
 
+/** OpenCode Zen 的 responses 入口走 HTTP/SSE（含协议转换），WebSocket 升级一律本地拒绝。 */
+export function isOpencodeZenResponsesWebSocket(request: Request, config: GatewayConfig): boolean {
+  return opencodeZenEnabled(config)
+    && new URL(request.url).pathname === `${config.mountPath || "/v1"}/responses`
+    && request.headers.get("upgrade")?.toLowerCase() === "websocket"
+    && isOpencodeZenModel(modelFromRoutingHint(request));
+}
+
 /**
  * Responses over WebSocket 的转发目标：Codex 试探（GET + upgrade）带 x-codex-routing-hint，
  * 据此选上游；realtime 保留路径返回 null（维持原有 426 行为）。
@@ -866,6 +886,7 @@ function modelCatalogResponse(
         : isCodebuddyModel(model.slug) ? "codebuddy"
         : isQoderModel(model.slug) ? "qoder"
         : isAgyModel(model.slug) ? "agy"
+        : isOpencodeZenModel(model.slug) ? "opencode-zen"
         : owner === "mixed"
         ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
         : owner,
@@ -915,6 +936,7 @@ async function catalogModelsResponse(
   codebuddyCatalog?: ModelCatalog,
   qoderCatalog?: ModelCatalog,
   agyCatalog?: ModelCatalog,
+  opencodeZenCatalog?: ModelCatalog,
 ): Promise<Response> {
   const incomingUrl = new URL(request.url);
   const clientVersion = incomingUrl.searchParams.get("client_version");
@@ -923,6 +945,11 @@ async function catalogModelsResponse(
     if (codebuddyCatalog) merged = mergeCodebuddyCatalog(merged, codebuddyCatalog);
     if (qoderCatalog) merged = mergeQoderCatalog(merged, qoderCatalog);
     if (agyCatalog) merged = mergeAgyCatalog(merged, agyCatalog);
+    if (opencodeZenCatalog) merged = mergeOpencodeZenCatalog(merged, opencodeZenCatalog);
+    // 所有适配器与上游目录合并完成后统一按 excludedModels 过滤（仅本地兼容端模型，
+    // 官方与上游模型不受影响）：无论命中哪个来源，/models（含 client_version 的
+    // Codex 原始目录形态）都不再暴露被排除模型。
+    merged = filterExcludedModels(merged, config.excludedModels, isLocalAdapterModel);
     return modelCatalogResponse(merged, clientVersion, owner, config.prefix, Boolean(zcodeCatalog));
   };
   if (config.upstreamOnly === true) {
@@ -961,7 +988,7 @@ async function catalogModelsResponse(
     }
   }
   if (!native) {
-    if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length || qoderCatalog?.models.length || agyCatalog?.models.length) {
+    if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length || qoderCatalog?.models.length || agyCatalog?.models.length || opencodeZenCatalog?.models.length) {
       let base: ModelCatalog = { models: [] };
       try { base = mergeDynamicCatalog(base, config); } catch { /* 有效 ZCode/CodeBuddy 目录独立可用。 */ }
       return respond(base, config.upstreamOnly ? "cliproxy" : "mixed");
@@ -985,6 +1012,20 @@ export function isUnderMountPath(pathname: string, mountPath: string): boolean {
   return pathname === mountPath || pathname.startsWith(mountPath.endsWith("/") ? mountPath : `${mountPath}/`);
 }
 
+/** 被排除模型的推理请求拦截：模型已从 /models 撤下，会话继续点名它会直接 404，
+ * 绝不向对应上游转发；提示里给出解除排除的入口。 */
+function excludedModelResponse(model: string): Response {
+  return Response.json(
+    {
+      error: {
+        message: `Model "${model}" is excluded by the gateway's excludedModels configuration`,
+        hint: "Remove or narrow the exclusion (codex-cliproxy models --exclude, or the Web UI) to use this model",
+      },
+    },
+    { status: 404, headers: { "x-codex-cliproxy-gateway": "model-excluded" } },
+  );
+}
+
 export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
@@ -997,20 +1038,26 @@ export function createGatewayHandler(
   codebuddyDependencies?: CodebuddyDependencies,
   qoderDependencies?: QoderDependencies,
   agyDependencies?: AgyDependencies,
+  opencodeZenDependencies?: OpencodeZenDependencies,
 ): GatewayHandler {
+  // 健康身份属于构造时的实例，不能随其他调用的路径上下文改变。
+  const marker = instanceMarker(resolvePaths().runtimeHome);
   const handleZcode = createZcodeAdapter(config, { ...zcodeDependencies, processLog });
   const handleCodebuddy = createCodebuddyAdapter(config, { ...codebuddyDependencies, processLog });
   const handleQoder = createQoderAdapter(config, { ...qoderDependencies, processLog });
   const handleAgy = createAgyAdapter(config, { ...agyDependencies, processLog });
+  const handleOpencodeZen = createOpencodeZenAdapter(config, { ...opencodeZenDependencies, processLog });
   const zcodeRequests = new WeakSet<Request>();
   const codebuddyRequests = new WeakSet<Request>();
   const qoderRequests = new WeakSet<Request>();
   const agyRequests = new WeakSet<Request>();
+  const opencodeZenRequests = new WeakSet<Request>();
   const preparedBodies = new WeakMap<Request, { bytes?: ArrayBuffer; json?: Record<string, unknown> }>();
   /** 本次请求实际打到哪个上游。日志包装层在 handleCore 之外，只能这样把它取回来。 */
   const upstreams = new WeakMap<Request, string>();
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
+  const modelExclusion = compileModelFilter(config.excludedModels);
   const logging = config.requestLogging === true;
   const sink = resolveLogSink(config, processLog);
   // 启动补扫一次：保留计数按时间全局生效，不必等某个分组再被写入。ZCode 适配器用的是
@@ -1023,12 +1070,14 @@ export function createGatewayHandler(
     if (incomingUrl.pathname === "/zai" || incomingUrl.pathname.startsWith("/zai/")) return zcodeError(404, "旧 /zai 入口已移除，请使用 Codex /v1/responses");
 
     if (incomingUrl.pathname === "/healthz") {
+      // 实例标记（运行主目录哈希）：CLI 的 waitForHealth 用它区分「本实例就绪」与
+      // 「端口被另一个 codex-cliproxy 实例占用」。
       return Response.json({
         ok: true,
         upstreamOnly: config.upstreamOnly === true,
         prefix,
         port: config.port,
-      });
+      }, { headers: { "x-ccp-instance": marker } });
     }
 
     // Web UI 在独立端口（本端口 + 1）上运行：模型端口不服务 /ui，也绝不把 /ui 转发上游。
@@ -1067,7 +1116,32 @@ export function createGatewayHandler(
         codebuddyEnabled(config) ? await handleCodebuddy.catalog() : undefined,
         qoderEnabled(config) ? await handleQoder.catalog() : undefined,
         agyEnabled(config) ? await handleAgy.catalog() : undefined,
+        opencodeZenEnabled(config) ? await handleOpencodeZen.catalog() : undefined,
       );
+    }
+
+    // OpenCode Zen 只消费 Chat Completions：POST /chat/completions 且 model 带
+    // opencode-zen/ 前缀时拦截转发，其余请求（含目录外的旧 id）继续走通用转发。
+    const chatCompletionsPath = incomingUrl.pathname === `${mountPath}/chat/completions`;
+    if (chatCompletionsPath && request.method === "POST" && opencodeZenEnabled(config)) {
+      const bytes = await readBodyBytes(request);
+      let json: Record<string, unknown> | undefined;
+      try { json = decodeJsonBody(bytes, request.headers); }
+      catch {
+        // 解析失败的正文无法判别模型：缓存原始字节后交回通用路径报 400。
+        preparedBodies.set(request, { bytes });
+      }
+      if (json !== undefined) preparedBodies.set(request, { bytes, json });
+      const opencodeZenModel = typeof json?.model === "string" ? json.model : undefined;
+      if (isOpencodeZenModel(opencodeZenModel)) {
+        // Zen 是本地兼容端之一：chat/completions 拦截在通用排除检查之前，
+        // 被排除的 zen 模型在这里就地 404，不触达上游。
+        if (opencodeZenModel !== undefined && modelExclusion.isExcluded(opencodeZenModel)) {
+          return excludedModelResponse(opencodeZenModel);
+        }
+        opencodeZenRequests.add(request);
+        return handleOpencodeZen.forward(request, json as Record<string, unknown>);
+      }
     }
 
     const responsePath = incomingUrl.pathname === `${mountPath}/responses`;
@@ -1076,8 +1150,9 @@ export function createGatewayHandler(
     if (isZcodeResponsesWebSocket(request, config)) return websocketNotSupportedResponse("zcode-http-only");
     if (isCodebuddyResponsesWebSocket(request, config)) return websocketNotSupportedResponse("codebuddy-http-only");
     if (isQoderResponsesWebSocket(request, config)) return websocketNotSupportedResponse("qoder-http-only");
+    if (isOpencodeZenResponsesWebSocket(request, config)) return websocketNotSupportedResponse("opencode-zen-http-only");
     if (isAgyResponsesWebSocket(request, config)) return websocketNotSupportedResponse("agy-http-only");
-    if ((zcodeEnabled(config) || codebuddyEnabled(config) || qoderEnabled(config) || agyEnabled(config)) && (responsePath || compactPath) && request.method === "POST") {
+    if ((zcodeEnabled(config) || codebuddyEnabled(config) || qoderEnabled(config) || agyEnabled(config) || opencodeZenEnabled(config)) && (responsePath || compactPath) && request.method === "POST") {
       const bytes = await readBodyBytes(request);
       let json: Record<string, unknown> | undefined;
       try { json = decodeJsonBody(bytes, request.headers); }
@@ -1097,6 +1172,20 @@ export function createGatewayHandler(
       }
       preparedBodies.set(request, { bytes, json });
       const model = typeof json?.model === "string" ? json.model : hintedModel;
+      // 排除拦截覆盖全部本地兼容端（含 Zen）：被排除模型已从 /models 撤下，
+      // 转发前按 404 拦截；未命中的请求继续走下方 Zen 多协议/各适配器路由。
+      if (typeof model === "string" && isLocalAdapterModel(model) && modelExclusion.isExcluded(model)) {
+        return excludedModelResponse(model);
+      }
+      // Zen 多协议：responses 入口对 opencode-zen/ 模型分发到 Zen 适配器（responses
+      // 协议直通，其余协议自动转换）；compact 子树不支持。
+      if (opencodeZenEnabled(config) && isOpencodeZenModel(model)) {
+        opencodeZenRequests.add(request);
+        if (compactPath) return opencodeZenError(400, `opencode-zen/ 模型不支持 ${mountPath}/responses/compact`);
+        if (!json) return opencodeZenError(400, "OpenCode Zen Responses 请求必须是 JSON 对象");
+        json = { ...json, model };
+        return handleOpencodeZen.forwardResponses(request, json);
+      }
       if (zcodeEnabled(config) && isZcodeModel(model)) {
         zcodeRequests.add(request);
         if (!json) return zcodeError(400, "ZCode Responses 请求必须是 JSON 对象");
@@ -1249,6 +1338,16 @@ export function createGatewayHandler(
         { status: 400 },
       );
     }
+    // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
+    // 模型已从 /models 撤下，继续转发只会把请求送向未启用的上游。仅本地兼容端
+    // 模型参与排除，上游与官方模型不受历史规则影响。
+    if (request.method === "POST") {
+      const requestedModel = typeof json?.model === "string" ? json.model : hinted;
+      if (typeof requestedModel === "string" && isLocalAdapterModel(requestedModel)
+        && modelExclusion.isExcluded(requestedModel)) {
+        return excludedModelResponse(requestedModel);
+      }
+    }
     const upstreamBase = route.kind === "cliproxy" ? config.upstreamBaseUrl : config.officialBaseUrl;
     let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);
     upstreams.set(request, upstreamUrl);
@@ -1333,7 +1432,7 @@ export function createGatewayHandler(
     }
   };
 
-  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); } });
+  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); handleOpencodeZen.close(); } });
 
   return Object.assign(async (request: Request): Promise<Response> => {
     const requestTime = localTime();
@@ -1378,7 +1477,7 @@ export function createGatewayHandler(
     }
 
     const response = await handleCore(request);
-    if (zcodeRequests.has(request) || codebuddyRequests.has(request) || qoderRequests.has(request) || agyRequests.has(request)) return response;
+    if (zcodeRequests.has(request) || codebuddyRequests.has(request) || qoderRequests.has(request) || agyRequests.has(request) || opencodeZenRequests.has(request)) return response;
     const url = incoming.pathname + incoming.search;
     const qoderNegotiation = isQoderModel(modelFromRoutingHint(request));
 
@@ -1422,7 +1521,7 @@ export function createGatewayHandler(
       // Logging must never break the request flow.
     });
     return response;
-  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); } });
+  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); handleOpencodeZen.close(); } });
 }
 
 /**
@@ -1507,6 +1606,7 @@ export function startGateway(
   codebuddyDependencies?: CodebuddyDependencies,
   qoderDependencies?: QoderDependencies,
   agyDependencies?: AgyDependencies,
+  opencodeZenDependencies?: OpencodeZenDependencies,
 ): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
@@ -1515,10 +1615,11 @@ export function startGateway(
   validateCodebuddyConfig(config);
   validateQoderConfig(config);
   validateAgyConfig(config);
+  validateOpencodeZenConfig(config);
   const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
   const cpaThreads = new Set<string>();
   const cpaTurns = new Set<string>();
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies, qoderDependencies, agyDependencies);
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies, qoderDependencies, agyDependencies, opencodeZenDependencies);
   let server: Bun.Server<RealtimeSocketData>;
   try {
     server = Bun.serve<RealtimeSocketData>({
@@ -1537,6 +1638,7 @@ export function startGateway(
           || isZcodeResponsesWebSocket(request, config)
           || isCodebuddyResponsesWebSocket(request, config)
           || isQoderResponsesWebSocket(request, config)
+          || isOpencodeZenResponsesWebSocket(request, config)
           || isAgyResponsesWebSocket(request, config)) return handler(request);
         const target = realtimeWebSocketTarget(request, config);
         if (target) {

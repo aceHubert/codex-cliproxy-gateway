@@ -28,6 +28,14 @@ export function isZcodeModel(model: unknown): boolean {
   return typeof model === "string" && /^zcode(?:\/|-)/i.test(model);
 }
 
+/** ZCode 对外模型 ID 的固定前缀族：旧 API Key 命名空间与各套餐作用域前缀。
+ * API Key 多 provider 的前缀（zcode-<providerId>/）由 provider ID 动态生成，不在此列。 */
+export function zcodeStaticModelPrefixes(): string[] {
+  return [ZCODE_PREFIX, ...Object.values(PLAN_PREFIXES)].filter(
+    (prefix): prefix is string => typeof prefix === "string",
+  );
+}
+
 /** 从对外模型 ID 解析套餐连接形态；未声明的 zcode- 段不属于任何套餐。 */
 export function zcodeModelPlan(model: string): ZcodeSelection["kind"] | undefined {
   if (!isZcodeModel(model)) return undefined;

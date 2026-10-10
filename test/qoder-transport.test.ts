@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import type { QoderCredentials } from "../src/qoder/credentials.ts";
-import { createQoderTransport, decodeQoderBody, encodeQoderBody, type QoderFetch } from "../src/qoder/transport.ts";
+import fingerprintData from "../src/qoder/fingerprint-data.json";
+import { createQoderTransport, decodeQoderBody, encodeQoderBody, QODER_PROTOCOL_VERSION, type QoderFetch } from "../src/qoder/transport.ts";
 
 const CREDENTIAL: QoderCredentials = { region: "intl", clientProfile: "cli", accountUid: "synthetic-user", authDirectory: "/synthetic/auth", identity: "synthetic-identity",
   machineId: "synthetic-machine", organizationId: "synthetic-org", organizationTags: ["tag1", "tag2"], dataPolicyAgreed: true,
@@ -121,4 +122,23 @@ test("网络异常不透传底层敏感文本，取消请求保留 AbortError", 
   const controller = new AbortController();
   controller.abort();
   await assert.rejects(transport.fetchCatalog(CREDENTIAL, controller.signal), (error: unknown) => error instanceof DOMException && error.name === "AbortError");
+});
+
+test("Qoder 协议版本、双客户端 profile 与内置提示词取自本模块指纹数据文件", () => {
+  const data = fingerprintData as {
+    version: string; commit: string;
+    profiles: { cli: { product: string; clientType: string; sessionType: string }; desktop: { product: string; clientType: string; sessionType: string } };
+    agentSystemPrompt: string; desktopAgentSystemPrompt: string;
+  };
+  assert.equal(QODER_PROTOCOL_VERSION, data.version);
+  assert.match(data.version, /^\d+\.\d+\.\d+$/);
+  for (const profile of ["cli", "desktop"] as const) {
+    for (const field of ["product", "clientType", "sessionType"] as const) {
+      assert.ok(data.profiles[profile][field], `${profile}.${field} 不得为空`);
+    }
+  }
+  // 内置提示词按二进制内嵌原文提取：CLI 与桌面两套身份各一份。
+  assert.ok(data.agentSystemPrompt.startsWith("You are an interactive CLI tool that helps users with software engineering tasks."));
+  assert.ok(data.agentSystemPrompt.includes("# Explanatory Style Active"), "CLI 模板以该段头结尾，段体运行时注入");
+  assert.ok(data.desktopAgentSystemPrompt.startsWith("You are Qoder's desktop agentic assistant"));
 });

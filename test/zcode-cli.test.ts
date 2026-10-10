@@ -149,8 +149,8 @@ test("config --zcode 拒绝会让新进程无法启动的组合，保留原配�
   try {
     await assert.rejects(runCli(["config", "--zcode", "on"]), /前缀保留给 ZCode/);
     // config 命令的非法组合确实未写入；文件差异只来自命令前置同步的同版本补键
-    // （新开关按缺省 false 回填并以格式化 JSON 重写，与 qoder 落地时的行为一致）。
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), `${JSON.stringify({ ...config, agy: false }, null, 2)}\n`);
+    // （新开关按缺省 false 回填并以格式化 JSON 重写，与 qoder/agy 落地时的行为一致）。
+    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), `${JSON.stringify({ ...config, agy: false, opencodeZen: false }, null, 2)}\n`);
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

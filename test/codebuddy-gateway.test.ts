@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { createGatewayHandler, isCodebuddyResponsesWebSocket } from "../src/gateway.ts";
 import { codebuddyEnabled, createCodebuddyAdapter, validateCodebuddyConfig } from "../src/codebuddy/index.ts";
+import fingerprintData from "../src/codebuddy/fingerprint-data.json";
+import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "../src/codebuddy/request-context.ts";
 import { CodebuddyCredentialError } from "../src/codebuddy/credentials.ts";
 import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
@@ -533,7 +535,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
     // 启动刷新是 fire-and-forget：等待一轮微任务后应已落到磁盘缓存。
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(fetches, 1, "构造适配器时强制刷新一次");
-    assert.ok(fs.existsSync(path.join(directory, "codebuddy-intl-catalog.json")));
+    assert.ok(fs.existsSync(path.join(directory, "codebuddy-catalog.json")));
     assert.equal(scheduled.length, 1, "注册 16 分钟定时刷新");
     assert.deepEqual(delays, [16 * 60 * 1000]);
     scheduled[0]!();
@@ -714,4 +716,49 @@ test("promptCodebuddyAccountSelection：箭头选择/取消；auto 置顶且不�
     process.stdout.write = oldWrite;
     fs.rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("CodeBuddy 版本常量取自本模块指纹数据文件，主提示词标注为运行时拼装", () => {
+  const data = fingerprintData as {
+    cliVersion: string; workbuddyVersion: string; workbuddyCliVersion: string;
+    agentSystemPrompt: string; agentSystemPromptBase: string; titleSystemPrompt: string;
+  };
+  assert.equal(CODEBUDDY_CLI_VERSION, data.cliVersion);
+  assert.equal(CODEBUDDY_WORKBUDDY_VERSION, data.workbuddyVersion);
+  assert.equal(CODEBUDDY_WORKBUDDY_CLI_VERSION, data.workbuddyCliVersion);
+  for (const version of [data.cliVersion, data.workbuddyVersion, data.workbuddyCliVersion]) {
+    assert.match(version, /^\d+\.\d+\.\d+$/);
+  }
+  // 主提示词在包内 product.json 的 prompts 数组（PromptManager 模板表），模板变量已按 docs/fingerprint-data.md 规则剥离。
+  assert.ok(data.agentSystemPrompt.startsWith("You are CodeBuddy Code."));
+  assert.ok(data.agentSystemPrompt.includes("<content_policy>"), "主模板含内容政策段");
+  assert.ok(!data.agentSystemPrompt.includes("{{") && !data.agentSystemPrompt.includes("{%"), "Jinja 变量指令已剥离");
+  assert.ok(!data.agentSystemPrompt.includes("Working directory:"), "运行值行整行删除");
+  assert.ok(data.agentSystemPrompt.includes("Is directory a git repo: No"), "if/else 保留 else（默认）分支");
+  assert.equal(data.agentSystemPromptBase, "You are CodeBuddy Code.\n");
+  assert.ok(data.titleSystemPrompt.startsWith("Generate a concise, sentence-case title"));
+  assert.ok(!data.titleSystemPrompt.includes("{{") && !data.titleSystemPrompt.includes("<response_language>"), "标题模板变量与空容器已剥离");
+});
+
+test("目录条目的 base_instructions 与 model_messages 模板均替换为官方 CLI 主提示词，workbuddy 沿用同一份", async () => {
+  await fixture(async ({ create }) => {
+    const cli = create({ profile: "intl-cli" });
+    const cliCatalog = await (await cli(new Request("http://127.0.0.1:8320/v1/models?client_version=1.0.0"))).json() as Json;
+    const cliEntries = (cliCatalog.models as Json[]).filter((entry) => String(entry.slug).startsWith("codebuddy-"));
+    assert.ok(cliEntries.length > 0, "cli profile 必须产出 codebuddy 目录");
+    assert.ok(cliEntries.every((entry) => entry.base_instructions === CODEBUDDY_AGENT_SYSTEM_PROMPT), "Codex 按 base_instructions 发送系统提示词");
+    assert.ok(cliEntries.every((entry) => (entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template === CODEBUDDY_AGENT_SYSTEM_PROMPT),
+      "instructions_template 必须一并替换，否则客户端按模板仍发官方提示词");
+    const work = create({ profile: "intl-work" });
+    const workCatalog = await (await work(new Request("http://127.0.0.1:8320/v1/models?client_version=1.0.0"))).json() as Json;
+    // workbuddy/* 无自有提示词，直接沿用 CodeBuddy 主提示词（未做品牌名替换，见技术债）；
+    // 同裸 ID 的 workbuddy 条目会在合并去重时被 cli 顶掉，能透出的条目同样必须带提示词。
+    const family = (workCatalog.models as Json[]).filter((entry) => /^(codebuddy|workbuddy)-/.test(String(entry.slug)));
+    assert.ok(family.length > 0, "work profile 必须产出 CodeBuddy 家族目录");
+    for (const entry of family) {
+      assert.equal(entry.base_instructions, CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目必须带提示词：${entry.slug}`);
+      assert.equal((entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template,
+        CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目必须替换模板：${entry.slug}`);
+    }
+  });
 });

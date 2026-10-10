@@ -59,7 +59,8 @@ test("realPathOrResolve follows file and directory symlinks and falls back for m
     assert.equal(realPathOrResolve(path.join(dirLink, "config.json")), path.join(fs.realpathSync(dir), "config.json"));
 
     const missing = path.join(root, "no-such", "config.json");
-    assert.equal(realPathOrResolve(missing), path.resolve(missing));
+    // 即使父目录尚不存在，也从最近存在的真实祖先派生稳定路径。
+    assert.equal(realPathOrResolve(missing), path.join(fs.realpathSync(root), "no-such", "config.json"));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

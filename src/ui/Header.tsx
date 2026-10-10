@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { navigate, useHashRoute } from "./hash-router.ts";
-import { useI18n } from "./i18n.tsx";
+import { useI18n } from "./i18n/index.ts";
 import type { UiStatus } from "./api.ts";
 
 /**
@@ -16,12 +16,12 @@ export function Header({ status, children }: { status: UiStatus; children?: Reac
       <div className="header-left">
         <div className="brand-title">
           <span>codex-cliproxy</span>
-          <span className="brand-badge">{t("brandBadge")}</span>
+          <span className="brand-badge">{t("common:brandBadge")}</span>
         </div>
         <div className="status-pill">
           <span className="status-dot" />
           <span className="status-endpoint">{status.host}:{status.port}</span>
-          <span className="local-badge">{t("localBadge")}</span>
+          <span className="local-badge">{t("common:localBadge")}</span>
         </div>
       </div>
       <div className="header-right">
@@ -37,17 +37,17 @@ export function Header({ status, children }: { status: UiStatus; children?: Reac
             {!onLogs && <line x1="16" y1="13" x2="8" y2="13" />}
             {!onLogs && <line x1="16" y1="17" x2="8" y2="17" />}
           </svg>
-          <span>{onLogs ? t("backToConfig") : t("logsBtn")}</span>
+          <span>{onLogs ? t("common:backToConfig") : t("common:logsBtn")}</span>
         </button>
         <div className="lang-segmented">
           <button
             className={`lang-btn${lang === "zh" ? " active" : ""}`}
             onClick={() => setLang("zh")}
-          >中</button>
+          >{t("common:langZh")}</button>
           <button
             className={`lang-btn${lang === "en" ? " active" : ""}`}
             onClick={() => setLang("en")}
-          >EN</button>
+          >{t("common:langEn")}</button>
         </div>
         {children}
       </div>
