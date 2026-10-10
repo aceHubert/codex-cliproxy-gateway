@@ -1,5 +1,8 @@
 # codex-cliproxy-gateway
 
+[![Deploy 状态](https://github.com/aceHubert/codex-cliproxy-gateway/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/aceHubert/codex-cliproxy-gateway/actions/workflows/deploy.yml)
+[![npm 版本](https://img.shields.io/npm/v/codex-cliproxy-gateway)](https://www.npmjs.com/package/codex-cliproxy-gateway)
+
 A small cross-platform, Bun-powered local gateway for Codex Desktop and Codex CLI.
 
 It keeps Codex signed in with ChatGPT for native models, while models whose IDs begin with `cliproxy/` are sent to CLIProxyAPI with a separate API key.
