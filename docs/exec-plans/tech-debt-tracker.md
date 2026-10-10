@@ -4,6 +4,7 @@
 
 | 日期 | 区域 | 债务描述 | 为什么会存在 | 计划中的后续动作 |
 | --- | --- | --- | --- | --- |
+| 2026-10-10 | Web UI i18n | `config:copyUrl`/`config:copyPath` 两键 zh 值仍为英文 "Copy URL"/"Copy Path"（迁移前即英文硬编码，两语言同值） | i18n 迁移按计划保持 UI 行为零变化，M4 词条治理范围未含此二键；见 [执行计划](completed/i18n-refactor.md) 进度记录「其他词条变更」 | 后续词条治理时把 zh 改为「复制地址」/「复制路径」，`test/ui-i18n.test.ts` 的混写回归断言不拦截纯英文值，无需改测试 |
 | 2026-10-09 | debug 调试转储的 Web UI 开关 | `config --debug on|off` 已交付，但 Web UI 没有 debug 开关：`applyWebUiConfigPatch` 的 `SUPPORTED_PATCH_FIELDS` 不含 `debug`，ConfigPage 也无对应表单项，浏览器侧无法切换 | Web UI 改动面（ConfigPage 表单、i18n 文案、api.ts 类型）远大于 CLI 一个 flag，本期按用户要求只交付 `--config` 开关；见 [执行计划](completed/agy-debug-dump-config-gate.md) | 需要浏览器侧管理时：把 `debug` 加入 `SUPPORTED_PATCH_FIELDS` 与 `WebUiConfigPatch`，ConfigPage 仿 `requestLogging` 增加 checkbox（含「含提示词、仅限本机排查」提示文案），并补 webui.test.ts 的 patch 用例 |
 | 2026-10-09 | 受管目录文件清单 | `managedCatalogFiles` 尚未收录 qoder/agy/opencode-zen 的目录缓存，卸载可能残留文件，`model_catalog_json` 守卫也不认可这些路径 | 本次只收敛 CodeBuddy/WorkBuddy 的产品文件命名，其他适配器清单缺口与改名无耦合 | 单独补齐各适配器实际目录文件路径，并覆盖卸载清理、TOML 受管守卫与临时实例定位；见 [执行计划](completed/codebuddy-catalog-file-per-product.md) |
 | 2026-10-09 | CodeBuddy 目录缓存的账号身份边界 | 既有 cache_key 身份摘要只包含 profile/accountUid/enterpriseId；凭据解析允许账号标识为空或相同，同地域不同登录在这些字段相同且上游失败时可能复用前一个登录的目录 | 问题在本次文件改名前已存在；本计划明确保持缓存键规则不变，不扩展凭据接口 | 单独设计稳定的账号身份（优先可靠账号声明或登录来源；缺失时考虑 token 摘要兜底与刷新抖动），补齐空标识、相同标识不同登录、token 刷新与失败回退回归；磁盘不得保存原始凭据 |
