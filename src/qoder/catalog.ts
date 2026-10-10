@@ -13,7 +13,13 @@ export const QODER_INTL_PREFIX = "qoder-intl/";
 export const QODER_CN_PREFIX = "qoder-cn/";
 export const QODER_CATALOG_TTL_MS = 100_000;
 const FAILURE_COOLDOWN_MS = 30_000;
-const CACHE_REVISION = 3;
+// 4：聚合档位不再进入目录，含旧档位的缓存随修订号失效重建。
+const CACHE_REVISION = 4;
+/** Qoder 聚合档位（Auto/Ultimate/Performance/Efficient/Sonus/Cantus）：服务端按档位动态
+ * 选型并按倍率计费，不是可固定调用的具体模型。目录字段上与具体模型无可靠区分
+ * （strategies/is_sensitive 也出现在 Kimi/GLM 等具体模型上，inline 分组两地区语义
+ * 不一致），因此以 key 名单判定；服务端新增档位时在此补一行。 */
+const QODER_TIER_MODEL_KEYS = new Set(["auto", "ultimate", "performance", "efficient", "smodel", "cmodel"]);
 const BASE = parseCodexCatalog(codexClientModels).models.find((entry) => entry.slug === "gpt-5.5");
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -86,8 +92,8 @@ export function parseQoderCatalogData(value: unknown): QoderCatalogModel[] {
     }
     if (seen.has(entry.key)) throw new Error("Qoder 模型目录格式错误：模型 key 重复");
     seen.add(entry.key);
-    // enable 必须由目录明确授权；未知模型、auto 与禁用条目不能触发上游付费回退。
-    if (entry.enable !== true || entry.disabled === true || entry.key.toLowerCase() === "auto") continue;
+    // enable 必须由目录明确授权；聚合档位与禁用条目不进入可选目录，也不能触发上游付费回退。
+    if (entry.enable !== true || entry.disabled === true || QODER_TIER_MODEL_KEYS.has(entry.key.toLowerCase())) continue;
     const model: QoderCatalogModel = {
       key: entry.key,
       display_name: typeof entry.display_name === "string" && entry.display_name.trim()

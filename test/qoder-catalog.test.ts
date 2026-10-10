@@ -34,8 +34,10 @@ function temporaryDirectory(): string {
 
 test("Qoder 目录只展示当前账号启用的具体模型，并使用国际版路由", () => {
   const parsed = parseQoderCatalogData({ chat: [
-    model(), model("off", { enable: false }), model("auto"), model("missing-enable", { enable: undefined }),
+    model(), model("off", { enable: false }), model("missing-enable", { enable: undefined }),
     model("disabled", { disabled: true }),
+    model("auto"), model("ultimate"), model("performance"), model("efficient"),
+    model("smodel"), model("cmodel"),
   ], byok_teams: [model("team-only")] });
   const catalog = buildQoderCatalog(parsed);
   assert.deepEqual(catalog.models.map((entry) => entry.slug), ["qoder-intl/qfmodel"]);
