@@ -27,6 +27,42 @@ import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
 import { catalogRevision } from "../src/codebuddy/request-context.ts";
 import { invalidateModelsCache } from "../src/catalog.ts";
 
+test("manual 目录过期与账号变更不触发网络，reload 读取命令写入的目录", { timeout: 60_000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-manual-"));
+  let now = 0;
+  let fetched = 0;
+  let account = credential("intl-cli");
+  let id = "first";
+  const options = {
+    cacheDirectory: directory,
+    catalogMode: "manual" as const,
+    now: () => now,
+    credentials: async () => [account],
+    fetch: async () => {
+      fetched++;
+      return Response.json({ code: 0, data: cliConfig([fixtureModel(id)], [id]) });
+    },
+  };
+  try {
+    const store = createCodebuddyCatalogStore(options);
+    await assert.rejects(store.catalog(), /没有可用的本地缓存/);
+    assert.equal(fetched, 0);
+    await store.refresh();
+    now = 24 * 60 * 60 * 1000;
+    assert.equal((await store.catalog()).models[0]!.slug, "codebuddy-intl/first");
+    assert.equal(fetched, 1);
+    id = "second";
+    await createCodebuddyCatalogStore(options).refresh();
+    assert.equal((await store.reload()).models[0]!.slug, "codebuddy-intl/second");
+    assert.equal(fetched, 2, "reload 只读磁盘，不拉网络");
+    account = { ...account, accountUid: "other-account" };
+    await assert.rejects(store.catalog(), /没有可用的本地缓存/);
+    assert.equal(fetched, 2, "账号变化不复用旧目录，也不隐式刷新");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 function credential(profile: CodebuddyCredential["profile"]): CodebuddyCredential {
   const endpoints: Record<CodebuddyCredential["profile"], string> = {
     "cn-cli": "https://copilot.tencent.com",

@@ -113,16 +113,16 @@
       "default": false
     },
     "upstreamOnly": {
-      "description": "是否只使用第三方上游并纯转发模型名，不添加 cliproxy/ 前缀。",
+      "description": "未登录 ChatGPT、只将请求转发到上游，不使用本地授权账号配置模型。",
       "type": "boolean"
     },
     "zcode": {
-      "description": "是否启用 ZCode Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 ZCode；默认关闭, 开启后自动发现 ZCode Desktop 登录。",
       "type": "boolean",
       "default": false
     },
     "codebuddy": {
-      "description": "是否启用 CodeBuddy/WorkBuddy Responses 入口；默认关闭。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 CodeBuddy/WorkBuddy；默认关闭, 开启后自动发现 CodeBuddy/WorkBuddy CLI 登录。",
       "type": "boolean",
       "default": false
     },
@@ -138,17 +138,17 @@
       "deprecated": true
     },
     "qoder": {
-      "description": "是否启用 Qoder Responses 入口；默认关闭，自动发现各地域 CLI 登录。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 Qoder；默认关闭，开启后自动发现 Qoder CLI/Desktop 登录。",
       "type": "boolean",
       "default": false
     },
     "agy": {
-      "description": "是否启用 Antigravity（agy）Responses 入口；默认关闭，只读消费本机 agy 登录（令牌由 agy 进程负责刷新，网关过期即失败不刷新）。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 Antigravity（agy）；默认关闭，开启后自动发现agy CLI（令牌由 agy 进程负责刷新，网关过期即失败不刷新）。",
       "type": "boolean",
       "default": false
     },
     "opencodeZen": {
-      "description": "是否启用 OpenCode Zen（opencode-zen/ 前缀）Chat Completions 入口；默认关闭。经客户端指纹转发消费 Zen 免费模型（公共鉴权 Bearer public，可用环境变量 OPENCODE_API_KEY 覆盖）。upstreamOnly 为 true 时该入口按禁用处理（开关保留但不生效）。",
+      "description": "是否启用 OpenCode Zen（opencode-zen/ 前缀）Chat Completions 入口；默认关闭。经客户端指纹转发消费 Zen 免费模型（公共鉴权 Bearer public，可用环境变量 OPENCODE_API_KEY 覆盖）。",
       "type": "boolean",
       "default": false
     },

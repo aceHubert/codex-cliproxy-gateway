@@ -101,6 +101,8 @@ export interface UiConfig {
 /** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。
  * CodeBuddy 账号不在此列：UI 只读展示，切换走 CLI 的 codebuddy --switch。 */
 export interface UiConfigChanges {
+  /** 组合保存时由服务端先拉取、校验并重建所选目录，不只写配置字段。 */
+  selectedModels?: string[];
   zcode?: boolean;
   codebuddy?: boolean;
   qoder?: boolean;

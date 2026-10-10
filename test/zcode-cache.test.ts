@@ -64,6 +64,32 @@ async function eventually(fn: () => Promise<void>): Promise<void> {
   throw last;
 }
 
+test("ZCode 显式本地重载读取模型变更而不发起团队凭据网络请求", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    let requests = 0;
+    const cache = createZcodeConfigCache(home, {
+      refreshOnStart: false, watch: mock.watch,
+      fetch: (async () => { requests++; throw new Error("本地重载禁止网络"); }) as unknown as typeof fetch,
+    });
+    try {
+      const first = await cache.reload!();
+      assert.ok(first.modelIds.includes("glm-5"));
+      json(path.join(home, "v2", "config.json"), config("updated-key", URL_A, { models: { "glm-5.3-flash": {} } }));
+      const second = await cache.reload!();
+      assert.equal(second.apiKey, "updated-key");
+      assert.deepEqual(second.modelIds, ["glm-5.3-flash"]);
+      json(path.join(home, "setting.json"), connectionSettings("team-coding-plan"));
+      json(path.join(home, "credentials.json"), teamCredentials());
+      const team = await cache.reload!();
+      assert.equal(team.plan, "team-coding-plan");
+      assert.deepEqual(team.modelIds, ["glm-5.3-flash"]);
+      assert.equal(team.apiKey, "", "目录读取不需要获取团队业务 Key");
+      assert.equal(requests, 0);
+    } finally { cache.close(); }
+  });
+});
+
 test("ZCode 100 次无关设置写入不构建 Key、不阻塞请求并保留快照对象", { timeout: 60_000 }, async () => {
   await fixture(async (home) => {
     const mock = mockWatch();

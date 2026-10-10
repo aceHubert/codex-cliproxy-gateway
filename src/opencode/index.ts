@@ -71,6 +71,7 @@ export interface OpencodeZenDependencies {
 
 
   catalogRefreshIntervalMs?: number;
+  catalogMode?: "dynamic" | "manual";
   refreshCatalogOnStart?: boolean;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
@@ -80,7 +81,7 @@ export interface OpencodeZenDependencies {
 }
 
 export function opencodeZenEnabled(config: GatewayConfig): boolean {
-  return config.opencodeZen === true && config.upstreamOnly !== true;
+  return config.opencodeZen === true;
 }
 
 export function validateOpencodeZenConfig(config: GatewayConfig): void {
@@ -280,6 +281,7 @@ export function createOpencodeZenAdapter(config: GatewayConfig, dependencies: Op
   const store = enabled
     ? createOpencodeZenCatalogStore({
       cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
+      catalogMode: dependencies.catalogMode,
       fetchCatalog: fetchModels,
       fetchMetadata,
       probeModel,
@@ -290,13 +292,17 @@ export function createOpencodeZenAdapter(config: GatewayConfig, dependencies: Op
   const schedule = dependencies.setInterval ?? setInterval;
   const cancel = dependencies.clearInterval ?? clearInterval;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let startup: Promise<void> | undefined;
   if (store) {
     if (dependencies.refreshCatalogOnStart !== false) {
-      void store.refresh().catch(() => {});
+      startup = store.refresh(dependencies.catalogMode === "manual");
+      void startup.catch(() => {});
+      void startup.finally(() => { startup = undefined; }).catch(() => {});
       void userAgent.refresh().catch(() => {});
     }
+    // 手动目录模式仍维护客户端指纹；维护指纹不会刷新模型、元数据或探针。
     timer = schedule(() => {
-      void store.refresh().catch(() => {});
+      if (dependencies.catalogMode !== "manual") void store.refresh().catch(() => {});
       void userAgent.refresh().catch(() => {});
     }, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS));
     timer.unref?.();
@@ -307,6 +313,7 @@ export function createOpencodeZenAdapter(config: GatewayConfig, dependencies: Op
   return {
     async catalog(): Promise<ModelCatalog> {
       if (!store || closed) return { models: [] };
+      await startup?.catch(() => {});
       try {
         // 系统提示词已在 buildOpencodeZenCatalog 合成时替换（含 model_messages 模板），缓存即成品；
         // 转发路仍保留门禁模板注入，已含模板时不重复注入。
@@ -314,6 +321,16 @@ export function createOpencodeZenAdapter(config: GatewayConfig, dependencies: Op
       } catch {
         return { models: [] };
       }
+    },
+    async refreshCatalog(): Promise<ModelCatalog> {
+      if (!store || closed) return { models: [] };
+      await (startup ?? store.refresh(true));
+      return { models: await store.catalog() };
+    },
+    async reloadCatalog(): Promise<ModelCatalog> {
+      if (!store || closed) return { models: [] };
+      await startup?.catch(() => {});
+      return { models: await store.reload() };
     },
     /**
      * /v1/chat/completions 拦截入口：剥前缀、注入指纹、按客户端流式偏好回包。

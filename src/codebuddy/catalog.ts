@@ -384,6 +384,8 @@ export interface CodebuddyCatalogStoreOptions {
   codexModelsCacheFile?: string;
   now?: () => number;
   ttlMs?: number;
+  /** manual 仅允许显式刷新；目录查询不按 TTL 拉取。 */
+  catalogMode?: "dynamic" | "manual";
 }
 
 interface CachedCatalog {
@@ -555,26 +557,40 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
     return refreshing;
   }
 
+  async function currentCatalog(reload = false): Promise<ModelCatalog> {
+    const allFamilies = await families();
+    if (allFamilies.size === 0) return { models: [] };
+    const models: ModelEntry[] = [];
+    let served = 0;
+    for (const [profile, { key }] of allFamilies) {
+      if (reload || cached.get(profile)?.key !== key) {
+        const disk = readDisk(profile, key);
+        if (disk) cached.set(profile, disk);
+        else if (cached.get(profile)?.key !== key) cached.delete(profile);
+      }
+      // last-good 语义：key 匹配即服务（TTL 只驱动刷新尝试），账号切换后的旧 key 条目不复用。
+      const value = cached.get(profile);
+      if (!value || value.key !== key) continue;
+      served++;
+      models.push(...projectCodebuddyCatalog({ models: value.models }, profile).models);
+    }
+    if (served === 0) throw new Error("CodeBuddy 模型目录拉取失败，且没有可用的本地缓存");
+    return { models };
+  }
+
   return {
     async catalog(): Promise<ModelCatalog> {
-      await refresh(false);
-      const allFamilies = await families();
-      if (allFamilies.size === 0) return { models: [] };
-      const models: ModelEntry[] = [];
-      let served = 0;
-      for (const [profile, { key }] of allFamilies) {
-        // last-good 语义：key 匹配即服务（TTL 只驱动刷新尝试），账号切换后的旧 key 条目不复用。
-        const value = cached.get(profile);
-        if (!value || value.key !== key) continue;
-        served++;
-        models.push(...projectCodebuddyCatalog({ models: value.models }, profile).models);
-      }
-      if (served === 0) throw new Error("CodeBuddy 模型目录拉取失败，且没有可用的本地缓存");
-      return { models };
+      if (options.catalogMode !== "manual") await refresh(false);
+      return currentCatalog();
+    },
+    /** 重读当前账号匹配的磁盘目录，不请求网络；磁盘不可用时保留同账号 last-good。 */
+    async reload(): Promise<ModelCatalog> {
+      return currentCatalog(true);
     },
     /** 启动/定时刷新入口：绕过 TTL 重新校验所有可用目录族。 */
     async refresh(): Promise<void> {
       await refresh(true);
+      await currentCatalog();
     },
   };
 }

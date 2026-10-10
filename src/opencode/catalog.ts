@@ -297,6 +297,7 @@ export function filterOpencodeZenCatalogIds(
 }
 
 export interface OpencodeZenCatalogStoreOptions {
+  catalogMode?: "dynamic" | "manual";
   cacheDirectory: string;
   /** 返回 /zen/v1/models 的已解码 JSON；认证与超时由调用方负责。 */
   fetchCatalog: () => Promise<unknown>;
@@ -457,11 +458,11 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
     } catch { /* 缓存写失败不影响本次目录返回。 */ }
   }
 
-  async function refreshMetadata(value: CachedCatalog): Promise<void> {
+  async function refreshMetadata(value: CachedCatalog, force = false): Promise<void> {
     if (!options.fetchMetadata) return;
     const current = value.metadata;
-    if (current && now() - current.fetchedAt < metadataTtlMs) return;
-    if (metadataRetryAt > now()) return;
+    if (!force && current && now() - current.fetchedAt < metadataTtlMs) return;
+    if (!force && metadataRetryAt > now()) return;
     try {
       const parsed = parseOpencodeZenMetadataResponse(await options.fetchMetadata());
       if (parsed) value.metadata = { fetchedAt: now(), models: parsed };
@@ -472,7 +473,7 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
     }
   }
 
-  async function probeMissing(value: CachedCatalog): Promise<void> {
+  async function probeMissing(value: CachedCatalog, force = false): Promise<void> {
     if (!options.probeModel || !value.metadata) return;
     const verdicts = (value.verdicts ??= {});
     for (const id of Object.keys(verdicts)) {
@@ -484,7 +485,7 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       // 直接不示，没必要为它花一次真实请求。
       if (!id.endsWith("-free")) continue;
       const existing = verdicts[id];
-      if (existing && now() - existing.at < probeTtlMs) continue;
+      if (!force && existing && now() - existing.at < probeTtlMs) continue;
       try {
         verdicts[id] = { result: await options.probeModel(id), at: now() };
       } catch {
@@ -499,7 +500,7 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       .filter(([, meta]) => meta.free === true && !meta.deprecated)
       .map(([id]) => id);
 
-  async function refreshOnce(force: boolean): Promise<void> {
+  async function refreshOnce(force: boolean, forceMetadata = false): Promise<void> {
     cached ??= readDisk();
     // 旧版单文件缓存（只有 opencode-zen-catalog.json）：补写成双文件格式后按新语义服务。
     const legacyOnly = cached !== undefined && !fs.existsSync(metadataFile);
@@ -521,9 +522,9 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
         ...(previous?.metadata ? { metadata: previous.metadata } : {}),
         ...(previous?.verdicts ? { verdicts: { ...previous.verdicts } } : {}),
       };
-      await refreshMetadata(value);
+      await refreshMetadata(value, forceMetadata);
       if (value.ids.length === 0) value.ids = metadataFreeIds(value.metadata);
-      await probeMissing(value);
+      await probeMissing(value, forceMetadata);
       value.models = buildModels(value);
       cached = value;
       retryAt = 0;
@@ -541,20 +542,26 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       retryAt = now() + FAILURE_COOLDOWN_MS;
       cached ??= readDisk();
       if (cached && !cached.models) cached.models = buildModels(cached);
+      if (force && !cached) throw new Error("OpenCode Zen 模型目录拉取失败，且没有可用缓存");
     }
   }
 
-  async function refresh(force: boolean): Promise<void> {
+  async function refresh(force: boolean, forceMetadata = false): Promise<void> {
     if (refreshing) return refreshing;
-    refreshing = refreshOnce(force).finally(() => { refreshing = undefined; });
+    refreshing = refreshOnce(force, forceMetadata).finally(() => { refreshing = undefined; });
     return refreshing;
   }
 
   return {
     /** 返回成品条目（刷新时合成并落盘）；无任何缓存（首次拉取即失败）时返回空目录。 */
     async catalog(): Promise<ModelEntry[]> {
-      await refresh(false);
-      return cached?.models ?? [];
+      if (options.catalogMode !== "manual") await refresh(false);
+      else {
+        await refreshing;
+        cached ??= readDisk();
+        if (cached && !cached.models) cached.models = buildModels(cached);
+      }
+      return structuredClone(cached?.models ?? []);
     },
     /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat。 */
     protocol(id: string): OpencodeZenModelProtocol {
@@ -578,8 +585,17 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       return meta?.effortLevels ?? [];
     },
     /** 启动/定时刷新入口：绕过 TTL 重新校验。 */
-    async refresh(): Promise<void> {
-      await refresh(true);
+    async refresh(forceMetadata = false): Promise<void> {
+      await refresh(true, forceMetadata);
+    },
+    async reload(): Promise<ModelEntry[]> {
+      // 元数据与成品目录同时重建内存视图，协议、端点和档位随目录原子切换。
+      await refreshing;
+      cached = readDisk();
+      if (cached) cached.models = buildModels(cached);
+      retryAt = 0;
+      metadataRetryAt = 0;
+      return structuredClone(cached?.models ?? []);
     },
   };
 }

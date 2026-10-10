@@ -141,10 +141,13 @@ test("official refresh failure serves the last-good cached catalog and preserves
   }
 });
 
-test("upstream-only /models uses the local CPA catalog without contacting official", async () => {
+test("upstream-only /models 只消费合成静态目录，不访问官方", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-only-models-response-"));
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [
+    { slug: "raw-model-must-not-be-returned" },
+  ] }));
+  fs.writeFileSync(path.join(directory, "codex-catalog.json"), JSON.stringify({ models: [
     { slug: "gpt-5.6-sol", display_name: "GPT-5.6 Sol" },
   ] }));
   const originalFetch = globalThis.fetch;
@@ -185,7 +188,7 @@ test("upstream-only /models uses the local CPA catalog without contacting offici
   }
 });
 
-test("missing or invalid CPA catalog falls back to the official catalog", async () => {
+test("缺失或损坏静态目录明确失败，动态模式仍回退官方目录", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-catalog-official-fallback-"));
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   const baseConfig: GatewayConfig = {
@@ -203,18 +206,14 @@ test("missing or invalid CPA catalog falls back to the official catalog", async 
   try {
     const missing = createGatewayHandler(baseConfig, "test-key", "invalid");
     const upstreamOnly = await missing(new Request("http://127.0.0.1:8320/v1/models"));
-    assert.equal(upstreamOnly.status, 200);
-    assert.deepEqual(await upstreamOnly.json(), {
-      object: "list",
-      data: [{ id: "gpt-official", object: "model", owned_by: "openai" }],
-    });
+    assert.equal(upstreamOnly.status, 502);
+    assert.match(await upstreamOnly.text(), /Unable to load static model catalog.*models --sync/);
     const upstreamOnlyCodex = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
-    assert.deepEqual(await upstreamOnlyCodex.json(), { models: [{ slug: "gpt-official" }] });
+    assert.equal(upstreamOnlyCodex.status, 502);
 
-    fs.writeFileSync(catalogPath, JSON.stringify({ models: [] }));
-    const empty = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
-    assert.equal(empty.status, 200);
-    assert.deepEqual(await empty.json(), { models: [{ slug: "gpt-official" }] });
+    fs.writeFileSync(path.join(directory, "codex-catalog.json"), "{invalid\n");
+    const corrupted = await missing(new Request("http://127.0.0.1:8320/v1/models?client_version=1"));
+    assert.equal(corrupted.status, 502);
 
     fs.writeFileSync(catalogPath, "{invalid\n");
     const split = createGatewayHandler({ ...baseConfig, upstreamOnly: false }, "test-key", "invalid");
@@ -285,13 +284,15 @@ test("clearModelsCacheEntries removes only matching slugs and expires freshness"
   }
 });
 
-test("models --sync --upstream-only switches mode and plain sync restores dynamic split mode", async () => {
+test("config 切换模式，models --sync 保持模式并更新独立静态目录", async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "models-cpa-only-mode-"));
   const previousHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
   const previousClientVersion = process.env.CODEX_CLIPROXY_CLIENT_VERSION;
+  const previousUser = process.env.USER;
   const originalFetch = globalThis.fetch;
   process.env.HOME = home;
+  process.env.USER = "ccp-model-mode-test";
   delete process.env.CODEX_HOME;
   // CLIProxy 目录内容随 client_version 变化（版本过低会丢掉 max/ultra reasoning 等级），
   // 固定探测结果，断言真实版本而不是 0.0.0 被送到上游。
@@ -314,6 +315,7 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
   let fetchCount = 0;
   globalThis.fetch = (async (url: string | URL | Request) => {
     const target = String(url);
+    if (target.endsWith("/healthz")) throw Object.assign(new Error("测试网关未启动"), { code: "ECONNREFUSED" });
     fetchCount += 1;
     clientVersions.push(new URL(target).searchParams.get("client_version") ?? "");
     // models.json 下载（releases URL）返回空覆盖表；其余按 CLIProxy catalog 应答。
@@ -329,11 +331,15 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
   const auditEntries = (): string => fs.readFileSync(paths.stdoutLog, "utf8");
 
   try {
-    // --upstream-only 切换模式并同步：upstreamOnly、目录与 config.toml 三处一致，websocket 键不存在。
-    await runCli(["models", "--sync", "--upstream-only", "--select", "all"]);
+    // 先填充原始目录，再由 config 唯一负责切换模式；后续 sync 不改变模式。
+    await runCli(["models", "--sync", "--select", "all"]);
+    await runCli(["config", "--upstream-only", "on"]);
+    await runCli(["models", "--sync", "--select", "all"]);
+    const staticFile = path.join(paths.runtimeHome, "codex-catalog.json");
     const cpaCatalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8"));
     assert.deepEqual(cpaCatalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
-    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), paths.catalogFile);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
+    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, cpaCatalog.models);
     const cpaConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
     assert.equal(cpaConfig.catalogPath, paths.catalogFile);
     assert.deepEqual(cpaConfig.selectedModels, ["proxy-model"]);
@@ -343,11 +349,11 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
     assert.match(auditEntries(), /upstreamOnly: false -> true/);
     assert.match(auditEntries(), /selectedModels: \[\] -> \["proxy-model"\]/);
     assert.match(auditEntries(), /model_catalog_json \(config.toml\): null -> /);
-    assert.deepEqual(clientVersions, ["1.2.3"]);
+    assert.deepEqual(clientVersions, ["1.2.3", "1.2.3"]);
 
     // 即使显式传入 ID，隐藏条目也不能重新同步到目录或配置。
     await assert.rejects(
-      runCli(["models", "--sync", "--upstream-only", "--select", "hidden-model"]),
+      runCli(["models", "--sync", "--select", "hidden-model"]),
       /Unknown model ID: hidden-model/,
     );
     assert.deepEqual(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).selectedModels, ["proxy-model"]);
@@ -355,21 +361,14 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
       (model: { slug: string }) => model.slug,
     ), ["proxy-model"]);
 
-    // 显式空选择在读取上游目录前短路：不访问 CPA，也不再让 Codex 加载空静态目录。
+    // 静态模式不能发布空目录：失败时保留已有配置、上游目录、静态文件与 TOML。
     const fetchesBeforeNone = fetchCount;
-    await runCli(["models", "--sync", "--upstream-only", "--select", "none"]);
+    const beforeNone = [paths.gatewayConfig, paths.catalogFile, staticFile, paths.configToml].map((file) => fs.readFileSync(file, "utf8"));
+    await assert.rejects(runCli(["models", "--sync", "--select", "none"]), /静态模型目录为空/);
     assert.equal(fetchCount, fetchesBeforeNone, "--select none 不得访问上游目录");
-    assert.deepEqual(JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")).models, []);
-    assert.deepEqual(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).selectedModels, []);
-    assert.equal(
-      readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"),
-      undefined,
-      "空选择不写 model_catalog_json，让 Codex 回退官方目录",
-    );
-    assert.match(auditEntries(), /selectedModels: \["proxy-model"\] -> \[\]/);
-    assert.match(auditEntries(), /model_catalog_json \(config\.toml\): .+ -> null/);
+    assert.deepEqual([paths.gatewayConfig, paths.catalogFile, staticFile, paths.configToml].map((file) => fs.readFileSync(file, "utf8")), beforeNone);
     await assert.rejects(
-      runCli(["models", "--sync", "--upstream-only", "--select", "pass"]),
+      runCli(["models", "--sync", "--select", "pass"]),
       /Unknown model ID: pass/,
     );
 
@@ -378,7 +377,8 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
       client_version: "9.9.9",
       models: [{ slug: "gpt-visible" }],
     }));
-    // 普通 sync 切回 split：删除受管 model_catalog_json 并失效 Codex 模型缓存。
+    // config off 切回动态模式：删除受管键；普通 sync 仅保持保存的模式并失效缓存。
+    await runCli(["config", "--upstream-only", "off"]);
     await runCli(["models", "--sync", "--select", "all"]);
     assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
     assert.deepEqual(JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")).models.map(
@@ -395,10 +395,20 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
     assert.match(auditEntries(), /upstreamOnly: true -> false/);
     assert.match(auditEntries(), /model_catalog_json \(config.toml\): .+ -> null/);
 
+    // 动态模式仍允许空选择：不访问上游目录，不生成静态目录指向，也不改变模式。
+    const fetchesBeforeDynamicNone = fetchCount;
+    await runCli(["models", "--sync", "--select", "none"]);
+    assert.equal(fetchCount, fetchesBeforeDynamicNone);
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")).models, []);
+    assert.deepEqual(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).selectedModels, []);
+    assert.equal(JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).upstreamOnly, false);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
+    await runCli(["models", "--sync", "--select", "all"]);
+
     // 单引号是合法 TOML literal string：非受管路径必须被识别并拒绝覆盖。
     fs.writeFileSync(paths.configToml, "model_catalog_json = '/tmp/user-catalog.json'\n");
     await assert.rejects(
-      runCli(["models", "--sync", "--upstream-only", "--select", "proxy-model"]),
+      runCli(["config", "--upstream-only", "on"]),
       /Refusing to replace unmanaged model_catalog_json: \/tmp\/user-catalog\.json/,
     );
     await assert.rejects(
@@ -408,12 +418,13 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
 
     // 单引号的受管路径同样被识别，可正常 patch 回双引号形式。
     fs.writeFileSync(paths.configToml, `model_catalog_json = '${paths.catalogFile}'\n`);
-    await runCli(["models", "--sync", "--upstream-only", "--select", "proxy-model"]);
-    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), paths.catalogFile);
+    await runCli(["config", "--upstream-only", "on"]);
+    await runCli(["models", "--sync", "--select", "proxy-model"]);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
 
     // model_merge_json 带 token 的 URL 在审计中脱敏为 origin+path?…。
     await runCli([
-      "models", "--sync", "--upstream-only", "--select", "proxy-model",
+      "models", "--sync", "--select", "proxy-model",
       "--model-merge-json", "https://github.com/owner/repo?token=super-secret",
     ]);
     assert.equal(
@@ -430,6 +441,8 @@ test("models --sync --upstream-only switches mode and plain sync restores dynami
     else process.env.CODEX_HOME = previousCodexHome;
     if (previousClientVersion === undefined) delete process.env.CODEX_CLIPROXY_CLIENT_VERSION;
     else process.env.CODEX_CLIPROXY_CLIENT_VERSION = previousClientVersion;
+    if (previousUser === undefined) delete process.env.USER;
+    else process.env.USER = previousUser;
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

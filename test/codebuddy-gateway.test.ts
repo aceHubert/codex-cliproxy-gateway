@@ -10,12 +10,79 @@ import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUD
 import { CodebuddyCredentialError } from "../src/codebuddy/credentials.ts";
 import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
+import { createCodebuddyCatalogStore } from "../src/codebuddy/catalog.ts";
 
 type Json = Record<string, any>;
 
 const ACCESS_TOKEN = "header.eyJpc3MiOiJodHRwczovL3d3dy5jb2RlYnVkZHkuYWkvYXV0aC9yZWFsbXMvY29waWxvdCJ9.sig";
 const REFRESH_TOKEN = "header.eyJyZWZyZXNoIjp0cnVlfQ.sig2";
 const INBOUND_OAUTH = "fake-chatgpt-oauth-for-test";
+
+test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求模型校验", { timeout: 60_000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-manual-adapter-"));
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { release = resolve; });
+  let fetched = 0;
+  let schedules = 0;
+  const config: GatewayConfig = {
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", codebuddy: true, upstreamOnly: true,
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
+  };
+  const adapter = createCodebuddyAdapter(config, {
+    cacheDirectory: directory, catalogMode: "manual",
+    credentialCache: { forProduct: async () => credential(), close: () => {} },
+    setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
+    fetch: async (url) => {
+      if (!url.endsWith("/v3/config")) return chatUpstream();
+      fetched++;
+      await ready;
+      return Response.json(configData());
+    },
+  });
+  try {
+    const initial = adapter.catalog();
+    const explicit = adapter.refreshCatalog();
+    release();
+    assert.equal((await initial).models[0]!.slug, "codebuddy-intl/gpt-5.6-luna");
+    await explicit;
+    assert.equal(fetched, 1, "启动与显式刷新复用同一轮");
+    assert.equal(schedules, 0);
+    const data = configData();
+    data.data.models = [{ id: "new-model", name: "New", supportsToolCall: true }];
+    data.data.agents = [{ name: "cli", models: ["new-model"] }];
+    await createCodebuddyCatalogStore({
+      cacheDirectory: directory, credentials: async () => [credential()],
+      fetch: async () => Response.json(data),
+    }).refresh();
+    assert.equal((await adapter.reloadCatalog()).models[0]!.slug, "codebuddy-intl/new-model");
+    assert.equal(fetched, 1);
+    const rejected = await adapter.forward(request("codebuddy-intl/gpt-5.6-luna"), { model: "codebuddy-intl/gpt-5.6-luna", input: "你好" });
+    assert.equal(rejected.status, 404, "reload 同时更新推理校验");
+    await adapter.catalog();
+    assert.equal(fetched, 1);
+  } finally {
+    adapter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("CodeBuddy manual 显式刷新无缓存失败会报错", { timeout: 60_000 }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-manual-fail-"));
+  const adapter = createCodebuddyAdapter({
+    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", codebuddy: true,
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
+  }, {
+    cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
+    credentialCache: { forProduct: async () => credential(), close: () => {} },
+    fetch: async () => { throw new Error("network down"); },
+  });
+  try {
+    await assert.rejects(adapter.refreshCatalog(), /没有可用的本地缓存/);
+  } finally {
+    adapter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function credential(profile: CodebuddyCredential["profile"] = "intl-cli"): CodebuddyCredential {
   const endpoints: Record<CodebuddyCredential["profile"], string> = {
@@ -406,21 +473,27 @@ test("请求日志不落 token 明文", async () => {
   });
 });
 
-test("upstream-only 模式下 CodeBuddy 整体禁用：不拦截、不拉目录", async () => {
-  await fixture(async ({ create }) => {
+test("upstream-only 模式下 CodeBuddy 消费静态目录并拦截插件请求", async () => {
+  await fixture(async ({ create, directory }) => {
+    // 独立 handler 不负责生产运行目录发布；模拟模型命令已完成静态合成。
+    fs.writeFileSync(path.join(directory, "codex-catalog.json"), JSON.stringify({ models: [
+      { slug: "test-cpa", priority: 0 },
+      { slug: "codebuddy-intl/gpt-5.6-luna", priority: 100 },
+    ] }));
     let fetched = 0;
     const handler = create({
       config: { upstreamOnly: true, prefix: "" },
       chatResponse: () => chatUpstream(),
       catalogResponse: () => { fetched++; return Response.json(configData()); },
     });
+    await handler.modelsReady();
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
-    assert.ok(!JSON.stringify(catalog).includes("codebuddy-intl/"), "upstream-only 不合并 codebuddy 目录");
-    // 请求也不拦截：走纯转发路径（cpa.invalid 不可达）。
+    assert.ok(JSON.stringify(catalog).includes("codebuddy-intl/"), "插件目录不受 default 模式影响");
+    assert.deepEqual(catalog.data.map((model: Json) => model.id), ["test-cpa", "codebuddy-intl/gpt-5.6-luna"]);
     const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
-    assert.equal(response.status, 502, "未拦截的请求走纯转发路径");
-    assert.equal(fetched, 0, "未启用时绝不发起目录请求");
+    assert.equal(response.status, 200);
+    assert.equal(fetched, 2, "两个产品各刷新一次，启动与目录查询复用同一轮刷新");
   });
 });
 
@@ -474,8 +547,8 @@ test("validateCodebuddyConfig：环回与保留前缀约束", () => {
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: 42 } as unknown as GatewayConfig), /codebuddyAccount/);
   // 旧 codebuddyRegion 已过时：不再是校验或分派依据（读取路径会迁移为 codebuddyAccount）。
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
-  // upstream-only 下不加约束。
-  validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true });
+  // default 模式不豁免插件凭据的环回安全边界。
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true }), /环回/);
 });
 
 test("适配器目录投影与未启用时的空目录", async () => {  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-adapter-"));
@@ -499,7 +572,7 @@ test("适配器目录投影与未启用时的空目录", async () => {  const di
     const disabled = createCodebuddyAdapter({ ...base, codebuddy: false }, {});
     assert.deepEqual((await disabled.catalog()).models, []);
     disabled.close();
-    assert.equal(codebuddyEnabled({ ...base, codebuddy: true, upstreamOnly: true }), false);
+    assert.equal(codebuddyEnabled({ ...base, codebuddy: true, upstreamOnly: true }), true);
     assert.equal(codebuddyEnabled({ ...base, codebuddy: true }), true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -619,15 +692,15 @@ test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账
     let status = JSON.parse(printed.join("\n")) as Json;
     assert.equal(status.codebuddy, true);
 
-    // upstream-only 下报告生效值 false，并单独报出原始配置。
+    // upstream-only 不影响 CodeBuddy 开关的生效值。
     await runCli(["config", "--codebuddy", "on"]);
     const upstreamOnlyConfig = { ...JSON.parse(fs.readFileSync(gatewayConfig, "utf8")), upstreamOnly: true };
     fs.writeFileSync(gatewayConfig, JSON.stringify(upstreamOnlyConfig));
     printed.length = 0;
     await runCli(["config"]);
     status = JSON.parse(printed.join("\n")) as Json;
-    assert.equal(status.codebuddy, false, "状态输出必须报告生效值");
-    assert.equal(status.codebuddyConfigured, true, "原始开关与生效值不一致时单独报出");
+    assert.equal(status.codebuddy, true, "状态输出必须报告生效值");
+    assert.equal(status.codebuddyConfigured, undefined, "开关与生效值一致时无需另报原始值");
 
     await assert.rejects(runCli(["config", "--codebuddy", "maybe"]), /on or off/);
     // config 只管开关：账号直选与 --codebuddy-switch 都不再是 config 的选项。

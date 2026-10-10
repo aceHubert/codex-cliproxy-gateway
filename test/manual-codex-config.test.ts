@@ -21,8 +21,14 @@ function withTempHome(): { paths: ReturnType<typeof resolvePaths>; restore: () =
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-manual-codex-"));
   const previousHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
+  const previousUser = process.env.USER;
+  const originalFetch = globalThis.fetch;
   process.env.HOME = home;
+  process.env.USER = "ccp-manual-codex-test";
   delete process.env.CODEX_HOME;
+  globalThis.fetch = (async () => {
+    throw Object.assign(new Error("测试网关未启动"), { code: "ECONNREFUSED" });
+  }) as unknown as typeof fetch;
   const paths = resolvePaths();
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
@@ -33,6 +39,9 @@ function withTempHome(): { paths: ReturnType<typeof resolvePaths>; restore: () =
       else process.env.HOME = previousHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      if (previousUser === undefined) delete process.env.USER;
+      else process.env.USER = previousUser;
+      globalThis.fetch = originalFetch;
       fs.rmSync(home, { recursive: true, force: true });
     },
   };
@@ -136,26 +145,27 @@ test("restoreManagedCodexToml restores the pristine file when untouched and only
   }
 });
 
-test("models --sync completes the static switch in manual mode and prints the key to add", {
+test("models --sync 保持静态模式，config 切换模式时手动 TOML 不变", {
   skip: process.platform !== "darwin",
 }, async () => {
   const { paths, restore } = withTempHome();
   const previousClientVersion = process.env.CODEX_CLIPROXY_CLIENT_VERSION;
   const originalFetch = globalThis.fetch;
   process.env.CODEX_CLIPROXY_CLIENT_VERSION = "1.2.3";
-  writeManualGatewayConfig(paths);
+  writeManualGatewayConfig(paths, { upstreamOnly: true });
   writeManualState(paths);
   const userToml = 'model = "gpt-native"\nopenai_base_url = "http://127.0.0.1:8320/v1"\n';
   fs.writeFileSync(paths.configToml, userToml);
   globalThis.fetch = (async (url: string | URL | Request) => {
     const target = String(url);
+    if (target.endsWith("/healthz")) throw Object.assign(new Error("测试网关未启动"), { code: "ECONNREFUSED" });
     if (target.includes("releases/latest/download/models.json")) return Response.json({});
     return Response.json({ models: [{ slug: "proxy-model", context_window: 100000 }] });
   }) as unknown as typeof fetch;
   const captured = captureConsole();
 
   try {
-    await runCli(["models", "--sync", "--upstream-only", "--select", "all"]);
+    await runCli(["models", "--sync", "--select", "all"]);
 
     // static 切换照常完成：路由、目录与选择都生效。
     const config = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
@@ -163,6 +173,9 @@ test("models --sync completes the static switch in manual mode and prints the ke
     assert.deepEqual(config.selectedModels, ["proxy-model"]);
     const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8"));
     assert.deepEqual(catalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
+    const staticFile = path.join(paths.runtimeHome, "codex-catalog.json");
+    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, catalog.models);
+    assert.equal(config.catalogPath, paths.catalogFile);
     // config.toml 逐字节不变，state 保持手动且不跟踪 hash。
     assert.equal(fs.readFileSync(paths.configToml, "utf8"), userToml);
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8"));
@@ -170,17 +183,18 @@ test("models --sync completes the static switch in manual mode and prints the ke
     assert.equal("installedConfigHash" in state, false);
     // 需要手动添加的键以 warning + 确切值打印。
     const output = captured.lines.join("\n");
-    assert.match(output, /WARNING: manual codex config mode: add this key/);
-    assert.ok(output.includes(`model_catalog_json = "${paths.catalogFile}"`));
+    assert.match(output, /手动配置模式：.*根表设置 model_catalog_json/);
+    assert.ok(output.includes(`model_catalog_json = "${staticFile}"`));
 
     // 模拟用户手动加键后切回 split：提示删除该键，仍不改写 config.toml。
-    const userTomlWithKey = `${userToml}model_catalog_json = "${paths.catalogFile}"\n`;
+    const userTomlWithKey = `${userToml}model_catalog_json = "${staticFile}"\n`;
     fs.writeFileSync(paths.configToml, userTomlWithKey);
     const secondRun = captureConsole();
     try {
+      await runCli(["config", "--upstream-only", "off"]);
       await runCli(["models", "--sync", "--select", "all"]);
       const secondOutput = secondRun.lines.join("\n");
-      assert.match(secondOutput, /WARNING: manual codex config mode: remove model_catalog_json/);
+      assert.match(secondOutput, /手动配置模式：.*根表移除 model_catalog_json/);
       assert.equal(fs.readFileSync(paths.configToml, "utf8"), userTomlWithKey);
       const configAfterSplit = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
       assert.equal(configAfterSplit.upstreamOnly, false);

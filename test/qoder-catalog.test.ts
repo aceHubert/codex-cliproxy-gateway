@@ -32,6 +32,41 @@ function temporaryDirectory(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "qoder-catalog-test-"));
 }
 
+test("Qoder 手动目录只读当前账号缓存，显式刷新及磁盘重载更新请求元数据", { timeout: 60_000 }, async () => {
+  const directory = temporaryDirectory();
+  try {
+    let account = credential();
+    let time = 1_000;
+    let calls = 0;
+    let raw = { chat: [model("one", { thinking_config: { enabled: { efforts: { low: {} } } } })] };
+    const options = { cacheDirectory: directory, credentials: async () => account, now: () => time,
+      fetchCatalog: async () => { calls++; return raw; } };
+    const store = createQoderCatalogStore({ ...options, catalogMode: "manual" });
+    assert.deepEqual(await store.catalog(), { models: [] });
+    assert.equal(calls, 0);
+    await store.refresh();
+    time += 200_000;
+    assert.equal((await store.catalog()).models[0]!.slug, "qoder-intl/one");
+    assert.equal(calls, 1);
+    raw = { chat: [model("two", { thinking_config: { enabled: { efforts: { high: {} } } } })] };
+    await createQoderCatalogStore(options).refresh();
+    const reloaded = await store.reload();
+    assert.equal(reloaded.models[0]!.slug, "qoder-intl/two");
+    assert.deepEqual(reloaded.models[0]!.supported_reasoning_levels, [{ effort: "high", description: "" }]);
+    assert.equal(calls, 2);
+    account = credential("other-account");
+    assert.deepEqual(await store.catalog(), { models: [] });
+    assert.equal(calls, 2);
+    const failing = createQoderCatalogStore({ ...options, catalogMode: "manual",
+      fetchCatalog: async () => { throw new Error("离线"); } });
+    await assert.rejects(failing.refresh(), /没有当前账号的可用缓存/);
+    const switching = createQoderCatalogStore({ ...options, catalogMode: "manual",
+      fetchCatalog: async () => { account = credential("third-account"); return raw; } });
+    await assert.rejects(switching.refresh(), /登录在目录更新期间发生变化/);
+    assert.deepEqual(await switching.catalog(), { models: [] });
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("Qoder 目录只展示当前账号启用的具体模型，并使用国际版路由", () => {
   const parsed = parseQoderCatalogData({ chat: [
     model(), model("off", { enable: false }), model("missing-enable", { enable: undefined }),

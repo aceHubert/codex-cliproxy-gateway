@@ -19,6 +19,8 @@ import { joinExcludedLines, splitExcludedLines } from "../src/ui/excluded-models
 import { collectCompatibleModels, excludeModels, runCli, type ExcludeModelsDependencies } from "../src/cli.ts";
 import { resolvePaths } from "../src/paths.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL } from "../src/config.ts";
+import { modelReloadRequestFile } from "../src/model-reload.ts";
+import { readRootTomlString } from "../src/toml.ts";
 import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
 
 test("exclusion filter matches exact IDs, vendor prefixes, and globs case-insensitively", () => {
@@ -268,9 +270,16 @@ function makeCliFixture(excludedModels?: string[]): CliFixture {
   const previousHome = process.env.HOME;
   const previousCodexHome = process.env.CODEX_HOME;
   const previousLog = console.log;
+  const previousUser = process.env.USER;
+  const originalFetch = globalThis.fetch;
   process.env.HOME = home;
+  process.env.USER = "ccp-exclude-test";
   delete process.env.CODEX_HOME;
   console.log = () => {};
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    if (String(input).endsWith("/healthz")) throw Object.assign(new Error("测试网关未启动"), { code: "ECONNREFUSED" });
+    throw new Error(`未模拟的模型请求：${String(input)}`);
+  }) as unknown as typeof fetch;
   const paths = resolvePaths();
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
@@ -306,6 +315,9 @@ function makeCliFixture(excludedModels?: string[]): CliFixture {
       else process.env.HOME = previousHome;
       if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousCodexHome;
+      if (previousUser === undefined) delete process.env.USER;
+      else process.env.USER = previousUser;
+      globalThis.fetch = originalFetch;
       console.log = previousLog;
       fs.rmSync(home, { recursive: true, force: true });
     },
@@ -402,6 +414,7 @@ test("models --exclude with patterns appends rules, persists config, audits, and
     assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
     const state = JSON.parse(fs.readFileSync(fixture.paths.stateFile, "utf8")) as { config: GatewayConfig };
     assert.deepEqual(state.config.excludedModels, saved.excludedModels);
+    assert.match(JSON.parse(fs.readFileSync(modelReloadRequestFile(fixture.paths), "utf8")).revision, /^[0-9a-f-]{36}$/);
   } finally {
     fixture.cleanup();
   }
@@ -444,6 +457,7 @@ test("models --exclude with unchanged rules does not rewrite the config", async 
     assert.deepEqual(saved.excludedModels, ["agy/gemini-2.5-flash"]);
     assert.equal(fs.statSync(fixture.paths.gatewayConfig).mtimeMs, before);
     assert.equal(fs.existsSync(fixture.paths.stdoutLog), false);
+    assert.equal(fs.existsSync(modelReloadRequestFile(fixture.paths)), false);
   } finally {
     fixture.cleanup();
   }
@@ -455,6 +469,62 @@ test("models --exclude rejects bare wildcards before any write", async () => {
     await assert.rejects(excludeModels(fixture.paths, fixture.config, "*"), /would exclude every model/);
     const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
     assert.equal(saved.excludedModels, undefined);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --exclude 读取 config 当前模式并按手动配置状态处理静态目录", async () => {
+  for (const upstreamOnly of [false, true]) {
+    for (const manual of [false, true]) {
+      const fixture = makeCliFixture();
+      try {
+        // state 中故意保存相反模式，确认命令以 config.json 为准。
+        fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify({ ...fixture.config, upstreamOnly }));
+        fs.writeFileSync(fixture.paths.stateFile, JSON.stringify({
+          version: 4, installedAt: "test", config: { ...fixture.config, upstreamOnly: !upstreamOnly },
+          gatewayBaseUrl: "http://127.0.0.1:8320/v1", codexConfigManaged: !manual,
+        }));
+        const userToml = 'model = "gpt-native"\n';
+        fs.writeFileSync(fixture.paths.configToml, userToml);
+        const cacheBefore = fs.readFileSync(fixture.paths.modelsCacheFile, "utf8");
+        await runCli(["models", "--exclude", "agy/hidden-model"]);
+        const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"));
+        assert.equal(saved.upstreamOnly, upstreamOnly);
+        assert.deepEqual(saved.excludedModels, ["agy/hidden-model"]);
+        const staticFile = path.join(fixture.paths.runtimeHome, "codex-catalog.json");
+        assert.equal(fs.existsSync(staticFile), upstreamOnly);
+        if (upstreamOnly) {
+          assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models,
+            JSON.parse(fs.readFileSync(fixture.paths.catalogFile, "utf8")).models);
+          assert.equal(fs.readFileSync(fixture.paths.modelsCacheFile, "utf8"), cacheBefore);
+        } else {
+          assert.equal(JSON.parse(fs.readFileSync(fixture.paths.modelsCacheFile, "utf8")).fetched_at, "2000-01-01T00:00:00Z");
+        }
+        const toml = fs.readFileSync(fixture.paths.configToml, "utf8");
+        if (manual) assert.equal(toml, userToml);
+        else assert.equal(readRootTomlString(toml, "model_catalog_json"), upstreamOnly ? staticFile : undefined);
+        assert.ok(fs.existsSync(modelReloadRequestFile(fixture.paths)));
+      } finally {
+        fixture.cleanup();
+      }
+    }
+  }
+});
+
+test("models 旧模式参数在目录、配置与状态写入前被拒绝", async () => {
+  const fixture = makeCliFixture();
+  try {
+    const files = [fixture.paths.gatewayConfig, fixture.paths.stateFile, fixture.paths.catalogFile];
+    const before = files.map((file) => fs.readFileSync(file, "utf8"));
+    for (const flag of ["--upstream-only", "--cpa-only"]) {
+      for (const arguments_ of [["models", "--sync", flag], ["models", "--exclude", "agy/x", flag]]) {
+        await assert.rejects(runCli(arguments_), /models no longer accepts.*config --upstream-only on\|off/);
+      }
+    }
+    assert.deepEqual(files.map((file) => fs.readFileSync(file, "utf8")), before);
+    assert.equal(fs.existsSync(modelReloadRequestFile(fixture.paths)), false);
+    assert.equal(fs.existsSync(fixture.paths.stdoutLog), false);
   } finally {
     fixture.cleanup();
   }
@@ -582,7 +652,7 @@ test("models --exclude 拒绝与选择类参数组合，不静默忽略", async 
     );
     await assert.rejects(
       runCli(["models", "--exclude", "agy/x", "--upstream-only"]),
-      /--upstream-only.*only supported by install or models --sync/,
+      /models no longer accepts.*config --upstream-only on\|off/,
     );
     await assert.rejects(
       runCli(["models", "--exclude", "agy/x", "--model-merge-json", "https://example.com/models.json"]),

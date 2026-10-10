@@ -318,6 +318,8 @@ export interface AgyCatalogStoreOptions {
   endpoint?: string;
   now?: () => number;
   ttlMs?: number;
+  /** manual 仅允许显式刷新；目录查询不按 TTL 拉取。 */
+  catalogMode?: "dynamic" | "manual";
 }
 
 interface CachedCatalog {
@@ -350,6 +352,8 @@ export function createAgyCatalogStore(options: AgyCatalogStoreOptions) {
   let cached: CachedCatalog | undefined;
   let retryAt = 0;
   let refreshing: Promise<void> | undefined;
+  let refreshingForce = false;
+  let pendingForce = false;
 
   const cacheKey = (credential: AgyCredentials): string =>
     digest({ revision: CACHE_REVISION, identity: credential.identity, endpoint: endpointDigest });
@@ -444,21 +448,54 @@ export function createAgyCatalogStore(options: AgyCatalogStoreOptions) {
   }
 
   async function refresh(force: boolean): Promise<void> {
-    if (refreshing) return refreshing;
-    refreshing = refreshOnce(force).finally(() => { refreshing = undefined; });
+    if (refreshing) {
+      if (force && !refreshingForce) pendingForce = true;
+      return refreshing;
+    }
+    refreshingForce = force;
+    refreshing = (async () => {
+      let nextForce = force;
+      do {
+        pendingForce = false;
+        refreshingForce = nextForce;
+        await refreshOnce(nextForce);
+        nextForce = pendingForce;
+      } while (nextForce);
+    })().finally(() => {
+      refreshing = undefined;
+      refreshingForce = false;
+      pendingForce = false;
+    });
     return refreshing;
+  }
+
+  async function currentCatalog(reload = false) {
+    const credential = await options.credentials();
+    const key = credential ? cacheKey(credential) : undefined;
+    if (!key) cached = undefined;
+    else if (reload || cached?.key !== key) {
+      const disk = readDisk(key);
+      if (disk) cached = disk;
+      else if (cached?.key !== key) cached = undefined;
+    }
+    if (!cached) throw new Error("Antigravity 模型目录拉取失败，且没有可用的本地缓存");
+    return { models: cached.models, families: cached.families, reroute: new Map(cached.reroute) };
   }
 
   return {
     /** 返回目录条目、档位家族与旧 id 重定向表；无凭据或完全无缓存时抛错。 */
     async catalog(): Promise<{ models: ModelEntry[]; families: AgyModelFamily[]; reroute: Map<string, string> }> {
-      await refresh(false);
-      if (!cached) throw new Error("Antigravity 模型目录拉取失败，且没有可用的本地缓存");
-      return { models: cached.models, families: cached.families, reroute: new Map(cached.reroute) };
+      if (options.catalogMode !== "manual") await refresh(false);
+      return currentCatalog();
+    },
+    /** 重读当前账号目录及路由元数据，不请求网络。 */
+    async reload() {
+      return currentCatalog(true);
     },
     /** 启动/定时刷新入口：绕过 TTL 重新校验。 */
     async refresh(): Promise<void> {
       await refresh(true);
+      await currentCatalog();
     },
   };
 }

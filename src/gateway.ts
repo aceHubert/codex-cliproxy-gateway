@@ -41,6 +41,8 @@ import {
 import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
 import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
 import { isLocalAdapterModel } from "./config-update.ts";
+import { codexCatalogFile, writeStaticCatalog } from "./model-state.ts";
+import { createModelReloadReceiver } from "./model-reload.ts";
 import { atomicWrite } from "./toml.ts";
 import {
   logExchange,
@@ -57,7 +59,7 @@ import type { RequestLogSink } from "./request-log.ts";
 import { logGatewayError, logRequestSummary } from "./process-log.ts";
 import { webUiPort } from "./webui.ts";
 import type { ProcessLogTarget } from "./types.ts";
-import type { GatewayConfig, ModelCatalog } from "./types.ts";
+import type { GatewayConfig, ModelCatalog, ResolvedPaths } from "./types.ts";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -786,6 +788,8 @@ export function responsesWebSocketTarget(
   if (isZcodeResponsesWebSocket(request, config)) return null;
   if (isCodebuddyResponsesWebSocket(request, config)) return null;
   if (isAgyResponsesWebSocket(request, config)) return null;
+  if (isQoderResponsesWebSocket(request, config)) return null;
+  if (isOpencodeZenResponsesWebSocket(request, config)) return null;
   const route = config.upstreamOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
     : decideThreadRoute(request, hintedModel, prefix, cpaThreads, cpaTurns);
@@ -862,7 +866,7 @@ function readCatalog(file: string, requireNonEmpty = true): ModelCatalog {
 }
 
 function mergeDynamicCatalog(native: ModelCatalog, config: GatewayConfig): ModelCatalog {
-  const proxy = readCatalog(config.catalogPath);
+  const proxy = readCatalog(config.catalogPath, false);
   if (config.prefix && proxy.models.some((model) => model.slug.startsWith(config.prefix))) {
     throw new Error("CPA catalog contains legacy prefixed model IDs; run models --sync");
   }
@@ -937,6 +941,7 @@ async function catalogModelsResponse(
   qoderCatalog?: ModelCatalog,
   agyCatalog?: ModelCatalog,
   opencodeZenCatalog?: ModelCatalog,
+  staticCatalogPath?: string,
 ): Promise<Response> {
   const incomingUrl = new URL(request.url);
   const clientVersion = incomingUrl.searchParams.get("client_version");
@@ -955,9 +960,13 @@ async function catalogModelsResponse(
   if (config.upstreamOnly === true) {
     writeModelsCache(clientVersionFile, clientVersion);
     try {
-      const catalog = mergeDynamicCatalog({ models: [] }, config);
-      return respond(catalog, "cliproxy");
-    } catch {}
+      // 静态模式仅消费已发布的合成目录，缺失时明确报错，不退回官方或即时目录。
+      const catalog = readCatalog(staticCatalogPath ?? path.join(path.dirname(config.catalogPath), "codex-catalog.json"));
+      return modelCatalogResponse(filterExcludedModels(catalog, config.excludedModels, isLocalAdapterModel),
+        clientVersion, "cliproxy", config.prefix, zcodeEnabled(config));
+    } catch (error) {
+      return Response.json({ error: { message: `Unable to load static model catalog: ${error instanceof Error ? error.message : String(error)}; run models --sync` } }, { status: 502 });
+    }
   }
   const refreshOfficial = async (): Promise<ModelCatalog> => {
     const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "", config.prefix);
@@ -991,7 +1000,7 @@ async function catalogModelsResponse(
     if (zcodeCatalog?.models.length || codebuddyCatalog?.models.length || qoderCatalog?.models.length || agyCatalog?.models.length || opencodeZenCatalog?.models.length) {
       let base: ModelCatalog = { models: [] };
       try { base = mergeDynamicCatalog(base, config); } catch { /* 有效 ZCode/CodeBuddy 目录独立可用。 */ }
-      return respond(base, config.upstreamOnly ? "cliproxy" : "mixed");
+      return respond(base, "mixed");
     }
     return Response.json(
       { error: { message: `Unable to load model catalog: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}` } },
@@ -1000,7 +1009,7 @@ async function catalogModelsResponse(
   }
   try {
     const catalog = mergeDynamicCatalog(native, config);
-    return respond(catalog, config.upstreamOnly === true ? "cliproxy" : "mixed");
+    return respond(catalog, "mixed");
   } catch {
     return respond(native, "openai");
   }
@@ -1026,6 +1035,11 @@ function excludedModelResponse(model: string): Response {
   );
 }
 
+export type ModelGatewayHandler = GatewayHandler & {
+  reloadConfig(next: GatewayConfig): Promise<void>;
+  modelsReady(): Promise<void>;
+};
+
 export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
@@ -1039,14 +1053,19 @@ export function createGatewayHandler(
   qoderDependencies?: QoderDependencies,
   agyDependencies?: AgyDependencies,
   opencodeZenDependencies?: OpencodeZenDependencies,
-): GatewayHandler {
+  runtimePaths?: ResolvedPaths,
+): ModelGatewayHandler {
+  // 运行态独立持有配置，模型热加载不会改写调用者或更换监听、路由与适配器实例。
+  config = { ...config };
   // 健康身份属于构造时的实例，不能随其他调用的路径上下文改变。
-  const marker = instanceMarker(resolvePaths().runtimeHome);
-  const handleZcode = createZcodeAdapter(config, { ...zcodeDependencies, processLog });
-  const handleCodebuddy = createCodebuddyAdapter(config, { ...codebuddyDependencies, processLog });
-  const handleQoder = createQoderAdapter(config, { ...qoderDependencies, processLog });
-  const handleAgy = createAgyAdapter(config, { ...agyDependencies, processLog });
-  const handleOpencodeZen = createOpencodeZenAdapter(config, { ...opencodeZenDependencies, processLog });
+  const marker = instanceMarker((runtimePaths ?? resolvePaths()).runtimeHome);
+  const catalogMode = config.upstreamOnly === true ? "manual" : "dynamic";
+  const handleZcode = createZcodeAdapter(config, { ...zcodeDependencies, processLog, catalogMode });
+  const handleCodebuddy = createCodebuddyAdapter(config, { ...codebuddyDependencies, processLog, catalogMode });
+  const handleQoder = createQoderAdapter(config, { ...qoderDependencies, processLog, catalogMode });
+  const handleAgy = createAgyAdapter(config, { ...agyDependencies, processLog, catalogMode });
+  const handleOpencodeZen = createOpencodeZenAdapter(config, { ...opencodeZenDependencies, processLog, catalogMode });
+  const adapters = [handleZcode, handleCodebuddy, handleQoder, handleAgy, handleOpencodeZen];
   const zcodeRequests = new WeakSet<Request>();
   const codebuddyRequests = new WeakSet<Request>();
   const qoderRequests = new WeakSet<Request>();
@@ -1057,7 +1076,33 @@ export function createGatewayHandler(
   const upstreams = new WeakMap<Request, string>();
   const mountPath = config.mountPath || "/v1";
   const prefix = config.prefix || "cliproxy/";
-  const modelExclusion = compileModelFilter(config.excludedModels);
+  let modelExclusion = compileModelFilter(config.excludedModels);
+  let closed = false;
+  let ready: Promise<void> | undefined;
+  const modelsReady = (): Promise<void> => ready ??= Promise.all(adapters.map((adapter) =>
+    config.upstreamOnly === true ? adapter.refreshCatalog() : adapter.catalog())).then((catalogs) => {
+    if (!closed && runtimePaths && config.upstreamOnly === true) {
+      writeStaticCatalog(runtimePaths, config, catalogs.flatMap((catalog) => catalog.models));
+    }
+  });
+  const reloadConfig = async (next: GatewayConfig): Promise<void> => {
+    // 首次静态发布失败后，显式模型命令仍可通过已修复的磁盘缓存恢复服务。
+    await modelsReady().catch(() => {});
+    if (closed) return;
+    // 先完成磁盘目录与派生元数据加载，再发布同一份排除规则给目录和推理入口。
+    const catalogs = await Promise.all(adapters.map((adapter) => adapter.reloadCatalog()));
+    if (closed) return;
+    const nextFilter = compileModelFilter(next.excludedModels);
+    const nextConfig = { ...config,
+      selectedModels: next.selectedModels?.slice(),
+      excludedModels: next.excludedModels?.slice(),
+    };
+    // 启动异步发布可能先写入旧规则；重载成功后再发布当前修订的完整静态目录。
+    if (nextConfig.upstreamOnly === true && runtimePaths) writeStaticCatalog(runtimePaths, nextConfig, catalogs.flatMap((catalog) => catalog.models));
+    config = nextConfig;
+    modelExclusion = nextFilter;
+    ready = Promise.resolve();
+  };
   const logging = config.requestLogging === true;
   const sink = resolveLogSink(config, processLog);
   // 启动补扫一次：保留计数按时间全局生效，不必等某个分组再被写入。ZCode 适配器用的是
@@ -1110,6 +1155,10 @@ export function createGatewayHandler(
     }
 
     if (incomingUrl.pathname === `${mountPath}/models` && request.method === "GET") {
+      if (config.upstreamOnly === true) {
+        return catalogModelsResponse(request, config, clientVersionFile, undefined, undefined, undefined,
+          undefined, undefined, runtimePaths ? codexCatalogFile(runtimePaths) : undefined);
+      }
       return catalogModelsResponse(
         request, config, clientVersionFile,
         zcodeEnabled(config) ? await handleZcode.catalog() : undefined,
@@ -1432,7 +1481,12 @@ export function createGatewayHandler(
     }
   };
 
-  if (!logging) return Object.assign(handleCore, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); handleOpencodeZen.close(); } });
+  const lifecycle = { modelsReady, reloadConfig, close: () => {
+    if (closed) return;
+    closed = true;
+    adapters.forEach((adapter) => adapter.close());
+  } };
+  if (!logging) return Object.assign(handleCore, lifecycle);
 
   return Object.assign(async (request: Request): Promise<Response> => {
     const requestTime = localTime();
@@ -1521,7 +1575,7 @@ export function createGatewayHandler(
       // Logging must never break the request flow.
     });
     return response;
-  }, { close: () => { handleZcode.close(); handleCodebuddy.close(); handleQoder.close(); handleAgy.close(); handleOpencodeZen.close(); } });
+  }, lifecycle);
 }
 
 /**
@@ -1619,15 +1673,37 @@ export function startGateway(
   const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
   const cpaThreads = new Set<string>();
   const cpaTurns = new Set<string>();
-  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies, qoderDependencies, agyDependencies, opencodeZenDependencies);
+  const paths = resolvePaths();
+  const handler = createGatewayHandler(config, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, zcodeDependencies, processLog, codebuddyDependencies, qoderDependencies, agyDependencies, opencodeZenDependencies, paths);
+  const ready = handler.modelsReady();
+  // 服务启动保留一次 agent 刷新，健康探测也等待静态目录发布完毕。
+  void ready.catch(() => {
+    logGatewayError(processLog, {
+      requestTime: localTime(), method: "START", url: `${config.mountPath || "/v1"}/models`, status: 503,
+      message: "模型启动刷新或静态目录发布失败；请检查上游目录、agent 登录与模型排除规则后运行 models --sync",
+    });
+  });
+  const receiver = createModelReloadReceiver(paths, (next) => handler.reloadConfig(next));
   let server: Bun.Server<RealtimeSocketData>;
   try {
     server = Bun.serve<RealtimeSocketData>({
       hostname: config.host,
       port: config.port,
       idleTimeout: 255,
-      fetch(request, server) {
+      async fetch(request, server) {
         const incoming = new URL(request.url);
+        // 模型初始化失败也不能改变本地命名空间边界，更不能把子树外 Upgrade 送往上游。
+        if (incoming.pathname !== "/healthz" && !isUnderMountPath(incoming.pathname, config.mountPath || "/v1")) {
+          await receiver.reloadPending().catch(() => {});
+          return handler(request);
+        }
+        try {
+          await receiver.reloadPending();
+          // 普通 default 推理不依赖其它 agent 的目录，不能被它们的启动网络请求阻塞。
+          if (incoming.pathname === "/healthz" || incoming.pathname === `${config.mountPath || "/v1"}/models`) await handler.modelsReady();
+        } catch {
+          return Response.json({ error: { message: "模型目录尚未就绪；请检查网关日志并运行 models --sync" } }, { status: 503 });
+        }
         // /ui 命名空间必须先于一切 WebSocket 分流拦截：带 Upgrade 头的 /ui 请求会被
         // responsesWebSocketTarget 当作可桥接目标转发上游。Web UI 现在运行在独立端口上，
         // 模型端口对 /ui 一律本地 404（见 handleCore），绝不经由任何转发路径。
@@ -1691,16 +1767,18 @@ export function startGateway(
       websocket: realtimeWebSocketHandler,
     });
   } catch (error) {
+    receiver.close();
     handler.close();
     throw error;
   }
   const stop = server.stop.bind(server);
   server.stop = (closeActiveConnections) => {
+    receiver.close();
     handler.close();
     return stop(closeActiveConnections);
   };
   const routingSummary = config.upstreamOnly === true
-    ? [`all models -> ${config.upstreamBaseUrl}`]
+    ? [`default models -> ${config.upstreamBaseUrl}`]
     : [
       `native models -> ${config.officialBaseUrl}`,
       `${config.prefix}* -> ${config.upstreamBaseUrl}`,

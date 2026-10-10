@@ -4,16 +4,89 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createGatewayHandler, isAgyResponsesWebSocket } from "../src/gateway.ts";
-import { agyEnabled, safeAgyUpstreamError, validateAgyConfig } from "../src/agy/index.ts";
+import { agyEnabled, createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "../src/agy/index.ts";
 import type { AgyDependencies } from "../src/agy/index.ts";
 import fingerprintData from "../src/agy/fingerprint-data.json";
 import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "../src/agy/transport.ts";
 import type { AgyCredentials } from "../src/agy/credentials.ts";
 import type { GatewayConfig } from "../src/types.ts";
+import { createAgyCatalogStore } from "../src/agy/catalog.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
 const MODEL = "agy/gemini-3.8-flash";
+
+test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位与重定向", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-manual-adapter-"));
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => { release = resolve; });
+  let fetched = 0;
+  let schedules = 0;
+  const inferred: string[] = [];
+  const adapter = createAgyAdapter({
+    host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
+  }, {
+    cacheDirectory: directory, catalogMode: "manual", credentials: async () => credential(),
+    setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
+    fetch: async (url, init) => {
+      if (url.includes(":fetchAvailableModels")) {
+        fetched++;
+        await ready;
+        return Response.json(catalogData());
+      }
+      inferred.push((JSON.parse(String(init.body)) as Json).model);
+      return upstream();
+    },
+  });
+  try {
+    const initial = adapter.catalog();
+    const explicit = adapter.refreshCatalog();
+    release();
+    assert.equal((await initial).models[0]!.slug, MODEL);
+    await explicit;
+    assert.equal(fetched, 1);
+    assert.equal(schedules, 0);
+    await createAgyCatalogStore({
+      cacheDirectory: directory, credentials: async () => credential(),
+      fetchCatalog: async () => ({
+        models: { "new-flash-high": { displayName: "New Flash (High)" }, "new-flash-low": { displayName: "New Flash (Low)" } },
+        tieredModelIds: { high: "new-flash-high", low: "new-flash-low" },
+        deprecatedModelIds: { "old-flash": { newModelId: "new-flash-high" } },
+      }),
+    }).refresh();
+    assert.equal((await adapter.reloadCatalog()).models[0]!.slug, "agy/new-flash");
+    assert.equal(fetched, 1);
+    for (const [model, effort] of [["agy/new-flash", "low"], ["agy/old-flash", "high"]]) {
+      const response = await adapter.forward(new Request("http://127.0.0.1:8327/v1/responses"), { model, reasoning: { effort }, input: "你好" });
+      assert.equal(response.status, 200);
+      await response.text();
+    }
+    assert.deepEqual(inferred, ["new-flash-low", "new-flash-high"]);
+    await adapter.catalog();
+    assert.equal(fetched, 1);
+  } finally {
+    adapter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("agy manual 显式刷新无缓存失败会报错", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-manual-fail-"));
+  const adapter = createAgyAdapter({
+    host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
+  }, {
+    cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
+    credentials: async () => credential(), fetch: async () => { throw new Error("network down"); },
+  });
+  try {
+    await assert.rejects(adapter.refreshCatalog(), /没有可用的本地缓存/);
+  } finally {
+    adapter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 function credential(expired = false): AgyCredentials {
   return {
@@ -157,8 +230,9 @@ test("agy 配置校验：类型、环回监听与前缀保留", () => {
   assert.throws(() => validateAgyConfig({ ...base, host: "0.0.0.0", agy: true }), /环回/);
   assert.throws(() => validateAgyConfig({ ...base, prefix: "agy/", agy: true }), /前缀保留/);
   assert.throws(() => validateAgyConfig({ ...base, prefix: "ag", agy: true }), /前缀保留/);
-  // upstream-only 按禁用处理，不施加额外约束。
-  validateAgyConfig({ ...base, host: "0.0.0.0", agy: true, upstreamOnly: true });
+  assert.equal(agyEnabled({ ...base, agy: true, upstreamOnly: true }), true);
+  // default 模式不豁免插件凭据的环回安全边界。
+  assert.throws(() => validateAgyConfig({ ...base, host: "0.0.0.0", agy: true, upstreamOnly: true }), /环回/);
 });
 
 test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async () => {

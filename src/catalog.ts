@@ -352,6 +352,26 @@ export interface UpstreamCatalogOptions {
 }
 
 /**
+ * 上游渠道显示名前缀：区分 cliproxy 与 newapi 两族同名模型（对齐 AGY/、ZCode/、
+ * OP-ZEN/ 的渠道标签约定）。仅在展示名上标注，不改变路由 slug。
+ */
+const UPSTREAM_DISPLAY_PREFIXES: Record<UpstreamType, string> = {
+  cliproxy: "CliProxy/",
+  newapi: "NewApi/",
+};
+
+/** 给上游目录条目的 display_name 加渠道前缀；缺省显示名回退 slug，保证标签始终可见。 */
+function withUpstreamDisplayPrefix(catalog: ModelCatalog, type: UpstreamType): ModelCatalog {
+  const prefix = UPSTREAM_DISPLAY_PREFIXES[type];
+  return {
+    models: catalog.models.map((model) => ({
+      ...model,
+      display_name: `${prefix}${model.display_name || model.slug}`,
+    })),
+  };
+}
+
+/**
  * 目录拉取统一入口：cliproxy 消费上游的 Codex 目录，newapi 从 OpenAI 列表按快照本地合成。
  * newapi 必须提供 snapshot（缺省时直接报错）；隐藏条目不进入 CLI/Web 的可选目录。
  */
@@ -376,7 +396,8 @@ export async function fetchUpstreamCatalog(
     catalog = await fetchCliProxyCatalog(baseUrl, apiKey, clientVersion);
   }
   // 仅过滤上游选择入口，不改变官方目录及其 last-good 缓存的完整内容。
-  return { ...catalog, models: catalog.models.filter((model) => model.visibility !== "hide") };
+  const visible = { ...catalog, models: catalog.models.filter((model) => model.visibility !== "hide") };
+  return withUpstreamDisplayPrefix(visible, type);
 }
 
 function prefixModel(source: ModelEntry, prefix: string, priority: number): ModelEntry {

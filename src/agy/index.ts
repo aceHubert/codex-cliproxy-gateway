@@ -42,6 +42,8 @@ export interface AgyDependencies {
   catalogRefreshIntervalMs?: number;
   /** 是否在适配器构造后立即强制刷新一次目录；测试可关闭。 */
   refreshCatalogOnStart?: boolean;
+  /** 目录生命周期由网关注入，适配器不判断 default 路由的模式。 */
+  catalogMode?: "dynamic" | "manual";
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   /** 进程日志目标（gateway.log）。 */
@@ -52,7 +54,7 @@ export interface AgyDependencies {
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 360_000;
 
 export function agyEnabled(config: GatewayConfig): boolean {
-  return config.agy === true && config.upstreamOnly !== true;
+  return config.agy === true;
 }
 
 export function validateAgyConfig(config: GatewayConfig): void {
@@ -127,15 +129,22 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
       codexModelsCacheFile: dependencies.codexModelsCacheFile,
       endpoint: dependencies.endpoint,
       fetchCatalog: (credential) => transport.fetchModels(credential, AbortSignal.timeout(30_000)),
+      catalogMode: dependencies.catalogMode,
     })
     : undefined;
   const schedule = dependencies.setInterval ?? setInterval;
   const cancel = dependencies.clearInterval ?? clearInterval;
   let timer: ReturnType<typeof setInterval> | undefined;
+  let startupRefresh: Promise<void> | undefined;
   if (store) {
-    if (dependencies.refreshCatalogOnStart !== false) void store.refresh().catch(() => {});
-    timer = schedule(() => { void store.refresh().catch(() => {}); }, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS));
-    timer.unref?.();
+    if (dependencies.refreshCatalogOnStart !== false) {
+      startupRefresh = store.refresh();
+      void startupRefresh.catch(() => {});
+    }
+    if (dependencies.catalogMode !== "manual") {
+      timer = schedule(() => { void store.refresh().catch(() => {}); }, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS));
+      timer.unref?.();
+    }
   }
   const activeRequests = new Set<AbortController>();
   /** 已知模型集合（含重定向前的旧 id）；空目录视为不可校验，透传由上游判定。 */
@@ -143,17 +152,22 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
   /** 档位家族与成员 id 集合：合并条目按 effort 解析上游变体，显式档位 id 直连。 */
   let catalogFamilies: AgyModelFamily[] = [];
   let memberIds = new Set<string>();
+  let catalogReroute = new Map<string, string>();
+  const updateCatalogMeta = (catalog: Awaited<ReturnType<NonNullable<typeof store>["catalog"]>>): ModelCatalog => {
+    knownModels = new Set(catalog.models.map((entry) => entry.slug));
+    catalogFamilies = catalog.families;
+    memberIds = new Set(catalog.families
+      .flatMap((family) => Object.values(family.tiers))
+      .filter((id): id is string => typeof id === "string" && id.length > 0));
+    catalogReroute = catalog.reroute;
+    return { models: catalog.models };
+  };
   /** 尽力加载目录元数据（含磁盘缓存回退）；失败时保持未加载状态，由上游判定。 */
   const loadCatalogMeta = async (): Promise<ModelEntry[] | undefined> => {
     if (!store) return undefined;
     try {
-      const { models, families } = await store.catalog();
-      knownModels = new Set(models.map((entry) => entry.slug));
-      catalogFamilies = families;
-      memberIds = new Set(families
-        .flatMap((family) => Object.values(family.tiers))
-        .filter((id): id is string => typeof id === "string" && id.length > 0));
-      return models;
+      await startupRefresh?.catch(() => {});
+      return updateCatalogMeta(await store.catalog()).models;
     } catch { /* 目录不可用时维持透传语义。 */ }
   };
   let closed = false;
@@ -163,6 +177,16 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
       if (!store || closed) return { models: [] };
       // 系统提示词已在 buildAgyCatalog 合成时替换（含 model_messages 模板），缓存即成品。
       return { models: (await loadCatalogMeta()) ?? [] };
+    },
+    /** 显式刷新不吞错；无 last-good 时由命令报告失败。 */
+    async refreshCatalog(): Promise<ModelCatalog> {
+      if (!store || closed) return { models: [] };
+      await store.refresh();
+      return updateCatalogMeta(await store.catalog());
+    },
+    async reloadCatalog(): Promise<ModelCatalog> {
+      if (!store || closed) return { models: [] };
+      return updateCatalogMeta(await store.reload());
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
@@ -255,8 +279,11 @@ export function createAgyAdapter(config: GatewayConfig, dependencies: AgyDepende
               resolvedModel = resolveAgyFamilyModel(family, effort);
             }
           } else {
-            const { reroute } = await store.catalog().catch(() => ({ reroute: new Map<string, string>() }));
-            const target = reroute.get(upstreamModel);
+            // 动态模式沿用请求驱动的重定向更新；manual 只消费已加载元数据。
+            if (dependencies.catalogMode !== "manual") {
+              try { updateCatalogMeta(await store.catalog()); } catch { /* 无目录时保留 last-good 元数据。 */ }
+            }
+            const target = catalogReroute.get(upstreamModel);
             if (target) resolvedModel = target;
             else {
               cleanup();

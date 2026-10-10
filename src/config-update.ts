@@ -400,6 +400,7 @@ export function applyWebUiConfigPatch(
   paths: ResolvedPaths,
   patch: WebUiConfigPatch,
   syncState = true,
+  { write = true }: { write?: boolean } = {},
 ): { config: GatewayConfig; applied: ConfigChange[] } {
   const keys = Object.keys(patch);
   if (keys.length === 0) throw new Error("Request body contains no supported fields");
@@ -496,6 +497,8 @@ export function applyWebUiConfigPatch(
   validateQoderConfig(config);
   validateAgyConfig(config);
   validateOpencodeZenConfig(config);
+  // 组合保存先校验最终配置，再拉取和校验模型；准备阶段不写配置或审计。
+  if (!write) return { config, applied };
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };

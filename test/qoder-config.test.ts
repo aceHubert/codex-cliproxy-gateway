@@ -128,7 +128,7 @@ test("Qoder 非布尔开关和额外地域选项被拒绝，失败时不写配�
   });
 });
 
-test("Qoder 组合校验阻止非环回监听启用，upstream-only 保留开关但禁用入口", () => {
+test("Qoder 组合校验在 upstream-only 下同样阻止非环回监听启用", () => {
   withConfigFile((paths) => {
     const config = { ...validConfig(paths), host: "0.0.0.0" };
     const original = JSON.stringify(config);
@@ -137,6 +137,6 @@ test("Qoder 组合校验阻止非环回监听启用，upstream-only 保留开关
     assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), original);
     assert.equal(fs.existsSync(paths.stdoutLog), false);
     fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, upstreamOnly: true }));
-    assert.equal(applyWebUiConfigPatch(paths, { qoder: true }).config.qoder, true);
+    assert.throws(() => applyWebUiConfigPatch(paths, { qoder: true }), /环回/);
   });
 });

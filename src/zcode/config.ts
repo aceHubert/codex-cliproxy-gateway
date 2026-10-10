@@ -32,10 +32,16 @@ export interface ZcodeProviderSnapshot {
 }
 export interface ZcodeConfigCache {
   get(): Promise<ZcodeProviderSnapshot>;
+  /** 显式刷新本地配置与所需凭据；注入缓存可省略。 */
+  refresh?(): Promise<ZcodeProviderSnapshot>;
+  /** 仅重读本地目录元数据，不发起凭据网络；apiKey 可能为空，不用于请求认证。 */
+  reload?(): Promise<ZcodeProviderSnapshot>;
   close(): void;
 }
 export class ZcodeConfigError extends Error {}
 export interface ZcodeCacheDependencies {
+  /** 共享目录采集器可禁止启动首读，随后显式 refresh。 */
+  refreshOnStart?: boolean;
   watch?: typeof fs.watch;
   stat?: typeof fs.statSync;
   now?: () => number;
@@ -520,6 +526,8 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let waiting: { promise: Promise<void>; resolve(): void } | undefined;
   /** 最近一次已通知调用方的快照；仅按对象身份比较，避免重复重建目录。 */
   let notifiedSnapshot: ZcodeProviderSnapshot | undefined;
+  let refreshPromise: Promise<ZcodeProviderSnapshot> | undefined;
+  let initialized = false;
 
   function finish(): void { const previous = waiting; waiting = undefined; previous?.resolve(); }
   function stop(message: string): void {
@@ -629,6 +637,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   }
   function check(): void {
     if (closed) return;
+    initialized = true;
     const beforeSnapshot = snapshot;
     clearTimeout(debounce);
     debounce = undefined;
@@ -865,23 +874,52 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       check();
     }
   }
-  check();
-  return {
-    async get() {
-      if (!closed) expire();
-      if ((!snapshot || failure) && dirtyFiles.size > 0) {
-        if (!waiting) {
-          let resolve!: () => void;
-          const promise = new Promise<void>((done) => { resolve = done; });
-          waiting = { promise, resolve };
-        }
-        await waiting.promise;
+  if (dependencies.refreshOnStart !== false) check();
+  const get = async (): Promise<ZcodeProviderSnapshot> => {
+    if (!closed && !initialized) check();
+    if (!closed) expire();
+    if ((!snapshot || failure) && dirtyFiles.size > 0) {
+      if (!waiting) {
+        let resolve!: () => void;
+        const promise = new Promise<void>((done) => { resolve = done; });
+        waiting = { promise, resolve };
       }
-      if (failure) throw failure;
+      await waiting.promise;
+    }
+    if (failure) throw failure;
+    if (resolving) await resolving.promise;
+    if (failure) throw failure;
+    if (!snapshot) throw new ZcodeConfigError("ZCode 配置缓存不可用");
+    if (snapshot.expiresAt !== undefined && snapshot.expiresAt <= now()) {
+      throw new ZcodeConfigError("ZCode 当前业务 Key 已过期，请执行模型同步命令刷新凭据");
+    }
+    return snapshot;
+  };
+  const reread = (): Promise<ZcodeProviderSnapshot> => {
+    if (refreshPromise) return refreshPromise;
+    // 启动凭据请求与显式更新共用进行中的请求，防止重复授权。
+    const promise = (async () => {
       if (resolving) await resolving.promise;
-      if (failure) throw failure;
-      if (!snapshot) throw new ZcodeConfigError("ZCode 配置缓存不可用");
-      return snapshot;
+      if (closed) return get();
+      for (const name of ["setting.json", "config.json", "provider_config.json", "credentials.json"]) dirtyFiles.add(name);
+      check();
+      return get();
+    })();
+    refreshPromise = promise;
+    void promise.finally(() => { if (refreshPromise === promise) refreshPromise = undefined; }).catch(() => {});
+    return promise;
+  };
+  return {
+    get: () => get(),
+    refresh: reread,
+    async reload() {
+      if (closed) throw new ZcodeConfigError("ZCode 配置监听已关闭，请重启网关");
+      // 目录采集器无需团队业务 Key。读取套餐模型时不初始化或改写认证缓存，
+      // 后续真实请求仍由 get() 执行正常授权与凭据续期。
+      const next = readRoute(home, readSelection(home, plan, apiProviderID));
+      const cachedKey = snapshot?.providerID === next.providerID && snapshot.plan === next.plan
+        && snapshot.family === next.family ? snapshot.apiKey : undefined;
+      return Object.freeze({ ...next, apiKey: next.apiKey ?? cachedKey ?? "" });
     },
     close() { stop("ZCode 配置监听已关闭，请重启网关"); },
   };

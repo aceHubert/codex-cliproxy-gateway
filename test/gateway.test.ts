@@ -3118,7 +3118,8 @@ test("upstream catalog keeps the CLIProxy Codex format for the cliproxy type", a
   }) as typeof fetch;
   try {
     const catalog = await fetchUpstreamCatalog("http://127.0.0.1:8317/v1", "", "cliproxy", "2.0.0");
-    assert.equal(catalog.models[0]?.display_name, "Claude Opus");
+    // 统一入口为上游显示名补渠道标签；底层 fetchCliProxyCatalog 保持原样。
+    assert.equal(catalog.models[0]?.display_name, "CliProxy/Claude Opus");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -3203,7 +3204,7 @@ test("newapi upstream synthesizes catalog entries from an OpenAI model list", as
 
     // 1. 厂商目录精确命中（大小写不敏感）：沿用官方完整条目，不继承 gpt-5.5 的任何字段。
     const vendorEntry = catalog.models[3];
-    assert.equal(vendorEntry.display_name, "Kimi K3");
+    assert.equal(vendorEntry.display_name, "NewApi/Kimi K3");
     assert.equal(vendorEntry.description, "Kimi K3, 1M context");
     assert.equal(vendorEntry.context_window, 1048576);
     assert.equal(vendorEntry.default_reasoning_level, "high");
@@ -3216,10 +3217,10 @@ test("newapi upstream synthesizes catalog entries from an OpenAI model list", as
     // 2. 快照已知模型沿用原条目元数据，slug 保持上游提供的写法。
     const known = catalog.models[1];
     assert.equal(known.slug, "GPT-5.5");
-    assert.equal(known.display_name, "GPT-5.5");
+    assert.equal(known.display_name, "NewApi/GPT-5.5");
     assert.equal(known.description, "Proven previous-generation model.");
     assert.equal(known.minimal_client_version, "0.124.0");
-    assert.equal(catalog.models[2].display_name, "GPT-5.6 Sol");
+    assert.equal(catalog.models[2].display_name, "NewApi/GPT-5.6 Sol");
 
     // 3. models.json 规则命中：极简基底 + 规则字段，不携带 GPT 专属配置。
     const curated = catalog.models[0];
@@ -3231,7 +3232,7 @@ test("newapi upstream synthesizes catalog entries from an OpenAI model list", as
 
     // 4. 均未命中：克隆 gpt-5.5 基底并替换标识字段、解除最小客户端版本限制。
     const fallback = catalog.models[4];
-    assert.equal(fallback.display_name, "unknown-model");
+    assert.equal(fallback.display_name, "NewApi/unknown-model");
     assert.match(String(fallback.description), /OpenAI-compatible model "unknown-model"/);
     assert.equal(fallback.context_window, 272000);
     assert.deepEqual(fallback.supported_reasoning_levels, [{ effort: "medium", description: "Balanced" }]);

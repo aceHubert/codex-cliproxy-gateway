@@ -45,6 +45,8 @@ export interface CodebuddyDependencies {
   catalogRefreshIntervalMs?: number;
   /** 是否在适配器构造后立即强制刷新一次目录；测试可关闭，生产缺省开启。 */
   refreshCatalogOnStart?: boolean;
+  /** 目录生命周期由网关注入，适配器不判断 default 路由的模式。 */
+  catalogMode?: "dynamic" | "manual";
   /** 定时器注入点，便于测试不依赖真实时间。 */
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
@@ -56,11 +58,10 @@ export interface CodebuddyDependencies {
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 16 * 60 * 1000;
 
 /**
- * CodeBuddy 入口的生效判定。upstream-only 纯转发模式下按禁用处理：不建凭据/目录
- * 缓存、不拦截请求，也不施加环回监听与前缀保留约束（语义与 zcodeEnabled 一致）。
+ * CodeBuddy 入口仅由自身开关决定，default 路由模式不影响插件。
  */
 export function codebuddyEnabled(config: GatewayConfig): boolean {
-  return config.codebuddy === true && config.upstreamOnly !== true;
+  return config.codebuddy === true;
 }
 
 export function validateCodebuddyConfig(config: GatewayConfig): void {
@@ -117,6 +118,7 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
       },
       ...(dependencies.codexModelsCacheFile ? { codexModelsCacheFile: dependencies.codexModelsCacheFile } : {}),
       fetch: (url, init) => fetchUpstream(url, init),
+      catalogMode: dependencies.catalogMode,
     })
     : undefined;
   const scheduleInterval = dependencies.setInterval ?? setInterval;
@@ -126,15 +128,19 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
     Math.trunc(dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS),
   );
   let catalogRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  let startupRefresh: Promise<void> | undefined;
   if (catalogStore) {
     if (dependencies.refreshCatalogOnStart !== false) {
-      // 启动刷新必须 fire-and-forget：不能阻塞 serve 的启动路径，失败由 store 回退 last-good。
-      void catalogStore.refresh().catch(() => {});
+      // 构造不阻塞启动；目录消费者等待同一轮刷新，避免静态合成抢跑。
+      startupRefresh = catalogStore.refresh();
+      void startupRefresh.catch(() => {});
     }
-    catalogRefreshTimer = scheduleInterval(() => {
-      void catalogStore.refresh().catch(() => {});
-    }, catalogRefreshIntervalMs);
-    catalogRefreshTimer.unref?.();
+    if (dependencies.catalogMode !== "manual") {
+      catalogRefreshTimer = scheduleInterval(() => {
+        void catalogStore.refresh().catch(() => {});
+      }, catalogRefreshIntervalMs);
+      catalogRefreshTimer.unref?.();
+    }
   }
   const contexts = createCodebuddyContexts();
   const activeRequests = new Set<AbortController>();
@@ -147,21 +153,35 @@ export function createCodebuddyAdapter(config: GatewayConfig, dependencies: Code
   /** 已知模型集合（serves scope 投影后的裸 ID）；空目录视为不可校验，透传由上游判定。 */
   let knownModels: Set<string> | undefined;
   let knownRegions = new Set<"cn" | "intl">();
+  const updateCatalogMeta = (catalog: ModelCatalog): ModelCatalog => {
+    knownModels = new Set(catalog.models.map((entry) => entry.slug));
+    knownRegions = new Set(catalog.models.flatMap((entry) => {
+      const region = codebuddyModelRegion(entry.slug);
+      return region ? [region] : [];
+    }));
+    return catalog;
+  };
 
   return {
     async catalog(): Promise<ModelCatalog> {
       if (!catalogStore || closed) return { models: [] };
       try {
+        await startupRefresh?.catch(() => {});
         const catalog = await catalogStore.catalog();
-        knownModels = new Set(catalog.models.map((entry) => entry.slug));
-        knownRegions = new Set(catalog.models.flatMap((entry) => {
-          const region = codebuddyModelRegion(entry.slug);
-          return region ? [region] : [];
-        }));
         // 系统提示词已在 cloneCodexBase 合成时替换（含 model_messages 模板），缓存即成品；
         // workbuddy/* 沿用同一份（本机无 WorkBuddy IDE 与其产品配置，未做 CODEBUDDY_BRAND_NAME 品牌名替换，见技术债）。
-        return { models: catalog.models };
+        return updateCatalogMeta(catalog);
       } catch { return { models: [] }; }
+    },
+    /** 显式刷新不吞错；无 last-good 时由命令报告失败。 */
+    async refreshCatalog(): Promise<ModelCatalog> {
+      if (!catalogStore || closed) return { models: [] };
+      await catalogStore.refresh();
+      return updateCatalogMeta(await catalogStore.catalog());
+    },
+    async reloadCatalog(): Promise<ModelCatalog> {
+      if (!catalogStore || closed) return { models: [] };
+      return updateCatalogMeta(await catalogStore.reload());
     },
     async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
