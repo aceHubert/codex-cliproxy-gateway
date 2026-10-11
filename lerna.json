@@ -10,7 +10,7 @@
       "includeMergedTags": true,
       "ignoreChanges": [
         ".gitignore",
-        "*.md",
+        "**/!(README).md",
         "commitlint.config.cjs",
         "docs/**",
         "test/**"
