@@ -38,7 +38,7 @@
     },
     "apps/gateway": {
       "name": "@agent-proxy/gateway",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "bin": {
         "agent-proxy": "./dist/index.js",
       },
@@ -61,7 +61,7 @@
     },
     "packages/agy": {
       "name": "@agent-proxy/agy",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
@@ -71,7 +71,7 @@
     },
     "packages/codebuddy": {
       "name": "@agent-proxy/codebuddy",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
@@ -81,7 +81,7 @@
     },
     "packages/llm-bridge": {
       "name": "@agent-proxy/llm-bridge",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@anthropic-ai/sdk": "0.56.0",
         "@google/generative-ai": "0.24.1",
@@ -91,14 +91,14 @@
     },
     "packages/models": {
       "name": "@agent-proxy/models",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "devDependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
     },
     "packages/opencode-zen": {
       "name": "@agent-proxy/opencode-zen",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
@@ -109,11 +109,11 @@
     },
     "packages/plugin-api": {
       "name": "@agent-proxy/plugin-api",
-      "version": "0.10.0",
+      "version": "0.11.0",
     },
     "packages/qoder": {
       "name": "@agent-proxy/qoder",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@agent-proxy/codebuddy": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
@@ -124,7 +124,7 @@
     },
     "packages/zcode": {
       "name": "@agent-proxy/zcode",
-      "version": "0.10.0",
+      "version": "0.11.0",
       "dependencies": {
         "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",

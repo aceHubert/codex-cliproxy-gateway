@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.0 (2026-10-11)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `models`, `opencode-zen`, `plugin-api`, `qoder`, `zcode`
+  * [#13](https://github.com/aceHubert/codex-cliproxy-gateway/pull/13) feat(gateway): 迁移 monorepo 并独立发布网关与插件 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.10.0 (2026-10-10)
 
 #### :rocket: New Feature
