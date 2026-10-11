@@ -1,24 +1,21 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { syncGatewayConfigFile } from "../src/cli.ts";
-import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings, migrateLegacyConfig } from "../src/config.ts";
-import { zcodeConfigPresent } from "../src/zcode/config.ts";
-import { resolvePaths } from "../src/paths.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+import { syncGatewayConfigFile } from "../apps/gateway/src/cli.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION, gatewayConfigWarnings, migrateLegacyConfig } from "../apps/gateway/src/config.ts";
+import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function validConfig(paths: ResolvedPaths): GatewayConfig {
   return {
+    codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",
     port: 8320,
-    mountPath: "/v1",
-    prefix: "cliproxy/",
-    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
     upstreamBaseUrl: "http://127.0.0.1:8317/v1",
-    catalogPath: paths.catalogFile,
   };
 }
 
@@ -44,19 +41,28 @@ test("ZCode 配置为可选布尔值，拒绝对象等非法类型", () => {
   }
 });
 
-test("ZCode 发布的 JSON Schema 声明默认关闭且移除旧属性", () => {
+test("配置 schema 地址指向网关包内的唯一规范文件", () => {
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+  ));
+  assert.equal(GATEWAY_CONFIG_SCHEMA_URL, "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/schemas/gateway-config.schema.json");
+  assert.equal(schema.$id, GATEWAY_CONFIG_SCHEMA_URL);
+  assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+});
+
+test("ZCode 发布的 JSON Schema 声明默认开启且移除旧属性", () => {
+  const schema = JSON.parse(fs.readFileSync(
+    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("zcode"), false);
   assert.equal(schema.properties.zcode.type, "boolean");
-  assert.equal(schema.properties.zcode.default, false);
+  assert.equal(schema.properties.zcode.default, true);
   assert.equal(Object.hasOwn(schema.properties, "zai"), false);
 });
 
 test("CodeBuddy 账号 Schema：codebuddyAccount 为字符串，codebuddyRegion 标 deprecated", () => {
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
   ));
   assert.equal(schema.properties.codebuddyAccount.type, "string");
   assert.match(schema.properties.codebuddyAccount.description, /codebuddy --switch/);
@@ -118,7 +124,7 @@ test("历史哨兵 codebuddyAccount=default 读取归一为 auto，命令前置�
   }
 });
 
-test("新旧版本同步均为缺失 ZCode 配置补齐关闭状态并同步 state", () => {
+test("旧版本同步补齐 ZCode 默认开启，同版本缺失开关保持文件不变", () => {
   for (const configVersion of ["zcode-config-test-old", GATEWAY_CONFIG_VERSION]) {
     withConfigFile((paths) => {
       const config = { ...validConfig(paths), configVersion, customRoot: { keep: true } };
@@ -127,13 +133,14 @@ test("新旧版本同步均为缺失 ZCode 配置补齐关闭状态并同步 sta
       syncGatewayConfigFile(paths);
       const synced = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
       const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8"));
-      assert.equal(synced.zcode, false);
+      assert.equal(synced.zcode, configVersion === GATEWAY_CONFIG_VERSION ? undefined : true);
       assert.equal(synced.configVersion, GATEWAY_CONFIG_VERSION);
       assert.deepEqual(synced.customRoot, { keep: true });
       assert.deepEqual(state.config, synced);
       assert.equal(state.customState, "keep");
       assert.deepEqual(gatewayConfigWarnings(synced), []);
-      assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /zcode: null -> false/);
+      if (configVersion === GATEWAY_CONFIG_VERSION) assert.equal(fs.existsSync(paths.stdoutLog), false);
+      else assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /zcode: null -> true/);
     });
   }
 });
@@ -177,7 +184,7 @@ test("非法旧对象不能迁移为布尔字段，非法新字段保留以供�
       syncGatewayConfigFile(paths);
       const synced = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
       assert.equal(Object.hasOwn(synced, "zai"), false);
-      assert.deepEqual(synced.zcode, "zcode" in extra ? extra.zcode : false);
+      assert.deepEqual(synced.zcode, "zcode" in extra ? extra.zcode : undefined);
       assert.deepEqual(gatewayConfigWarnings(synced), "zcode" in extra ? ["$.zcode should be boolean"] : []);
     });
   }

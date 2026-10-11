@@ -1,6 +1,6 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
-import { isZcodeStartPlanIdentity, mergeZcodeBillingModelIds, parseZcodeBillingPlans } from "../src/zcode/plans.ts";
+import { isZcodeStartPlanIdentity, mergeZcodeBillingModelIds, parseZcodeBillingPlans } from "@agent-proxy/zcode/plans";
 
 test("Start Plan 依据 plan_id/name 的字符串规则归类", () => {
   assert.equal(isZcodeStartPlanIdentity("zcode-v3-start-plan-wk-0918", "ZCode Weekend Build"), true);

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,7 +12,7 @@ import {
   qoderCredentialsPresent,
   qoderDesktopCredentialsPresent,
   qoderRegionCredentialsPresent,
-} from "../src/qoder/credentials.ts";
+} from "@agent-proxy/qoder/credentials";
 
 const MACHINE = "aabbccdd-1122-3344-5566-778899aabbcc";
 const USER = { uid: "synthetic-account", access_token: "synthetic-access-secret", security_oauth_token: "synthetic-security-secret",

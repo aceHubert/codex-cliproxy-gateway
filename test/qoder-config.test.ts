@@ -1,20 +1,20 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../src/config.ts";
-import { syncGatewayConfigFile } from "../src/cli.ts";
-import { applyWebUiConfigPatch, readGatewayConfigFile } from "../src/config-update.ts";
-import { resolvePaths } from "../src/paths.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
+import { syncGatewayConfigFile } from "../apps/gateway/src/cli.ts";
+import { applyWebUiConfigPatch, readGatewayConfigFile } from "../apps/gateway/src/config-update.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function validConfig(paths: ResolvedPaths): GatewayConfig {
   return {
+    zcode: false, codebuddy: false, agy: false, opencodeZen: false,
     configVersion: GATEWAY_CONFIG_VERSION,
-    host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
-    officialBaseUrl: "https://chatgpt.com/backend-api/codex",
-    upstreamBaseUrl: "http://127.0.0.1:8317/v1", catalogPath: paths.catalogFile,
+    host: "127.0.0.1", port: 8320,
+    upstreamBaseUrl: "http://127.0.0.1:8317/v1",
   };
 }
 
@@ -30,7 +30,7 @@ function withConfigFile(run: (paths: ResolvedPaths) => void): void {
   }
 }
 
-test("Qoder 配置只使用可选布尔开关，发布 schema 声明默认关闭", () => {
+test("Qoder 配置只使用可选布尔开关，发布 schema 声明默认开启", () => {
   const config = validConfig(resolvePaths({ HOME: "/tmp/codex-qoder-schema" }));
   assert.deepEqual(gatewayConfigWarnings(config), []);
   for (const qoder of [false, true]) {
@@ -40,11 +40,11 @@ test("Qoder 配置只使用可选布尔开关，发布 schema 声明默认关闭
     assert.deepEqual(gatewayConfigWarnings({ ...config, qoder }), ["$.qoder should be boolean"]);
   }
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("qoder"), false);
   assert.equal(schema.properties.qoder.type, "boolean");
-  assert.equal(schema.properties.qoder.default, false);
+  assert.equal(schema.properties.qoder.default, true);
   assert.equal(Object.hasOwn(schema.properties, "qoderRegion"), false);
 });
 
@@ -73,7 +73,7 @@ test("Qoder 开关写入配置和状态并记录审计，重复保存不产生�
   });
 });
 
-test("新旧配置同步为缺失 Qoder 开关补齐关闭状态并记录审计", () => {
+test("旧版本同步补齐 Qoder 默认开启，同版本缺失开关保持文件不变", () => {
   for (const configVersion of ["qoder-config-test-old", GATEWAY_CONFIG_VERSION]) {
     withConfigFile((paths) => {
       const config = { ...validConfig(paths), configVersion, customRoot: { keep: true } };
@@ -82,12 +82,13 @@ test("新旧配置同步为缺失 Qoder 开关补齐关闭状态并记录审计"
       syncGatewayConfigFile(paths);
       const synced = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
       const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8"));
-      assert.equal(synced.qoder, false);
+      assert.equal(synced.qoder, configVersion === GATEWAY_CONFIG_VERSION ? undefined : true);
       assert.equal(synced.configVersion, GATEWAY_CONFIG_VERSION);
       assert.deepEqual(synced.customRoot, { keep: true });
       assert.deepEqual(state.config, synced);
       assert.equal(state.customState, "keep");
-      assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /qoder: null -> false/);
+      if (configVersion === GATEWAY_CONFIG_VERSION) assert.equal(fs.existsSync(paths.stdoutLog), false);
+      else assert.match(fs.readFileSync(paths.stdoutLog, "utf8"), /qoder: null -> true/);
     });
   }
 });

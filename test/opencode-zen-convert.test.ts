@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   aggregateOpencodeZenResponsesStream,
   convertOpencodeZenRequest,
   responsesToChatBody,
   translateOpencodeZenStream,
-} from "../src/opencode/convert.ts";
+} from "@agent-proxy/opencode-zen/convert";
 
 const encoder = new TextEncoder();
 function streamOf(text: string): ReadableStream<Uint8Array> {

@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -7,15 +7,15 @@ import path from "node:path";
 import assert from "node:assert/strict";
 import { mock } from "bun:test";
 import * as childProcess from "node:child_process";
-import { startGateway } from "../src/gateway.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
-import { runCli } from "../src/cli.ts";
-import { instanceMarker, resolvePaths, runWithInstancePaths } from "../src/paths.ts";
-import { requestLogDir } from "../src/request-log.ts";
-import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../src/webui.ts";
-import { codexCatalogFile, updateCodexModelCatalog } from "../src/model-state.ts";
-import type { WebUiContext } from "../src/webui.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+import { startGateway } from "../apps/gateway/src/gateway-composition.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { instanceMarker, resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { requestLogDir } from "../apps/gateway/src/request-log.ts";
+import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../apps/gateway/src/webui.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "../apps/gateway/src/model-composition.ts";
+import type { WebUiContext } from "../apps/gateway/src/webui.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 const TOKEN = "ccp_test_token_0123456789abcdef";
 const BASE = "http://127.0.0.1:8320";
@@ -51,7 +51,7 @@ interface Fixture {
 }
 
 function makePaths(home: string): ResolvedPaths {
-  const runtimeHome = path.join(home, ".codex-cliproxy-gateway");
+  const runtimeHome = path.join(home, ".agent-proxy-gateway");
   const codexHome = path.join(home, ".codex");
   return {
     home,
@@ -76,6 +76,7 @@ function makePaths(home: string): ResolvedPaths {
 
 function makeConfig(paths: ResolvedPaths, overrides: Partial<GatewayConfig> = {}): GatewayConfig {
   return {
+    codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     $schema: GATEWAY_CONFIG_SCHEMA_URL,
     configVersion: "0.0.0-test",
     host: "127.0.0.1",
@@ -1400,30 +1401,27 @@ test("ensureUiToken reuses an existing token and generates a fresh one when miss
   }
 });
 
-test("POST /ui/api/config rejects combinations the restarted gateway would refuse to boot", async () => {
+test("POST /ui/api/config ignores the deprecated prefix key and saves agent switches", async () => {
   const { handler, paths, home } = await makeFixture({ config: { prefix: "zcode/" } });
   try {
-    const before = fs.readFileSync(paths.gatewayConfig, "utf8");
     const response = await handler(authedRequest("/ui/api/config", { json: { zcode: true } }));
-    assert.equal(response.status, 400);
-    const payload = await response.json() as { error: { message: string } };
-    assert.match(payload.error.message, /前缀保留给 ZCode/);
-    // 校验失败不写盘：原配置逐字节保留，运行中的服务不受影响。
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
+    // 前缀按上游类型派生（cliproxy/ 或 newapi/），与 ZCode 保留段结构性无冲突：
+    // 残留的过时 prefix 键不再触发拒绝，保存照常完成。
+    assert.equal(response.status, 200);
+    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { zcode?: boolean };
+    assert.equal(saved.zcode, true);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
-test("POST /ui/api/config rejects codebuddy prefix conflicts before writing", async () => {
+test("POST /ui/api/config ignores deprecated codebuddy prefix conflicts", async () => {
   const { handler, paths, home } = await makeFixture({ config: { prefix: "workbuddy/" } });
   try {
-    const before = fs.readFileSync(paths.gatewayConfig, "utf8");
     const response = await handler(authedRequest("/ui/api/config", { json: { codebuddy: true } }));
-    assert.equal(response.status, 400);
-    const payload = await response.json() as { error: { message: string } };
-    assert.match(payload.error.message, /前缀保留给 CodeBuddy\/WorkBuddy/);
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), before);
+    assert.equal(response.status, 200);
+    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { codebuddy?: boolean };
+    assert.equal(saved.codebuddy, true);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -1444,7 +1442,7 @@ test("webUiContextForInstance keeps the full config path and never manages the d
     const siblingContext = webUiContextForInstance(sibling, paths);
     assert.equal(siblingContext.instanceOnly, true);
     // 临时目录祖先可能经过 /var → /private/var 软链；配置文件名仍须完整保留。
-    assert.equal(siblingContext.paths.gatewayConfig, path.join(fs.realpathSync(home), ".codex-cliproxy-gateway", "test.json"));
+    assert.equal(siblingContext.paths.gatewayConfig, path.join(fs.realpathSync(home), ".agent-proxy-gateway", "test.json"));
     assert.notEqual(siblingContext.paths.gatewayConfig, paths.gatewayConfig);
     assert.equal(siblingContext.paths.home, paths.home);
     assert.equal(siblingContext.paths.codexHome, paths.codexHome);
@@ -1513,9 +1511,12 @@ test("temporary UI log display, listing, content and config backfill stay in its
     assert.equal((await request("/ui/api/config", { json: { requestLogging: false } })).status, 200);
     assert.equal((await request("/ui/api/config", { json: { requestLogging: true } })).status, 200);
     const saved = JSON.parse(fs.readFileSync(configBPath, "utf8")) as GatewayConfig;
-    assert.equal(saved.logDir, ctx.paths.logDir);
+    // logDir 已过时：保存不再回填该键，日志目录固定为运行主目录 logs/。
+    assert.equal("logDir" in saved, false);
     assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), configABefore);
-    assert.equal(requestLogDir({ ...saved, logDir: paths.logDir }, ctx.paths), paths.logDir);
+    // 日志目录固定跟随实例上下文：实例 B 的目录与默认安装目录互不串扰。
+    assert.equal(requestLogDir(ctx.paths), ctx.paths.logDir);
+    assert.notEqual(requestLogDir(ctx.paths), paths.logDir);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -1672,12 +1673,12 @@ test("the web ui server reflects config file changes without restarting", async 
 });
 
 test("the web ui launch agent stays off by default (no RunAtLoad, no KeepAlive)", async () => {
-  const { renderWebUiAgent, WEBUI_LAUNCHD_LABEL } = await import("../src/launchd.ts");
+  const { renderWebUiAgent, WEBUI_LAUNCHD_LABEL } = await import("../apps/gateway/src/launchd.ts");
   const plist = renderWebUiAgent({
     bunPath: "/usr/local/bin/bun",
     cliPath: "/usr/local/lib/codex-cliproxy/index.js",
     codexHome: "/home/u/.codex",
-    logPath: "/home/u/.codex-cliproxy-gateway/webui.log",
+    logPath: "/home/u/.agent-proxy-gateway/webui.log",
     label: WEBUI_LAUNCHD_LABEL,
   });
   assert.match(plist, new RegExp(`<string>${WEBUI_LAUNCHD_LABEL}</string>`));
@@ -1693,7 +1694,7 @@ test("the web ui launch agent stays off by default (no RunAtLoad, no KeepAlive)"
 test("web service mode runs without installation state or a gateway and exits on SIGTERM", { timeout: 15000 }, async () => {
   const uiPort = await freePort();
   const fixture = await makeFixture({ config: { port: uiPort - 1 } });
-  const child = Bun.spawn([process.execPath, path.resolve(import.meta.dir, "../src/index.ts"), "web"], {
+  const child = Bun.spawn([process.execPath, path.resolve(import.meta.dir, "../apps/gateway/src/index.ts"), "web"], {
     env: {
       ...process.env,
       HOME: fixture.home,

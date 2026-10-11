@@ -1,0 +1,856 @@
+import fs from "node:fs";
+import path from "node:path";
+import { randomBytes } from "node:crypto";
+import { stopCodexAppServers } from "./app-server.ts";
+import { invalidateModelsCache } from "./catalog.ts";
+import { agentConfigEnabled, GATEWAY_CONFIG_VERSION } from "./config.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "./model-composition.ts";
+import { reloadGatewayModels } from "./model-reload.ts";
+import { logConfigChange } from "./process-log.ts";
+import {
+  applySelectedModelsPatch,
+  applyWebUiConfigPatch,
+  excludedModelGroupsFor,
+  markPendingRestart,
+  parseSelectedModels,
+  readGatewayConfigFile,
+  sanitizeUrlValue,
+  splitExcludedModelsByGroup,
+} from "./config-update.ts";
+import { gatewayServiceLabel, restartLaunchAgent } from "./launchd.ts";
+import { instanceMarker, realPathOrResolve, resolvePaths, runWithInstancePaths } from "./paths.ts";
+import { isRequestLogName, requestLogDir, safeLogPath } from "./request-log.ts";
+import { atomicWrite, readRootTomlString } from "./toml.ts";
+import { getActiveAccount, withInstanceContext as withCodebuddyInstanceContext } from "@agent-proxy/codebuddy";
+import { codebuddyCredentialsPresent, defaultAuthDirectory } from "@agent-proxy/codebuddy/credentials";
+import { agyCredentialsPresent, defaultAgyCredentialFile } from "@agent-proxy/agy/credentials";
+import { getActiveSources, withInstanceContext as withQoderInstanceContext } from "@agent-proxy/qoder";
+import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
+import {
+  configuredCatalogFile,
+  configuredModelPrefix,
+  configuredUpstreamType,
+  fetchConfiguredUpstreamCatalog,
+  rebuildCatalog,
+} from "./upstream-catalog.ts";
+import { MOUNT_PATH, OFFICIAL_BASE_URL } from "./types.ts";
+import type { GatewayConfig, ResolvedPaths } from "./types.ts";
+import { webUiPort } from "./ui-port.ts";
+export { webUiPort } from "./ui-port.ts";
+
+/**
+ * Web UI（/ui）服务端：网关的内建基础能力，运行在独立进程、独立端口（网关端口 + 1，
+ * 见 webUiPort）：默认不启动，由 `agent-proxy web` 前台运行，或由 `web --daemon`
+ * 拉起后台服务。与模型流量结构性隔离——模型端口的请求日志只含
+ * 模型流量；UI 通过共享模型流程拉取已配置上游与启用 agent 的目录，
+ * 据此重建已选目录文件（上游经 keychain 分派取 key），不存在任意转发路径，也绝不把
+ * key、URL query 写进日志或响应。
+ *
+ * 安全边界（缺一不可）：
+ * - 独立端口只绑定 loopback；网关 host 非 loopback 时不启动 UI 服务；
+ * - Host 头白名单（127.0.0.1/localhost/[::1] + UI 端口），挡 DNS rebinding；
+ * - Origin 头存在且非同源即拒绝；不输出任何 CORS 头；
+ * - /ui/api/* 一律要求 x-ccp-ui-token 匹配实例目录中的 ui-token（0600）。
+ *
+ * 配置查询对 provider 侧只做本地存在性探测（zcodeConfigPresent /
+ * codebuddyCredentialsPresent / qoderCredentialsPresent）与 CodeBuddy 账号标签的受限
+ * 解析（codebuddyAccountLabel）：探测只看文件是否存在；标签解析按网关同一选取规则
+ * 解析出实际命中的 .info 后只提取非敏感的账号标识（昵称、邮箱、uid）与地域，
+ * token 绝不进入 UI 响应。
+ */
+
+const GATEWAY_LOG_TAIL_BYTES = 256 * 1024;
+const REQUEST_LOG_TAIL_BYTES = 64 * 1024;
+/** 请求日志目录分页：默认每页条数与上限；目录可能积累大量文件，绝不整表返回。 */
+const REQUEST_LOG_DEFAULT_PAGE_SIZE = 100;
+const REQUEST_LOG_MAX_PAGE_SIZE = 500;
+/** 响应返回后再 kickstart，避免响应流被 SIGTERM 截断。 */
+const RESTART_DELAY_MS = 400;
+const UI_HTML_PATH = path.resolve(import.meta.dir, "../dist/ui/index.html");
+
+export interface WebUiContext {
+  paths: ResolvedPaths;
+  /** 测试注入的 HTML 文件；生产环境固定读取 dist/ui/index.html。 */
+  uiHtmlPath?: string;
+  /**
+   * 临时实例（`serve --config` 非默认配置）：只编辑该配置文件本身，不写默认安装的
+   * state，也绝不重启 LaunchAgent——即使派生路径恰好命中默认服务也必须拒绝管理。
+   */
+  instanceOnly?: boolean;
+  /** 测试注入用的重启调度；缺省在 RESTART_DELAY_MS 后 kickstart LaunchAgent。 */
+  scheduleRestart?: (paths: ResolvedPaths) => void;
+  /**
+   * provider 本地配置探测的注入路径（测试用）：缺省按 paths.home 解析 ~/.zcode、
+   * 按平台默认位置解析 CodeBuddy/WorkBuddy 认证目录；Qoder 国际版尊重
+   * QODER_CONFIG_DIR，国内版尊重 QODERCN_CONFIG_DIR。只影响存在性探测，不读取凭据内容。
+   */
+  providerDeps?: {
+    zcodeHome?: string;
+    codebuddyAuthDir?: string;
+    qoderConfigDir?: string;
+    qoderCnConfigDir?: string;
+    /** 桌面版数据目录注入；null 显式禁用桌面检测，undefined 用平台默认。 */
+    qoderDesktopDir?: string | null;
+    qoderCnDesktopDir?: string | null;
+    /** Antigravity 凭据文件注入；缺省按平台默认位置探测。 */
+    agyCredentialFile?: string;
+  };
+  /**
+   * 模型选择功能的测试注入点：上游 key 读取与「停止 Codex app-server」。
+   * 缺省分别走 keychain 分派的 readApiKey 与 stopCodexAppServers。
+   */
+  upstreamDeps?: {
+    readKey?: (optional?: boolean) => string;
+    stopCodexServers?: typeof stopCodexAppServers;
+  };
+  /** 模型更新与进程就绪的注入边界，测试不得连接本机生产网关或读取真实 agent。 */
+  modelDeps?: {
+    updateCodexCatalog?: typeof updateCodexModelCatalog;
+    reloadModels?: typeof reloadGatewayModels;
+    wait?: (milliseconds: number) => Promise<void>;
+  };
+}
+
+/**
+ * `serve` 的 Web UI 管理上下文：默认配置对应的生产实例全量管理；临时实例保留
+ * **完整配置文件路径**（不回落到目录下的 config.json，否则默认运行目录里的
+ * test.json 会改写生产配置），其余管理面文件按配置所在目录派生，并以
+ * instanceOnly 显式禁止管理默认服务（$HOME 下的配置派生的 LaunchAgent 路径
+ * 曾经恰好命中默认服务）。
+ */
+export function webUiContextForInstance(configPath: string, defaultPaths: ResolvedPaths): WebUiContext {
+  // 真实路径比较：文件/目录符号链接指向默认 config.json 时必须判为生产实例，
+  // 否则写入会落到默认安装却被当成临时实例。
+  const resolved = realPathOrResolve(configPath);
+  if (resolved === realPathOrResolve(defaultPaths.gatewayConfig)) return { paths: defaultPaths };
+  return {
+    paths: {
+      ...resolvePaths({ HOME: defaultPaths.home, CODEX_HOME: defaultPaths.codexHome }, path.dirname(resolved)),
+      gatewayConfig: resolved,
+    },
+    instanceOnly: true,
+  };
+}
+
+export function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
+}
+
+/** 读取（缺失时生成）Web UI 访问令牌；文件 0600，仅随 `agent-proxy web` 输出。 */
+export function ensureUiToken(file: string): string {
+  try {
+    const existing = fs.readFileSync(file, "utf8").trim();
+    if (existing) return existing;
+  } catch {
+    // 文件缺失时落到生成路径。
+  }
+  const token = `ccp_${randomBytes(24).toString("hex")}`;
+  atomicWrite(file, `${token}\n`);
+  return token;
+}
+
+function readUiToken(file: string): string | null {
+  try {
+    const value = fs.readFileSync(file, "utf8").trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+function notFound(): Response {
+  return Response.json({ error: { message: "Not found" } }, { status: 404 });
+}
+
+function badRequest(message: string): Response {
+  return Response.json({ error: { message } }, { status: 400 });
+}
+
+/** 末尾窗口只含一条超长行时向后扩窗的上限；再长则退回半行，避免读爆内存。 */
+const TAIL_EXPAND_CAP_BYTES = 1024 * 1024;
+
+/**
+ * 读取文件末尾 maxBytes；截断时丢弃首行不完整内容，保证从整行开始。
+ * 末行本身超过窗口时会翻倍扩窗，直到拿到至少一条有实质内容的完整行——
+ * 否则 `slice(firstNewline + 1)` 会在「窗口内唯一的 \\n 是超长行行尾」时
+ * 切出空串，或只切出 SSE 帧尾的空白行（`text: "\\n\\n\\n\\n\\n"`）。
+ */
+function tailFile(file: string, maxBytes: number): { text: string; truncated: boolean } | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    return null;
+  }
+  try {
+    if (stat.size <= maxBytes) {
+      return { text: fs.readFileSync(file, "utf8"), truncated: false };
+    }
+    const fd = fs.openSync(file, "r");
+    try {
+      let window = maxBytes;
+      for (;;) {
+        const start = Math.max(0, stat.size - window);
+        const length = stat.size - start;
+        const buffer = Buffer.alloc(length);
+        fs.readSync(fd, buffer, 0, length, start);
+        const text = buffer.toString("utf8");
+        const firstNewline = text.indexOf("\n");
+        if (start === 0) {
+          return { text, truncated: false };
+        }
+        if (firstNewline >= 0) {
+          const rest = text.slice(firstNewline + 1);
+          // rest 可能只有帧分隔换行；trim 后为空说明本窗口没有可用正文，继续扩窗。
+          if (rest.trim() !== "") return { text: rest, truncated: true };
+        }
+        if (window >= Math.min(stat.size, TAIL_EXPAND_CAP_BYTES)) {
+          if (firstNewline >= 0) {
+            const rest = text.slice(firstNewline + 1);
+            // 顶到扩窗上限仍只有空白时，退回超长行本身，避免预览变成空行。
+            return { text: rest.trim() !== "" ? rest : text.slice(0, firstNewline), truncated: true };
+          }
+          return { text, truncated: true };
+        }
+        window = Math.min(stat.size, window * 2);
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function defaultScheduleRestart(paths: ResolvedPaths): void {
+  setTimeout(() => {
+    try {
+      // 重启的是本实例的 LaunchAgent：label 按实例后缀派生，绝不触碰其他实例。
+      restartLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
+    } catch {
+      // kickstart 失败 pendingRestart 仍置位，下一次 CLI 命令会补重启。
+    }
+  }, RESTART_DELAY_MS);
+}
+
+function allowedHosts(port: number): string[] {
+  return ["127.0.0.1", "localhost", "[::1]"].map((host) => `${host}:${port}`);
+}
+
+/**
+ * Web UI 的独立监听端口：模型网关端口 + 1。UI 与模型流量物理隔离——UI 处理器没有
+ * 上游 URL、API key 与转发路径，结构上不可能把请求发给上游；模型端口的请求日志
+ * 也因此只包含模型流量。
+ */
+/**
+ * 在独立端口上启动 Web UI 服务：只绑定 loopback，fetch 直接进入 handleWebUiRequest，
+ * 不经过模型网关的任何路由、转发与日志包装。端口被占用时由 Bun.serve 抛错，
+ * 调用方决定降级行为；网关 host 非 loopback 时返回 undefined（不提供远程面板）。
+ *
+ * 默认不随 `serve` 启动：由 `agent-proxy web`（包括其后台服务模式）调用。
+ * 每个请求都从盘上重读配置（读失败回落启动快照），CLI 侧的 config 写入无需重启本进程。
+ */
+export function startWebUiServer(config: GatewayConfig, ctx: WebUiContext): Bun.Server<undefined> | undefined {
+  if (!isLoopbackHost(config.host)) return undefined;
+  const port = webUiPort(config);
+  return runWithInstancePaths(ctx.paths, () => Bun.serve({
+    hostname: "127.0.0.1",
+    port,
+    fetch: (request) => runWithInstancePaths(ctx.paths, () => {
+      let live = config;
+      try {
+        live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      } catch {
+        // 配置暂时不可读（重启窗口等）时用启动快照继续服务。
+      }
+      return handleWebUiRequest(request, live, ctx, port);
+    }),
+  }));
+}
+
+function uiHtmlResponse(ctx: WebUiContext): Response {
+  const uiHtmlPath = ctx.uiHtmlPath ?? UI_HTML_PATH;
+  let html: string;
+  try {
+    html = fs.readFileSync(uiHtmlPath, "utf8");
+  } catch {
+    return Response.json({
+      error: {
+        message: `Web UI asset is unavailable at ${uiHtmlPath}`,
+        hint: "Run `bun run build:ui` or reinstall the package.",
+      },
+    }, { status: 500 });
+  }
+  return new Response(html, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+      // 单文件内联应用：script/style 必须开 unsafe-inline；connect 只允许同源 API；
+      // img-src 'self' 放行浏览器随页面自动请求的同源 /favicon.ico。
+      "content-security-policy":
+        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
+  });
+}
+
+/** 内联 SVG 站点图标：深色圆角底 + 主题绿的转发箭标，配色与 UI 一致。 */
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">`
+  + `<rect width="64" height="64" rx="14" fill="#111419"/>`
+  + `<path d="M15 21l11 11-11 11" fill="none" stroke="#10b981" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`
+  + `<path d="M35 21l11 11-11 11" fill="none" stroke="#10b981" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>`
+  + `</svg>`;
+
+function faviconResponse(): Response {
+  return new Response(FAVICON_SVG, {
+    headers: {
+      "content-type": "image/svg+xml",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+/** 手动模式（--manual-codex-config）待配置键的展示条目：期望值 + 用户 config.toml 当前值。 */
+interface ManualCodexKeyRow {
+  key: string;
+  expected: string;
+  current: string | null;
+  matches: boolean;
+}
+
+/**
+ * 读 state.json 的 codexConfigManaged：缺省、文件缺失或解析失败一律按托管（true）处理，
+ * 与 CLI 的旧 state 兼容语义一致。webui 不反向依赖 cli.ts，字段读取在本地完成。
+ */
+function readCodexConfigManaged(stateFile: string): boolean {
+  try {
+    const state = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { codexConfigManaged?: unknown };
+    return state.codexConfigManaged !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 手动模式的 config.toml 配置指引（与 CLI install / models --sync 的提示同源同条件）：
+ * 3 个服务键 = 网关地址；static 目录激活时追加合成后的 Codex 目录路径；
+ * 非 static 但用户 toml 仍残留该键时提示删除。
+ * 只读取 4 个受管键做比对，URL 类当前值过 sanitizeUrlValue，不回显 toml 其他内容。
+ */
+function manualCodexConfigGuidance(
+  paths: ResolvedPaths,
+  config: GatewayConfig,
+): {
+  gatewayBaseUrl: string;
+  staticCatalogActive: boolean;
+  removeModelCatalogJson: boolean;
+  keys: ManualCodexKeyRow[];
+} {
+  const gatewayBaseUrl = `http://${config.host}:${config.port}${MOUNT_PATH}`;
+  const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
+  let staticCatalogAvailable = false;
+  try {
+    const catalog = JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")) as { models?: unknown };
+    staticCatalogAvailable = Array.isArray(catalog.models) && catalog.models.length > 0;
+  } catch {}
+  const staticCatalogActive = config.upstreamOnly === true && staticCatalogAvailable;
+  const configuredCatalog = readRootTomlString(source, "model_catalog_json");
+  const serviceKeys = ["openai_base_url", "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url"];
+  const keys: ManualCodexKeyRow[] = serviceKeys.map((key) => {
+    const current = readRootTomlString(source, key);
+    return {
+      key,
+      expected: gatewayBaseUrl,
+      current: current === undefined ? null : String(sanitizeUrlValue(current)),
+      matches: current === gatewayBaseUrl,
+    };
+  });
+  if (staticCatalogActive) {
+    keys.push({
+      key: "model_catalog_json",
+      expected: codexCatalogFile(paths),
+      current: configuredCatalog === undefined ? null : String(sanitizeUrlValue(configuredCatalog)),
+      matches: configuredCatalog === codexCatalogFile(paths),
+    });
+  }
+  return {
+    gatewayBaseUrl: String(sanitizeUrlValue(gatewayBaseUrl)),
+    staticCatalogActive,
+    removeModelCatalogJson: !staticCatalogActive && configuredCatalog !== undefined,
+    keys,
+  };
+}
+
+function statusResponse(config: GatewayConfig): Response {  const upstreamOnly = config.upstreamOnly === true;
+  // URL query 可能携带 token：对外展示与审计同规则，只保留 origin 与路径。
+  const upstreamBase = sanitizeUrlValue(config.upstreamBaseUrl);
+  const officialBase = sanitizeUrlValue(OFFICIAL_BASE_URL);
+  return Response.json({
+    ok: true,
+    version: GATEWAY_CONFIG_VERSION,
+    host: config.host,
+    port: config.port,
+    upstreamType: config.upstreamType === "newapi" ? "newapi" : "cliproxy",
+    upstreamOnly,
+    routing: upstreamOnly
+      ? [`default models -> ${upstreamBase}; enabled agent prefixes use their adapters`]
+      : [
+        `native models -> ${officialBase}`,
+        `${configuredModelPrefix(config)}* -> ${upstreamBase}`,
+      ],
+  });
+}
+
+function configResponse(
+  paths: ResolvedPaths,
+  providerDeps?: WebUiContext["providerDeps"],
+  instanceOnly = false,
+): Response {
+  const live = readGatewayConfigFile(paths.gatewayConfig);
+  // 管理模式来自安装 state；临时实例（serve --config）没有安装语义，按托管展示。
+  const codexConfigManaged = instanceOnly ? true : readCodexConfigManaged(paths.stateFile);
+  const codebuddyAuthDir = providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory(paths.home);
+  // 实例上下文仅绑定本次查询；包内方法每次读取当前展示状态，不启动插件。
+  const accountLabel = withCodebuddyInstanceContext({
+    authDirectory: providerDeps?.codebuddyAuthDir,
+    getConfig: () => live,
+    getHome: () => paths.home,
+  }, () => getActiveAccount());
+  const qoderSources = withQoderInstanceContext({
+    getHome: () => paths.home,
+    getSourceOptions: () => ({
+      intlConfigDir: providerDeps?.qoderConfigDir,
+      cnConfigDir: providerDeps?.qoderCnConfigDir,
+      intlDesktopDir: providerDeps?.qoderDesktopDir,
+      cnDesktopDir: providerDeps?.qoderCnDesktopDir,
+    }),
+  }, () => getActiveSources());
+  // 排除模型按兼容端分组下发：条目不带前缀（保存时网关补全），前缀只在分组定义里
+  // 出现；归不进分组的规则放 other 原样回传，保证往返不丢。
+  const excludedGroups = excludedModelGroupsFor(live);
+  const { entries: excludedEntries, other: excludedOther } = splitExcludedModelsByGroup(
+    Array.isArray(live.excludedModels) ? live.excludedModels : [],
+    excludedGroups,
+  );
+  return Response.json({
+    editable: {
+      zcode: agentConfigEnabled(live, "zcode"),
+      codebuddy: agentConfigEnabled(live, "codebuddy"),
+      qoder: agentConfigEnabled(live, "qoder"),
+      agy: agentConfigEnabled(live, "agy"),
+      opencodeZen: agentConfigEnabled(live, "opencodeZen"),
+      requestLogging: live.requestLogging === true,
+      // 展示目录取实例上下文（临时实例 = 其主目录），不按 Web UI 进程自身的 env 解析。
+      logDir: requestLogDir(paths),
+      maxRequestLogs: live.maxRequestLogs ?? 0,
+      maxGatewayLogBytes: live.maxGatewayLogBytes ?? 0,
+      selectedModels: Array.isArray(live.selectedModels) ? live.selectedModels : [],
+      excludedGroups,
+      excludedEntries,
+      excludedOther,
+    },
+    // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
+    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是
+    // codebuddyAccountLabel：按网关同一选取规则实时解析当前实际命中的登录，
+    // 只提取非敏感的账号标识（昵称、邮箱、uid）与地域（auto 与锁定文件共用同一
+    // 流程），token 绝不进入响应；账号切换只在 CLI，UI 不提供也不接受该字段的写入。
+    detected: {
+      zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
+      codebuddy: codebuddyCredentialsPresent(codebuddyAuthDir),
+      codebuddyAccountLabel: accountLabel ?? null,
+      // 当前实际可加载任一地域凭据即显示开关；检测只看文件存在性，不读内容。
+      qoder: qoderSources.length > 0,
+      qoderSources,
+      agy: agyCredentialsPresent(providerDeps?.agyCredentialFile ?? defaultAgyCredentialFile(paths.home)),
+    },
+    readonly: {
+      upstreamBaseUrl: sanitizeUrlValue(live.upstreamBaseUrl),
+      upstreamType: live.upstreamType === "newapi" ? "newapi" : "cliproxy",
+      upstreamOnly: live.upstreamOnly === true,
+      // 路由模式按 upstreamOnly 取反导出：false 对应 dynamic（动态路由），避免直接展示布尔值。
+      routerMode: live.upstreamOnly === true ? "upstream-only" : "dynamic",
+      host: live.host,
+      port: live.port,
+      mountPath: live.mountPath,
+      officialBaseUrl: sanitizeUrlValue(live.officialBaseUrl),
+      /** config.toml 管理模式：true = agent-proxy 托管受管键，false = 手动（--manual-codex-config）。 */
+      codexConfigManaged,
+      /** 仅手动模式返回：待配置键的期望值与用户 config.toml 当前值比对。托管模式无此字段。 */
+      ...(codexConfigManaged ? {} : { manualCodexConfig: manualCodexConfigGuidance(paths, live) }),
+    },
+    configVersion: live.configVersion ?? GATEWAY_CONFIG_VERSION,
+  });
+}
+
+/**
+ * 上游拉取错误对外展示前的脱敏：配置的 upstreamBaseUrl 与拼出的 /models URL 的 query
+ * 都可能携带 token，消息里出现的任何绝对 URL 一律按 sanitizeUrlValue 折叠为 origin+路径。
+ */
+function sanitizeUpstreamMessage(config: GatewayConfig, message: string): string {
+  let text = message;
+  if (config.upstreamBaseUrl) {
+    text = text.split(config.upstreamBaseUrl).join(String(sanitizeUrlValue(config.upstreamBaseUrl)));
+  }
+  return text.replace(/https?:\/\/[!-~]+/g, (raw) => {
+    const url = raw.replace(/[.,;:!?)\]}'">]+$/, "");
+    return `${sanitizeUrlValue(url)}${raw.slice(url.length)}`;
+  });
+}
+
+function upstreamFailure(config: GatewayConfig, error: unknown): Response {
+  const message = error instanceof Error ? error.message : String(error);
+  return Response.json({ error: { message: sanitizeUpstreamMessage(config, message) } }, { status: 502 });
+}
+
+function gatewayLogResponse(paths: ResolvedPaths): Response {
+  const tail = tailFile(paths.stdoutLog, GATEWAY_LOG_TAIL_BYTES);
+  return Response.json(tail ?? { text: "", truncated: false });
+}
+
+/** 请求日志目录：mtime 倒序（最新在前）+ 分页（offset/limit），返回 total 供前端算页数。
+ * requestLogging 关闭时不列目录（前端只显示「未开启」提示）——历史文件不再被浏览，
+ * 避免给出「日志还在记录」的误导。 */
+function requestLogsResponse(config: GatewayConfig, paths: ResolvedPaths, url: URL): Response {
+  const logging = config.requestLogging === true;
+  const empty = Response.json({
+    files: [],
+    total: 0,
+    offset: 0,
+    limit: REQUEST_LOG_DEFAULT_PAGE_SIZE,
+    logging,
+  });
+  if (!logging) return empty;
+  const dir = requestLogDir(paths);
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return Response.json({ files: [], total: 0, offset: 0, limit: REQUEST_LOG_DEFAULT_PAGE_SIZE, logging });
+  }
+  const all = names
+    .filter((name) => isRequestLogName(name))
+    .flatMap((name) => {
+      try {
+        const stat = fs.statSync(path.join(dir, name));
+        return [{
+          name,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          type: name.includes("-ws-") ? "ws" as const : "http" as const,
+        }];
+      } catch {
+        return [];
+      }
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  const limitParam = Number(url.searchParams.get("limit"));
+  const offsetParam = Number(url.searchParams.get("offset"));
+  const limit = Number.isInteger(limitParam) && limitParam > 0
+    ? Math.min(limitParam, REQUEST_LOG_MAX_PAGE_SIZE)
+    : REQUEST_LOG_DEFAULT_PAGE_SIZE;
+  const offset = Number.isInteger(offsetParam) && offsetParam > 0 ? offsetParam : 0;
+  return Response.json({
+    files: all.slice(offset, offset + limit),
+    total: all.length,
+    offset,
+    limit,
+    logging,
+  });
+}
+
+function requestLogContentResponse(config: GatewayConfig, paths: ResolvedPaths, name: string): Response {
+  if (!name || !isRequestLogName(name)) return notFound();
+  const target = safeLogPath(requestLogDir(paths), name);
+  if (!target) return badRequest("Invalid log file name");
+  const tail = tailFile(target, REQUEST_LOG_TAIL_BYTES);
+  if (!tail) return notFound();
+  return Response.json({ name, text: tail.text, truncated: tail.truncated });
+}
+
+/** 在触碰配置前完成选择解析；空选择不请求上游，允许静态目录仅含 agent。 */
+async function prepareModelSelection(ctx: WebUiContext, config: GatewayConfig, selected: string[]) {
+  if (!selected.length) return {
+    ordered: [],
+    rebuild: async () => { atomicWrite(configuredCatalogFile(ctx.paths, config), `${JSON.stringify({ models: [] }, null, 2)}\n`); },
+  };
+  const { catalog, modelsConfigFile } = await fetchConfiguredUpstreamCatalog(ctx.paths, config, ctx.upstreamDeps);
+  const entries = catalog.models.filter((model) => selected.includes(model.slug));
+  return {
+    ordered: entries.map((model) => model.slug),
+    rebuild: () => rebuildCatalog(ctx.paths, config, entries, modelsConfigFile),
+  };
+}
+
+/** 保存失败恢复同一实例的配置、目录和受管 TOML，不留下半轮模型变更。 */
+function modelSaveRollback(paths: ResolvedPaths, config: GatewayConfig) {
+  const files = [...new Set([
+    paths.gatewayConfig, paths.stateFile, configuredCatalogFile(paths, config),
+    codexCatalogFile(paths), paths.configToml,
+  ])];
+  const previous = files.map((file) => ({ file, source: fs.existsSync(file) ? fs.readFileSync(file) : undefined }));
+  const readToml = () => fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : undefined;
+  let expectedToml = readToml();
+  const restore = () => {
+    for (const { file, source } of previous) {
+      // 共享写入器会守卫并回滚自己的 TOML；用户在准备期间修改的内容必须保留。
+      if (file === paths.configToml && readToml() !== expectedToml) continue;
+      if (source) atomicWrite(file, source.toString("utf8"));
+      else if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    logConfigChange(paths.stdoutLog, {
+      command: "webui model rollback",
+      changes: [{ field: "model transaction", before: "pending", after: "rolled back" }],
+    }, config.maxGatewayLogBytes ?? 0);
+  };
+  return Object.assign(restore, { recordToml: () => { expectedToml = readToml(); } });
+}
+
+async function updateUiModelCatalog(ctx: WebUiContext, config: GatewayConfig, refreshAdapters: boolean): Promise<void> {
+  await (ctx.modelDeps?.updateCodexCatalog ?? updateCodexModelCatalog)(ctx.paths, config, {}, {
+    refreshAdapters,
+    ...(ctx.instanceOnly ? { manual: true } : {}),
+  });
+}
+
+async function reloadUiModels(ctx: WebUiContext, config: GatewayConfig, restarting = false) {
+  const reload = ctx.modelDeps?.reloadModels ?? reloadGatewayModels;
+  if (!restarting) return reload(ctx.paths, config);
+  const wait = ctx.modelDeps?.wait ?? ((milliseconds: number) => Bun.sleep(milliseconds));
+  // kickstart 延后到响应窗口之外；独立 UI 进程保持运行，等待新网关健康且目录就绪。
+  await wait(RESTART_DELAY_MS + 100);
+  const deadline = Date.now() + 15_000;
+  while (true) {
+    const result = await reload(ctx.paths, config);
+    if (result.loaded) return result;
+    if (Date.now() >= deadline) throw new Error("网关重启后模型目录未就绪；请检查网关并重新保存，暂未重启 Codex。");
+    await wait(100);
+  }
+}
+
+/** 处理 UI 端口上的 /ui、/ui/* 与浏览器随 /ui 自动请求的 /favicon.ico；port 是 UI
+ * 服务自己的监听端口（Host 头白名单按它校验）。任何情况下都返回 Response。 */
+export async function handleWebUiRequest(request: Request, config: GatewayConfig, ctx: WebUiContext, port: number): Promise<Response> {
+  return runWithInstancePaths(ctx.paths, async () => {
+    const response = await handleWebUiRequestCore(request, config, ctx, port);
+    // 标记只包含主目录哈希；保留原响应流与认证门禁，不读取或缓存响应正文。
+    response.headers.set("x-ccp-instance", instanceMarker(ctx.paths.runtimeHome));
+    return response;
+  });
+}
+
+async function handleWebUiRequestCore(request: Request, config: GatewayConfig, ctx: WebUiContext, port: number): Promise<Response> {
+  // 网关被配置到非回环地址时不提供 UI——它是本机管理入口，不是远程面板。
+  if (!isLoopbackHost(config.host)) return notFound();
+  // HTTP/1.1 必带 Host；直接构造 Request 调用 handler（测试）时缺失，回退用 URL host。
+  const host = (request.headers.get("host") ?? new URL(request.url).host).toLowerCase();
+  if (!allowedHosts(port).includes(host)) return notFound();
+  const origin = request.headers.get("origin");
+  if (origin && origin.toLowerCase() !== `http://${host}`) return notFound();
+
+  const pathname = new URL(request.url).pathname;
+  if (request.method === "GET" && (pathname === "/ui" || pathname === "/ui/")) {
+    return uiHtmlResponse(ctx);
+  }
+  // 浏览器打开 /ui 时会自动请求站点图标：就地返回内联 SVG，绝不转发上游。
+  if (request.method === "GET" && pathname === "/favicon.ico") return faviconResponse();
+  if (!pathname.startsWith("/ui/api/")) return notFound();
+
+  const token = readUiToken(ctx.paths.uiTokenFile) ?? ensureUiToken(ctx.paths.uiTokenFile);
+  if (request.headers.get("x-ccp-ui-token") !== token) {
+    return Response.json({ error: { message: "Web UI token required" } }, { status: 401 });
+  }
+  const route = pathname.slice("/ui/api/".length);
+
+  if (route === "status" && request.method === "GET") {
+    return statusResponse(readGatewayConfigFile(ctx.paths.gatewayConfig));
+  }
+
+  if (route === "config" && request.method === "GET") {
+    try {
+      return configResponse(ctx.paths, ctx.providerDeps, ctx.instanceOnly === true);
+    } catch (error) {
+      return Response.json(
+        { error: { message: error instanceof Error ? error.message : String(error) } },
+        { status: 404 },
+      );
+    }
+  }
+
+  if (route === "config" && request.method === "POST") {
+    let patch: unknown;
+    try {
+      patch = await request.json();
+    } catch {
+      return badRequest("Request body must be JSON");
+    }
+    if (typeof patch !== "object" || patch === null || Array.isArray(patch)) {
+      return badRequest("Request body must be a JSON object");
+    }
+    let rollback: ReturnType<typeof modelSaveRollback> | undefined;
+    let restartScheduled = false;
+    try {
+      const managesService = ctx.instanceOnly !== true;
+      const { selectedModels, ...configPatch } = patch as Record<string, unknown>;
+      const current = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const prepared = Object.keys(configPatch).length
+        ? applyWebUiConfigPatch(ctx.paths, configPatch, managesService, { write: false })
+        : { config: current, applied: [] };
+      if (selectedModels === undefined && !Object.keys(configPatch).length) {
+        return badRequest("Request body contains no supported fields");
+      }
+      let selection: Awaited<ReturnType<typeof prepareModelSelection>> | undefined;
+      if (selectedModels !== undefined) {
+        const parsed = parseSelectedModels(selectedModels);
+        try {
+          selection = await prepareModelSelection(ctx, prepared.config, parsed);
+        } catch (error) {
+          return upstreamFailure(prepared.config, error);
+        }
+      }
+      if (JSON.stringify(readGatewayConfigFile(ctx.paths.gatewayConfig)) !== JSON.stringify(current)) {
+        return badRequest("模型准备期间网关配置发生变化；请重新加载页面后保存。");
+      }
+      rollback = modelSaveRollback(ctx.paths, current);
+      if (selection) await selection.rebuild();
+      const { config: next, applied } = Object.keys(configPatch).length
+        ? applyWebUiConfigPatch(ctx.paths, configPatch, managesService)
+        : prepared;
+      if (selection) {
+        applySelectedModelsPatch(ctx.paths, selection.ordered, managesService);
+        next.selectedModels = selection.ordered;
+      }
+      const structural = applied.some((change) => change.field !== "excludedModels");
+      const modelsChanged = selection !== undefined || applied.some((change) =>
+        change.field === "excludedModels"
+        || (next.upstreamOnly === true && ["zcode", "codebuddy", "qoder", "agy", "opencodeZen"].includes(change.field)));
+      const restarting = structural && managesService && fs.existsSync(ctx.paths.launchAgent);
+      if (restarting) {
+        markPendingRestart(ctx.paths.stateFile);
+        (ctx.scheduleRestart ?? defaultScheduleRestart)(ctx.paths);
+        restartScheduled = true;
+      }
+      if (modelsChanged) {
+        if (restarting) {
+          await reloadUiModels(ctx, next, true);
+          await updateUiModelCatalog(ctx, next, false);
+          rollback.recordToml();
+        } else {
+          await updateUiModelCatalog(ctx, next, true);
+          rollback.recordToml();
+          await reloadUiModels(ctx, next);
+        }
+        if (!next.upstreamOnly) {
+          try { invalidateModelsCache(ctx.paths.modelsCacheFile); } catch {}
+        }
+      }
+      return Response.json({
+        restarting: restarting && !modelsChanged,
+        applied: [...applied.map((change) => change.field), ...(selection ? ["selectedModels"] : [])],
+      });
+    } catch (error) {
+      rollback?.();
+      // 新服务可能已经加载失败事务的配置，恢复文件后重启回原配置。
+      if (restartScheduled) (ctx.scheduleRestart ?? defaultScheduleRestart)(ctx.paths);
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (route === "upstream/models" && request.method === "GET") {
+    try {
+      const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const { catalog } = await fetchConfiguredUpstreamCatalog(ctx.paths, live, ctx.upstreamDeps);
+      return Response.json({
+        upstreamType: configuredUpstreamType(live),
+        models: catalog.models.map((model) => ({
+          slug: model.slug,
+          displayName: model.display_name || model.slug,
+        })),
+      });
+    } catch (error) {
+      return upstreamFailure(config, error);
+    }
+  }
+
+  if (route === "upstream/models" && request.method === "POST") {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return badRequest("Request body must be JSON");
+    }
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return badRequest("Request body must be a JSON object");
+    }
+    let selected: string[];
+    try {
+      selected = parseSelectedModels((body as { selectedModels?: unknown }).selectedModels);
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+    let prepared: Awaited<ReturnType<typeof prepareModelSelection>>;
+    try {
+      prepared = await prepareModelSelection(ctx, live, selected);
+    } catch (error) {
+      return upstreamFailure(live, error);
+    }
+    const rollback = modelSaveRollback(ctx.paths, live);
+    try {
+      await prepared.rebuild();
+      applySelectedModelsPatch(ctx.paths, prepared.ordered, ctx.instanceOnly !== true);
+      live.selectedModels = prepared.ordered;
+      await updateUiModelCatalog(ctx, live, true);
+      rollback.recordToml();
+      await reloadUiModels(ctx, live);
+    } catch (error) {
+      rollback();
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    if (live.upstreamOnly !== true) {
+      // 重置官方目录缓存让网关下一次 /models 就反映新选择（Codex 约在 5 分钟内自动
+      // 刷新）；写失败不回滚已保存的选择，与网关侧缓存写失败静默忽略同策略。
+      try {
+        invalidateModelsCache(ctx.paths.modelsCacheFile);
+      } catch {}
+    }
+    return Response.json({
+      applied: ["selectedModels"],
+      selected: prepared.ordered,
+      count: prepared.ordered.length,
+      upstreamOnly: live.upstreamOnly === true,
+    });
+  }
+
+  if (route === "codex/restart" && request.method === "POST") {
+    try {
+      const live = readGatewayConfigFile(ctx.paths.gatewayConfig);
+      const ready = await reloadUiModels(ctx, live);
+      if (!ready.loaded) return badRequest("网关尚未运行，无法确认模型目录就绪；请先启动网关再重启 Codex。");
+    } catch (error) {
+      return badRequest(error instanceof Error ? error.message : String(error));
+    }
+    // 停止当前用户的 Codex app-server；Codex 会自行拉起新进程并重读目录。
+    const stopCodexServers = ctx.upstreamDeps?.stopCodexServers ?? stopCodexAppServers;
+    const result = await stopCodexServers();
+    if (result.scan === "unknown") {
+      return Response.json(
+        { error: { message: `Codex app-server state is unknown: ${result.error}` } },
+        { status: 500 },
+      );
+    }
+    return Response.json({ results: result.results });
+  }
+
+  if (route === "logs/gateway" && request.method === "GET") return gatewayLogResponse(ctx.paths);
+  if (route === "logs/requests" && request.method === "GET") {
+    return requestLogsResponse(config, ctx.paths, new URL(request.url));
+  }
+  if (route.startsWith("logs/requests/") && request.method === "GET") {
+    const name = decodeURIComponent(route.slice("logs/requests/".length));
+    return requestLogContentResponse(config, ctx.paths, name);
+  }
+  return notFound();
+}

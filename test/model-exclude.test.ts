@@ -1,10 +1,10 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
-import { compileModelFilter, filterExcludedModels } from "../src/catalog.ts";
+import { compileModelFilter, filterExcludedModels } from "../apps/gateway/src/catalog.ts";
 import {
   applyWebUiConfigPatch,
   excludedModelGroupsFor,
@@ -14,14 +14,15 @@ import {
   normalizeExcludedModels,
   parseExcludedModels,
   splitExcludedModelsByGroup,
-} from "../src/config-update.ts";
-import { joinExcludedLines, splitExcludedLines } from "../src/ui/excluded-models-field.ts";
-import { collectCompatibleModels, excludeModels, runCli, type ExcludeModelsDependencies } from "../src/cli.ts";
-import { resolvePaths } from "../src/paths.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL } from "../src/config.ts";
-import { modelReloadRequestFile } from "../src/model-reload.ts";
-import { readRootTomlString } from "../src/toml.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+} from "../apps/gateway/src/config-update.ts";
+import { joinExcludedLines, splitExcludedLines } from "../apps/gateway/src/ui/excluded-models-field.ts";
+import { collectCompatibleModels, excludeModels, runCli, type ExcludeModelsDependencies } from "../apps/gateway/src/cli.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL } from "../apps/gateway/src/config.ts";
+import { modelReloadRequestFile } from "../apps/gateway/src/model-reload.ts";
+import { readRootTomlString } from "../apps/gateway/src/toml.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
+import { routingPluginFamily } from "./plugin-routing-fixture.ts";
 
 test("exclusion filter matches exact IDs, vendor prefixes, and globs case-insensitively", () => {
   const filter = compileModelFilter([
@@ -72,7 +73,7 @@ test("filterExcludedModels removes matching entries and keeps the catalog untouc
       { slug: "agy/gemini-2.5-flash" },
     ],
   };
-  const filtered = filterExcludedModels(catalog, ["codebuddy-cn/", "agy/gemini-2.5-flash"]);
+  const filtered = filterExcludedModels(catalog, ["codebuddy-cn/", "agy/gemini-2.5-flash"], (model) => Boolean(routingPluginFamily(model)));
   assert.deepEqual(filtered.models.map((model) => model.slug), ["gpt-5.5", "cliproxy/glm-5.3"]);
   assert.equal(filterExcludedModels(catalog, []), catalog);
 });
@@ -118,6 +119,7 @@ test("normalizeExcludedModels tolerates legacy family and out-of-scope rules whi
 });
 
 const GROUP_TEST_CONFIG: GatewayConfig = {
+  zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
   host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
   officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
   catalogPath: "/tmp/catalog.json",
@@ -284,6 +286,7 @@ function makeCliFixture(excludedModels?: string[]): CliFixture {
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     $schema: GATEWAY_CONFIG_SCHEMA_URL,
     configVersion: "0.0.0-test",
     host: "127.0.0.1",
@@ -672,6 +675,7 @@ test("web ui config patch expands excluded model groups into prefixed rules", ()
     const paths = makeCliPaths(home);
     fs.mkdirSync(paths.runtimeHome, { recursive: true });
     fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
       configVersion: "0.0.0-test",
       host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",

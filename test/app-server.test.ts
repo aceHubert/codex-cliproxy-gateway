@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -7,11 +7,11 @@ import {
   isCodexAppServerProcess,
   parseWindowsCommandLine,
   stopCodexAppServers,
-} from "../src/app-server.ts";
-import { runCli } from "../src/cli.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
-import { resolvePaths } from "../src/paths.ts";
-import type { ProcessIdentity } from "../src/app-server.ts";
+} from "../apps/gateway/src/app-server.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import type { ProcessIdentity } from "../apps/gateway/src/app-server.ts";
 
 function appServer(pid: number, overrides: Partial<ProcessIdentity> = {}): ProcessIdentity {
   return {
@@ -206,6 +206,7 @@ test("config writes every requested update while a query stays read-only", {
   const paths = resolvePaths();
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     $schema: GATEWAY_CONFIG_SCHEMA_URL,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",
@@ -255,6 +256,7 @@ test("config invalidates the Codex models cache only for catalog-affecting optio
   const paths = resolvePaths();
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     $schema: GATEWAY_CONFIG_SCHEMA_URL,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",

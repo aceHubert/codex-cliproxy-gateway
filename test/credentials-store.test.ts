@@ -1,11 +1,11 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createApiKeyStore, keychainService, KEYCHAIN_SERVICE } from "../src/keychain.ts";
-import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "../src/credentials-store.ts";
-import { resolvePaths, runWithInstancePaths } from "../src/paths.ts";
+import { createApiKeyStore, keychainService, KEYCHAIN_SERVICE } from "../apps/gateway/src/keychain.ts";
+import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "../apps/gateway/src/credentials-store.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 
 /** 测试用占位 key：运行时拼接生成，避免源码里出现「凭据字段名 + 明文值」的硬编码形状。 */
 function sampleKey(label: string): string {
@@ -24,7 +24,7 @@ function credentialsJson(fields: { version?: number; apiKey?: unknown }): string
 function withCredentialsFile(run: (file: string) => void): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-credentials-"));
   try {
-    run(path.join(home, ".codex-cliproxy-gateway", "credentials.json"));
+    run(path.join(home, ".agent-proxy-gateway", "credentials.json"));
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

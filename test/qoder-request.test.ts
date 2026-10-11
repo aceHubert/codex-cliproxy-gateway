@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { QoderRequestError, translateQoderRequest } from "../src/qoder/request.ts";
+import test from "./host-test.ts";
+import { QoderRequestError, translateQoderRequest } from "@agent-proxy/qoder/request";
 
 type Json = Record<string, unknown>;
 

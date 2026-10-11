@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { createZcodeResponse } from "../src/zcode/response.ts";
-import { decodeZcodeThinking, type ZcodeToolMap } from "../src/zcode/wire.ts";
+import { test } from "./host-test.ts";
+import { createZcodeResponse } from "@agent-proxy/zcode/response";
+import { decodeZcodeThinking, type ZcodeToolMap } from "@agent-proxy/zcode/wire";
 
 type Json = Record<string, any>;
 const model = "zcode/glm-5.3";

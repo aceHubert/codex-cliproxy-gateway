@@ -1,0 +1,23 @@
+{
+  "name": "@agent-proxy/models",
+  "version": "0.10.0",
+  "private": true,
+  "description": "Agent Proxy 内部模型快照与厂商预设，仅供构建使用。",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./codex_client_models.json": "./codex_client_models.json",
+    "./vendor_models.json": "./vendor_models.json"
+  },
+  "scripts": {
+    "build": "bun ../../scripts/build-library.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@agent-proxy/plugin-api": "workspace:*"
+  }
+}

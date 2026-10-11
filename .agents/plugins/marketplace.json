@@ -1,7 +1,7 @@
 {
-  "name": "codex-cliproxy",
+  "name": "agent-proxy",
   "interface": {
-    "displayName": "Codex CLIProxy"
+    "displayName": "Agent Proxy"
   },
   "plugins": [
     {

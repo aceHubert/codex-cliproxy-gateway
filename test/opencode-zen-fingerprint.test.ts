@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
   OPENCODE_ZEN_CLIENT_TOOLS,
@@ -10,8 +10,8 @@ import {
   injectOpencodeZenFingerprintBody,
   mergeOpencodeZenTools,
   normalizeOpencodeZenEffort,
-} from "../src/opencode/fingerprint.ts";
-import { OPENCODE_SESSION_PATTERN, createOpenCodeSessionId } from "../src/opencode/session.ts";
+} from "@agent-proxy/opencode-zen/fingerprint";
+import { OPENCODE_SESSION_PATTERN, createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
 
 const SESSION = createOpenCodeSessionId(1_000_000, "test-session");
 

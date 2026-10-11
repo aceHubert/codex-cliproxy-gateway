@@ -1,17 +1,18 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../src/config.ts";
-import { applyWebUiConfigPatch, readGatewayConfigFile } from "../src/config-update.ts";
-import { runCli } from "../src/cli.ts";
-import { validateAgyConfig } from "../src/agy/index.ts";
-import { resolvePaths } from "../src/paths.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
+import { applyWebUiConfigPatch, readGatewayConfigFile } from "../apps/gateway/src/config-update.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { validateAgyConfig } from "@agent-proxy/agy";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function validConfig(paths: ResolvedPaths): GatewayConfig {
   return {
+    zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://chatgpt.com/backend-api/codex",
@@ -31,7 +32,7 @@ function withConfigFile(run: (paths: ResolvedPaths) => void): void {
   }
 }
 
-test("agy 配置只使用可选布尔开关，发布 schema 声明默认关闭", () => {
+test("agy 配置只使用可选布尔开关，发布 schema 声明默认开启", () => {
   const config = validConfig(resolvePaths({ HOME: "/tmp/codex-agy-schema" }));
   assert.deepEqual(gatewayConfigWarnings(config), []);
   for (const agy of [false, true]) {
@@ -41,11 +42,11 @@ test("agy 配置只使用可选布尔开关，发布 schema 声明默认关闭",
     assert.deepEqual(gatewayConfigWarnings({ ...config, agy }), ["$.agy should be boolean"]);
   }
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("agy"), false);
   assert.equal(schema.properties.agy.type, "boolean");
-  assert.equal(schema.properties.agy.default, false);
+  assert.equal(schema.properties.agy.default, true);
   assert.equal(Object.hasOwn(schema.properties, "agyRegion"), false);
 });
 

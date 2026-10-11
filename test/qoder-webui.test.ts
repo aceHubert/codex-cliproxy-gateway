@@ -1,13 +1,13 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GATEWAY_CONFIG_VERSION } from "../src/config.ts";
-import { resolvePaths } from "../src/paths.ts";
-import { handleWebUiRequest } from "../src/webui.ts";
-import type { GatewayConfig } from "../src/types.ts";
-import type { UiConfig } from "../src/ui/api.ts";
+import { GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { handleWebUiRequest } from "../apps/gateway/src/webui.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import type { UiConfig } from "../apps/gateway/src/ui/api.ts";
 
 const TOKEN = "qoder-ui-test-token";
 
@@ -16,6 +16,7 @@ function fixture(qoder = false) {
   const paths = resolvePaths({ HOME: home });
   const qoderConfigDir = path.join(home, "qoder-config");
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, agy: false, opencodeZen: false,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",
     port: 8320,

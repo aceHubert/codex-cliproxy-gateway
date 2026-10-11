@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -9,11 +9,11 @@ import {
   parseClientSigningCredential,
   solveClientRequestPow,
   ZcodeClientSigning,
-} from "../src/zcode/client-signing.ts";
-import { createGatewayHandler } from "../src/gateway.ts";
-import type { ZcodeProviderSnapshot, ZcodeFamily, ZcodeSelection } from "../src/zcode/config.ts";
-import type { ZcodeIdentity } from "../src/zcode/request-context.ts";
-import type { GatewayConfig } from "../src/types.ts";
+} from "@agent-proxy/zcode/client-signing";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import type { ZcodeProviderSnapshot, ZcodeFamily, ZcodeSelection } from "@agent-proxy/zcode/config";
+import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const API_KEY_ID = "testkeyid7f3a";
 const API_KEY_SECRET = "test-secret-4d51";
@@ -241,11 +241,12 @@ async function withGateway(
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-signing-"));
   const config: GatewayConfig = {
+    codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [] }));
+  fs.writeFileSync(path.join(directory, "catalog.json"), JSON.stringify({ models: [] }));
   const handshakes: { body: Record<string, unknown>; authorization: string }[] = [];
   const modelCalls: Headers[] = [];
   const currentCache = { get: async () => snapshot(), close: () => {} };

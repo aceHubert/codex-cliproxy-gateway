@@ -1,4 +1,4 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -8,9 +8,9 @@ import {
   resolveCodexConfigConflict,
   restoreManagedCodexToml,
   runCli,
-} from "../src/cli.ts";
-import { resolvePaths } from "../src/paths.ts";
-import { readRootTomlString } from "../src/toml.ts";
+} from "../apps/gateway/src/cli.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { readRootTomlString } from "../apps/gateway/src/toml.ts";
 
 function hash(contents: string): string {
   return createHash("sha256").update(contents).digest("hex");
@@ -52,6 +52,7 @@ function writeManualGatewayConfig(
   overrides: Record<string, unknown> = {},
 ): void {
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
@@ -175,7 +176,8 @@ test("models --sync 保持静态模式，config 切换模式时手动 TOML 不�
     assert.deepEqual(catalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
     const staticFile = path.join(paths.runtimeHome, "codex-catalog.json");
     assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, catalog.models);
-    assert.equal(config.catalogPath, paths.catalogFile);
+    // catalogPath 已过时：目录文件按上游类型派生，配置不再携带该键。
+    assert.equal("catalogPath" in config, false);
     // config.toml 逐字节不变，state 保持手动且不跟踪 hash。
     assert.equal(fs.readFileSync(paths.configToml, "utf8"), userToml);
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8"));

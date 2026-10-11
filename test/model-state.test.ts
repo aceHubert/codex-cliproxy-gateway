@@ -3,9 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import test from "node:test";
-import { resolvePaths } from "../src/paths.ts";
-import type { AgyDependencies } from "../src/agy/index.ts";
+import test from "./host-test.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import type { AgyDependencies } from "@agent-proxy/agy";
 import {
   applyModelCatalogToml,
   codexCatalogFile,
@@ -13,8 +13,9 @@ import {
   rebuildStaticCatalog,
   updateCodexModelCatalog,
   writeStaticCatalog,
-} from "../src/model-state.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+} from "../apps/gateway/src/model-composition.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
+import { routingPluginFamily } from "./plugin-routing-fixture.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 const hash = (source: string): string => createHash("sha256").update(source).digest("hex");
@@ -25,6 +26,7 @@ async function fixture(run: (paths: ResolvedPaths, config: GatewayConfig) => Pro
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://upstream.invalid/v1",
     catalogPath: paths.catalogFile, upstreamOnly: true,
@@ -48,12 +50,12 @@ function agyDependencies(paths: ResolvedPaths, fetchCatalog: AgyDependencies["fe
 test("静态目录合并裸上游与 agent，排除规则只作用于本地模型且保留元数据", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
     config.excludedModels = ["gpt-test", "agy/hidden"];
-    const upstreamSource = fs.readFileSync(config.catalogPath, "utf8");
+    const upstreamSource = fs.readFileSync(paths.catalogFile, "utf8");
     const kept = { slug: "agy/visible", priority: 7, base_instructions: "原始提示词", supported_reasoning_levels: [{ effort: "high" }] };
-    const catalog = writeStaticCatalog(paths, config, [kept, { slug: "agy/hidden" }]);
+    const catalog = writeStaticCatalog(paths, config, [kept, { slug: "agy/hidden" }], (model) => Boolean(routingPluginFamily(model)));
     assert.deepEqual(catalog.models.map((entry) => entry.slug), ["gpt-test", "agy/visible"]);
     assert.deepEqual(catalog.models[1], kept);
-    assert.equal(fs.readFileSync(config.catalogPath, "utf8"), upstreamSource);
+    assert.equal(fs.readFileSync(paths.catalogFile, "utf8"), upstreamSource);
     assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), catalog);
   });
 });
@@ -64,7 +66,7 @@ test("重复或空静态目录拒绝覆盖 last-good，空上游允许仅 agent 
     const goodSource = fs.readFileSync(codexCatalogFile(paths), "utf8");
     assert.throws(() => writeStaticCatalog(paths, config, [{ slug: "gpt-test" }]), /重复 ID/);
     assert.equal(fs.readFileSync(codexCatalogFile(paths), "utf8"), goodSource);
-    fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [] }));
+    fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [] }));
     assert.throws(() => writeStaticCatalog(paths, config, []), /静态模型目录为空/);
     assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), good);
     assert.deepEqual(writeStaticCatalog(paths, config, [{ slug: "agy/only" }]).models, [{ slug: "agy/only" }]);

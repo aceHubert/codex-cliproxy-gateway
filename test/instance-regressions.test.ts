@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 
 /** 模块模拟只存在于子进程，避免污染其他测试；所有系统操作和网络都被替换。 */
 function isolatedScenario(scenario: string): void {
@@ -12,8 +12,8 @@ function isolatedScenario(scenario: string): void {
     import fs from "node:fs";
     import path from "node:path";
     import { mock } from "bun:test";
-    import { resolvePaths, runWithInstancePaths, instanceMarker } from "./src/paths.ts";
-    import { GATEWAY_CONFIG_VERSION } from "./src/config.ts";
+    import { resolvePaths, runWithInstancePaths, instanceMarker } from "./apps/gateway/src/paths.ts";
+    import { GATEWAY_CONFIG_VERSION } from "./apps/gateway/src/config.ts";
     const base = process.env.HOME;
     const rootA = process.env.CODEX_CLIPROXY_HOME;
     const rootB = path.join(base, "instance-b");
@@ -21,8 +21,8 @@ function isolatedScenario(scenario: string): void {
     const pathsA = resolvePaths();
     const calls = [];
     let failInstall = true;
-    const launchd = await import("./src/launchd.ts");
-    mock.module("./src/launchd.ts", () => ({
+    const launchd = await import("./apps/gateway/src/launchd.ts");
+    mock.module("./apps/gateway/src/launchd.ts", () => ({
       ...launchd,
       launchAgentStatus: () => null,
       startLaunchAgent: () => { calls.push("start"); },
@@ -31,14 +31,14 @@ function isolatedScenario(scenario: string): void {
       installLaunchAgent: () => { calls.push("install"); if (failInstall) throw new Error("模拟服务启动失败"); },
       startWebUiLaunchAgent: () => { calls.push("write-ui-plist"); }
     }));
-    const keychain = await import("./src/keychain.ts");
-    mock.module("./src/keychain.ts", () => ({ ...keychain,
+    const keychain = await import("./apps/gateway/src/keychain.ts");
+    mock.module("./apps/gateway/src/keychain.ts", () => ({ ...keychain,
       readApiKey: () => "", saveApiKey: () => {}, deleteApiKey: () => {}
     }));
     mock.module("node:child_process", () => ({
       execFileSync: () => { throw new Error("测试禁止执行系统命令"); }
     }));
-    const { runCli } = await import("./src/cli.ts");
+    const { runCli } = await import("./apps/gateway/src/cli.ts");
     const printed = [];
     console.log = (value) => printed.push(String(value));
     globalThis.fetch = async (input) => {
@@ -97,7 +97,7 @@ test("status 与 web 拒绝异实例健康响应，不能启动服务或打开�
     globalThis.fetch = async () => Response.json({ ok: true }, { headers: { "x-ccp-instance": instanceMarker(rootB) } });
     await runCli(["status"]);
     assert.notEqual(JSON.parse(printed.at(-1)).health, "ok");
-    await assert.rejects(runCli(["web", "--daemon"]), /different codex-cliproxy instance/);
+    await assert.rejects(runCli(["web", "--daemon"]), /different agent-proxy instance/);
     assert.deepEqual(calls, []);
   `);
 });
@@ -108,7 +108,7 @@ test("web 拒绝已占用 UI 端口的异实例，不能改写 plist 或打开�
     globalThis.fetch = async (url) => Response.json({ ok: true }, {
       headers: { "x-ccp-instance": instanceMarker(String(url).endsWith("/healthz") ? rootA : rootB) }
     });
-    await assert.rejects(runCli(["web", "--daemon"]), /different codex-cliproxy instance/);
+    await assert.rejects(runCli(["web", "--daemon"]), /different agent-proxy instance/);
     assert.deepEqual(calls, []);
   `);
 });
@@ -137,7 +137,7 @@ test("卸载恢复安装记录的独立客户端目录，省略 CODEX_HOME 也�
 
 test("网关健康身份固定在构造时的上下文，后续异实例调用不会更换标记", { timeout: 60_000 }, () => {
   isolatedScenario(`
-    const { createGatewayHandler } = await import("./src/gateway.ts");
+    const { createGatewayHandler } = await import("./apps/gateway/src/gateway-composition.ts");
     const pathsB = resolvePaths({ HOME: base, CODEX_CLIPROXY_HOME: rootB });
     const handler = runWithInstancePaths(pathsA, () => createGatewayHandler(configFor(rootA), ""));
     try {
@@ -158,7 +158,7 @@ test("显式将 CODEX_HOME 设置为默认目录仍在安装写入前拒绝", { 
 
 test("托管切手动中断后卸载释放自己的遗留归属，保留客户端配置", { timeout: 60_000 }, () => {
   isolatedScenario(`
-    const { claimCodexHome } = await import("./src/codex-ownership.ts");
+    const { claimCodexHome } = await import("./apps/gateway/src/codex-ownership.ts");
     const clientPaths = resolvePaths({ HOME: base, CODEX_HOME: codexA, CODEX_CLIPROXY_HOME: rootA });
     claimCodexHome(clientPaths);
     const content = 'custom_setting = "manual"\\n';
@@ -172,7 +172,7 @@ test("托管切手动中断后卸载释放自己的遗留归属，保留客户�
 
 test("客户端恢复后的卸载重试不再修改已交给另一实例的配置或归属", { timeout: 60_000 }, () => {
   isolatedScenario(`
-    const { claimCodexHome } = await import("./src/codex-ownership.ts");
+    const { claimCodexHome } = await import("./apps/gateway/src/codex-ownership.ts");
     const pathsB = resolvePaths({ HOME: base, CODEX_HOME: codexA, CODEX_CLIPROXY_HOME: rootB });
     claimCodexHome(pathsB);
     const content = 'openai_base_url = "http://instance-b.invalid/v1"\\n';
@@ -211,7 +211,7 @@ test("成功手动安装回收转换或卸载中断留下的自身声明，不�
     { codexConfigManaged: true, uninstallClientRestored: true },
   ]) {
     isolatedScenario(`
-      const { claimCodexHome } = await import("./src/codex-ownership.ts");
+      const { claimCodexHome } = await import("./apps/gateway/src/codex-ownership.ts");
       const clientPaths = resolvePaths({ HOME: base, CODEX_HOME: codexA, CODEX_CLIPROXY_HOME: rootA });
       claimCodexHome(clientPaths);
       const content = 'custom_setting = "manual"\\n';

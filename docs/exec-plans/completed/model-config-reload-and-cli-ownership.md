@@ -4,7 +4,7 @@
 
 将安装后的模式切换归入 `config --upstream-only on|off`，保留 `install --upstream-only`；`models` 只读取已保存的 `upstreamOnly`，更新选择、排除规则和目录，并据此决定是否更新 Codex 静态模型文件。模型变更通过共享更新流程热加载网关模型状态，不再因模型变化重启服务；配置模式切换等设置仍保留现有网关重启流程。CLI 与 Web UI 等待目录、受管 TOML 和安装状态就绪后，再按用户选择重载 Codex。
 
-状态：已完成并归档。命令迁移、共享目录更新、跨进程模型热加载与静态模式生命周期已落地，bun run check 通过（类型检查、886 项测试、UI/CLI 构建）。以下背景描述实施前的问题，行为约定保留已确认边界。
+状态：已完成并归档。命令迁移、共享目录更新、跨进程模型热加载与静态模式生命周期已落地，bun run check 通过（类型检查、886 项测试、UI/CLI 构建）。旧协议抽离计划已由两份现行计划按职责取代：网关插件接口与生命周期见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)，协议转换封装与 agent 适配见 [llm-bridge 计划](../active/llm-bridge-conversion-compatibility.md)。本文件保留已完成工作的历史结果，不要求重新实施。以下背景描述实施前的问题，行为约定保留已确认边界。
 
 ## 范围
 
@@ -28,7 +28,7 @@
 - Web UI 当前可能先保存模型选择并重启 Codex，再保存其他配置；组合修改必须先收敛最终配置，再完成目录和 TOML 更新。
 - 2026-08-30 曾将 `config --cpa-only` 删除并迁回 models，以便配合目录校验和 `--restart-codex`。本次迁入 config 必须同时恢复客户端重载职责，见 [历史记录](../../histories/2026-08/20260830-1707-review-fixes.md)。
 - 相关代码：`src/cli.ts`、`src/config-update.ts`、`src/upstream-catalog.ts`、`src/gateway.ts`、`src/webui.ts`、`src/ui/` 与各 agent 目录模块。
-- 相关计划：[协议拆分计划 §6](../active/protocol-conversion-extraction.md#6-内建-agent-路由插件试验registerprefix-fn) 提供 agent 的目录与生命周期契约；[upstream-only 请求路由计划](upstream-only-agent-adapters.md) 仅调整请求路径中对已保存模式的解释。
+- 相关计划：[网关插件接口与生命周期（monorepo 计划 S2）](codex-gateway-monorepo.md#s2网关插件接口与-default) 承接 agent 插件注册与生命周期契约；[llm-bridge 封装与协议兼容](../active/llm-bridge-conversion-compatibility.md) 承接协议转换与 agent 适配；[upstream-only 请求路由计划](upstream-only-agent-adapters.md) 记录已完成的请求路径与保存模式边界。
 
 ## 行为约定
 
@@ -119,8 +119,8 @@ codex-cliproxy models --exclude agy/example-model --restart-codex
 
 - 本计划管理命令、目录、模型状态和客户端加载；[upstream-only 请求路由计划](upstream-only-agent-adapters.md) 只处理读取已保存模式后的请求分派、启用与安全边界。
 - 两份计划可独立推进、独立验证；命令迁移和模型热加载不与 upstream-only 请求变更捆绑验收。
-- agent 模型合成需要 agent 提供目录与生命周期接口，复用 [协议拆分计划 §6](../active/protocol-conversion-extraction.md#6-内建-agent-路由插件试验registerprefix-fn) 的契约；目录操作不通过请求前缀注册表派发。
-- 接口可以先在现有适配器上落实，再与协议拆分统一。实现顺序不要求请求路由改造先完成，也不因此扩大本计划为转换器重构。
+- agent 模型合成需要 agent 提供目录与生命周期接口，后续插件契约见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)；目录操作不通过请求前缀注册表派发。
+- 接口可以先在现有适配器上落实，再按 monorepo 插件契约接入。实现顺序不要求请求路由改造先完成；协议转换封装和 agent 协议适配由 [llm-bridge 计划](../active/llm-bridge-conversion-compatibility.md) 承接，不属于本计划。
 
 ## 风险
 
@@ -183,6 +183,6 @@ codex-cliproxy models --exclude agy/example-model --restart-codex
 - 2026-10-10：按用户确认将命令与管理契约拆为本独立计划，upstream-only-agent-adapters 仅承担读取配置后的请求逻辑；两计划不捆绑验收。
 - 2026-10-10：实施前独立快照、最终空目录拒绝与通知机制待收敛；实施时采用运行主目录的 `codex-catalog.json`，分离上游源目录与 Codex 合并结果，最终静态目录为空时拒绝提交并保留原数据。
 - 2026-10-10：跨进程采用权限 `0600` 的本地通知与回执，串行消费待完成通知并保留最近 64 条回执；无需增加模型端口 API，保留 UI 与模型流量隔离。
-- 2026-10-10：实现继续使用现有 agent 分派顺序与目录接口；`register(prefix, fn)`/`setDefault()` 注册器提取仍属于协议拆分计划，本轮未实现注册器，不影响两份计划分别验收。
+- 2026-10-10：实现继续使用现有 agent 分派顺序与目录接口；网关插件注册器提取由现行 monorepo 计划 S2 承接，本计划未实现注册器，不影响两份已完成计划分别验收。协议转换封装与 agent 适配由现行 llm-bridge 计划承接。
 - 2026-10-10：完成最终验证。修复审查发现的普通推理等待无关目录初始化、旧通知重复处理、并发修订丢回执和启动旧静态快照覆盖问题，并补充对应回归测试。
 - 2026-10-10：按后续明确要求，将 Web 的 upstreamOnly 收窄为只读展示，删除编辑开关与提交字段，服务端拒绝任何修改该字段的请求。CLI config 模式切换及 Web 模型更新保持原职责。只读调整后再次运行 bun run check，886 项测试、类型检查与构建全部通过。

@@ -4,13 +4,10 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - ".github/**"
       - ".gitignore"
       - "README.md"
       - "commitlint.config.cjs"
       - "docs/**"
-      - "lerna.json"
-      - "scripts/**"
       - "test/**"
   workflow_dispatch:
 

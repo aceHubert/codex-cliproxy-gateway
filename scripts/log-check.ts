@@ -13,8 +13,9 @@
 //   08-19 19:06:20  [realtime] call-create api.openai.com/v1/live  201  923ms
 import fs from "node:fs";
 import path from "node:path";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 
-const DEFAULT_DIR = path.join(process.env.HOME ?? ".", ".codex-cliproxy-gateway", "logs");
+const DEFAULT_DIR = resolvePaths().logDir;
 
 interface Options {
   dir: string;

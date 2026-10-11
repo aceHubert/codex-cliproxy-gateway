@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { ZcodeEndpointRouting } from "../src/zcode/endpoint-routing.ts";
+import test from "./host-test.ts";
+import { ZcodeEndpointRouting } from "@agent-proxy/zcode/endpoint-routing";
 
 const identity = { appVersion: "3.11.2", language: "en-US", timezone: "Asia/Shanghai", platform: "darwin", arch: "arm64", osVersion: "25.6.0" };
 const FROM = "https://api.z.ai/api/anthropic/v1/messages";

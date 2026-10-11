@@ -4,9 +4,9 @@ import path from "node:path";
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
-import { test } from "node:test";
+import { test } from "./host-test.ts";
 import assert from "node:assert/strict";
-import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "../src/zcode/config.ts";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "@agent-proxy/zcode/config";
 
 const URL_A = "https://api.z.ai/api/anthropic";
 const URL_B = "https://open.bigmodel.cn/api/anthropic/v1";

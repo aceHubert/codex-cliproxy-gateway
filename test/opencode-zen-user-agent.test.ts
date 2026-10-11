@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   OPENCODE_ZEN_CLIENT_DIST_TAG,
   OPENCODE_ZEN_CLIENT_VERSION_URL,
   createOpencodeZenUserAgentStore,
   parseOpencodeZenClientVersion,
   opencodeZenUserAgent,
-} from "../src/opencode/user-agent.ts";
-import { OPENCODE_ZEN_CLIENT_USER_AGENT, buildOpencodeZenUpstreamHeaders } from "../src/opencode/fingerprint.ts";
-import { createOpenCodeSessionId } from "../src/opencode/session.ts";
+} from "@agent-proxy/opencode-zen/user-agent";
+import { OPENCODE_ZEN_CLIENT_USER_AGENT, buildOpencodeZenUpstreamHeaders } from "@agent-proxy/opencode-zen/fingerprint";
+import { createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
 
 const SESSION = createOpenCodeSessionId(1_000_000, "test-session");
 /** 快照值（fingerprint-data.json）：官方 GA opencode2 2.0.26，渠道 latest。 */

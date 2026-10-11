@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   CREDITS_PATTERN,
   buildCodebuddyCatalog,
@@ -22,10 +22,10 @@ import {
   parseCodebuddyConfigData,
   projectCodebuddyCatalog,
   synthesizeCodebuddyEntry,
-} from "../src/codebuddy/catalog.ts";
-import type { CodebuddyCredential } from "../src/codebuddy/credentials.ts";
-import { catalogRevision } from "../src/codebuddy/request-context.ts";
-import { invalidateModelsCache } from "../src/catalog.ts";
+} from "@agent-proxy/codebuddy/catalog";
+import type { CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
+import { catalogRevision } from "@agent-proxy/codebuddy/request-context";
+import { invalidateModelsCache } from "../apps/gateway/src/catalog.ts";
 
 test("manual 目录过期与账号变更不触发网络，reload 读取命令写入的目录", { timeout: 60_000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-manual-"));

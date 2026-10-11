@@ -20,9 +20,17 @@ function hasReachableTag(): boolean {
   ).exitCode === 0;
 }
 
-export function changelogArgs(firstCommit?: string): string[] {
+export function fixedReleaseVersion(metadata: unknown): string {
+  const version = metadata && typeof metadata === "object" && "version" in metadata ? metadata.version : undefined;
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(version)) {
+    throw new Error("统一 CHANGELOG 需要 lerna.json 中的 fixed 版本；请检查 version 字段。");
+  }
+  return version;
+}
+
+export function changelogArgs(firstCommit?: string, releaseVersion?: string): string[] {
   // 发布流程只允许使用已安装依赖，避免 bunx 隐式安装导致 bun.lock 漂移。
-  const args = ["bunx", "--no-install", "lerna-changelog", "--next-version-from-metadata"];
+  const args = ["bunx", "--no-install", "lerna-changelog", releaseVersion ? `--next-version=v${releaseVersion}` : "--next-version-from-metadata"];
   return firstCommit ? [...args, `--from=${firstCommit}`] : args;
 }
 
@@ -60,11 +68,13 @@ export function stageChangelog(cwd = globalThis.process.cwd()): void {
 }
 
 async function main(): Promise<void> {
+  // 根 private 工具包不会随 fixed 产品包升级；统一日志必须消费 Lerna 的产品版本。
+  const releaseVersion = fixedReleaseVersion(await Bun.file("lerna.json").json());
   const firstCommit = hasReachableTag()
     ? undefined
     : git("rev-list", "--max-parents=0", "HEAD");
   const changelog = Bun.spawn(
-    changelogArgs(firstCommit),
+    changelogArgs(firstCommit, releaseVersion),
     {
       env: { ...Bun.env, FORCE_COLOR: "0" },
       stdout: "pipe",

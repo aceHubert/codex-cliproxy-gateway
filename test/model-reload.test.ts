@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test } from "./host-test.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createModelReloadReceiver,
@@ -11,15 +11,16 @@ import {
   reloadGatewayModels,
   requestModelReload,
   type ModelReloadFetch,
-} from "../src/model-reload.ts";
-import { instanceMarker, resolvePaths } from "../src/paths.ts";
-import { atomicWrite } from "../src/toml.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+} from "../apps/gateway/src/model-reload.ts";
+import { instanceMarker, resolvePaths } from "../apps/gateway/src/paths.ts";
+import { atomicWrite } from "../apps/gateway/src/toml.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function fixture(): { paths: ResolvedPaths; config: GatewayConfig; cleanup(): void } {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-model-reload-"));
   const paths = resolvePaths({ HOME: home }, path.join(home, "runtime"));
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.example", upstreamBaseUrl: "https://upstream.example",
     catalogPath: paths.catalogFile, selectedModels: ["before"],
@@ -289,7 +290,7 @@ test("其他实例及没有身份标记的响应不能确认重载", async () =>
     for (const headers of [new Headers({ "x-ccp-instance": "wrong" }), new Headers()]) {
       await assert.rejects(reloadGatewayModels(f.paths, f.config, {
         fetch: (async () => Response.json({ ok: true }, { headers })) as ModelReloadFetch,
-      }), /instance marker|different codex-cliproxy instance/);
+      }), /instance marker|different agent-proxy instance/);
     }
   } finally { f.cleanup(); }
 });

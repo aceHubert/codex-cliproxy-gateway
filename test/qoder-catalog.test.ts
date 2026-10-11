@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   buildQoderCatalog,
   createQoderCatalogStore,
@@ -14,8 +14,8 @@ import {
   qoderRegionOf,
   qoderUpstreamModel,
   QODER_CN_PREFIX,
-} from "../src/qoder/catalog.ts";
-import type { QoderCredentials } from "../src/qoder/credentials.ts";
+} from "@agent-proxy/qoder/catalog";
+import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
 
 function credential(identity = "account-one"): QoderCredentials {
   return { region: "intl", clientProfile: "cli", identity, accountUid: identity, authDirectory: "/synthetic/.auth",

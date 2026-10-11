@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { createAgyResponse } from "../src/agy/response.ts";
+import test from "./host-test.ts";
+import { createAgyResponse } from "@agent-proxy/agy/response";
 
 const TIMEOUT = { timeout: 30_000 };
 const TOOLS = new Map([

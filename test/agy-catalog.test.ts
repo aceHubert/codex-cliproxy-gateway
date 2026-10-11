@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,9 +12,9 @@ import {
   mergeAgyCatalog,
   parseAgyCatalogData,
   resolveAgyFamilyModel,
-} from "../src/agy/catalog.ts";
-import type { AgyModelFamily } from "../src/agy/catalog.ts";
-import { loadAgyCredentials } from "../src/agy/credentials.ts";
+} from "@agent-proxy/agy/catalog";
+import type { AgyModelFamily } from "@agent-proxy/agy/catalog";
+import { loadAgyCredentials } from "@agent-proxy/agy/credentials";
 
 const TIMEOUT = { timeout: 30_000 };
 

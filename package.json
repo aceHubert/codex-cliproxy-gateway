@@ -1,36 +1,27 @@
 {
-  "name": "codex-cliproxy-gateway",
+  "name": "agent-proxy-monorepo",
   "version": "0.10.0",
   "description": "A cross-platform Bun-powered local gateway that keeps Codex ChatGPT OAuth for native models and routes cliproxy/* models to CLIProxyAPI.",
   "type": "module",
-  "bin": {
-    "codex-cliproxy": "./dist/index.js"
-  },
-  "files": [
-    "CHANGELOG.md",
-    "dist",
-    "models.json",
-    "schemas/gateway-config.schema.json",
-    "README.md",
-    "LICENSE"
-  ],
   "scripts": {
-    "dev": "bun src/index.ts",
+    "dev": "bun run build:packages && bun apps/gateway/src/index.ts",
     "dev:ui": "CODEX_CLIPROXY_UI_DEV=1 bun run dev web && vite --config vite.config.ts",
     "build:ui": "bun scripts/build-ui.ts",
-    "build": "bun run build:ui && bun build src/index.ts --target=bun --format=esm --outfile=dist/index.js",
+    "build": "lerna run build",
+    "build:packages": "lerna run build --ignore @agent-proxy/gateway",
     "changelog": "bun scripts/changelog.ts",
-    "test": "bun test",
-    "typecheck": "tsc --noEmit",
-    "check": "bun run typecheck && bun test && bun run build",
+    "test": "bun run build:packages && bun scripts/run-tests.ts",
+    "typecheck": "bun run build:packages && tsc --noEmit && lerna run typecheck",
+    "check:boundaries": "bun scripts/check-boundaries.ts",
+    "check": "bun run check:boundaries && bun run build && bun run typecheck && bun run test",
     "commit": "git-cz",
     "commitlint": "commitlint --edit",
-    "prepack": "bun run release:check",
     "preversion": "bun run release:check",
     "version": "bun run changelog",
-    "release:check": "if [ \"$CODEX_CLIPROXY_SKIP_TESTS\" = \"1\" ]; then bun run typecheck && bun run build; else bun run check; fi",
-    "release:version": "lerna version",
-    "release": "lerna publish from-git"
+    "release:check": "if [ \"$CODEX_CLIPROXY_SKIP_TESTS\" = \"1\" ]; then bun run check:boundaries && bun run typecheck && bun run build; else bun run check; fi && bun scripts/pack-check.ts",
+    "release:version": "bun scripts/release-version.ts",
+    "release": "lerna publish from-git",
+    "pack:check": "bun run build && bun scripts/pack-check.ts"
   },
   "keywords": [
     "codex",
@@ -41,13 +32,8 @@
     "claude",
     "gemini"
   ],
-  "dependencies": {
-    "bytes": "^3.1.2",
-    "i18next": "^26.4.2",
-    "llm-bridge": "2.0.1",
-    "react-i18next": "^17.0.16"
-  },
   "devDependencies": {
+    "i18next": "^26.4.2",
     "@anthropic-ai/sdk": "0.56.0",
     "@commitlint/cli": "^21.2.2",
     "@commitlint/config-conventional": "^21.2.2",
@@ -67,7 +53,15 @@
     "typescript": "^5.9.3",
     "vite": "^8.3.0",
     "vite-plugin-singlefile": "^2.3.3",
-    "yorkie": "^2.0.0"
+    "yorkie": "^2.0.0",
+    "@agent-proxy/models": "workspace:*",
+    "@agent-proxy/plugin-api": "workspace:*",
+    "@agent-proxy/llm-bridge": "workspace:*",
+    "@agent-proxy/zcode": "workspace:*",
+    "@agent-proxy/codebuddy": "workspace:*",
+    "@agent-proxy/qoder": "workspace:*",
+    "@agent-proxy/agy": "workspace:*",
+    "@agent-proxy/opencode-zen": "workspace:*"
   },
   "engines": {
     "bun": ">=1.2.0"
@@ -89,7 +83,9 @@
   "trustedDependencies": [
     "yorkie"
   ],
-  "publishConfig": {
-    "access": "public"
-  }
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ]
 }

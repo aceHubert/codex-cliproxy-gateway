@@ -1,5 +1,5 @@
 {
-  "name": "codex-cliproxy",
+  "name": "agent-proxy",
   "description": "Vision routing plugins for text-only coding models.",
   "owner": {
     "name": "aceHubert"
