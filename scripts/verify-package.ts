@@ -9,6 +9,7 @@ const manifest = await Bun.file(path.join(directory, "package.json")).json() as 
 };
 if (manifest.private) throw new Error(`${manifest.name} 不属于发布产品包。`);
 if (manifest.publishConfig?.access !== "public") throw new Error(`${manifest.name} 缺少 public 发布权限声明。`);
+if (!(await Bun.file(path.join(directory, "README.md")).text()).trim()) throw new Error(`${manifest.name} 缺少非空的包介绍 README.md。`);
 for (const dependencies of [manifest.dependencies, manifest.optionalDependencies, manifest.peerDependencies]) {
   if (dependencies?.["@agent-proxy/models"]) throw new Error(`${manifest.name} 发布包含私有模型运行时依赖。`);
 }

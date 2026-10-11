@@ -17,7 +17,8 @@
     "./*.json": "./dist/*.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "bun ../../scripts/build-library.ts",
