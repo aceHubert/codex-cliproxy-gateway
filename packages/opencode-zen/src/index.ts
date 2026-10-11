@@ -616,6 +616,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
 }
 
 export { isOpencodeZenModel, mergeOpencodeZenCatalog };
+export { OPENCODE_ZEN_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
 export function createOpencodeZenAdapter<Config extends AgentConfig>(config: Config, dependencies: OpencodeZenDependencies = {}) {
   return bindHostMethods(buildOpencodeZenAdapter(config, dependencies));

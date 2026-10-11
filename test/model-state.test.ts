@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import test from "./host-test.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { managedCatalogFiles, resolvePaths } from "../apps/gateway/src/paths.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import {
   applyModelCatalogToml,
@@ -159,9 +159,9 @@ test("非受管或不可解析的目录键在刷新前拒绝，受管旧目录�
     assert.equal(requests, 0);
     assert.equal(fs.existsSync(codexCatalogFile(paths)), false);
     const invalid = "model_catalog_json = \"\"\"unparseable\"\"\"\n";
-    assert.throws(() => applyModelCatalogToml(invalid, false, paths, codexCatalogFile(paths)), /cannot be parsed/);
+    assert.throws(() => applyModelCatalogToml(invalid, false, paths, codexCatalogFile(paths), managedCatalogFiles(paths)), /cannot be parsed/);
     const source = `model_catalog_json = ${JSON.stringify(paths.catalogFile)}\n`;
-    const migrated = applyModelCatalogToml(source, true, paths, codexCatalogFile(paths));
+    const migrated = applyModelCatalogToml(source, true, paths, codexCatalogFile(paths), managedCatalogFiles(paths));
     assert.equal(migrated.previousCatalog, paths.catalogFile);
     assert.equal(migrated.patchedToml, `model_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}\n`);
   });

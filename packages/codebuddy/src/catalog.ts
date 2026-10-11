@@ -82,6 +82,14 @@ function legacyCodebuddyCatalogFileNames(product: "cli" | "work"): string[] {
   return ["cn", "intl"].map((region) => `${stem}-${region}-catalog.json`);
 }
 
+/** codebuddy 在缓存目录的全部落盘产物：现行产品缓存加旧版产品×地域命名残留；卸载清理与受管值守卫经组合层聚合消费。 */
+export const CODEBUDDY_RUNTIME_ARTIFACTS: readonly string[] = Object.freeze(
+  (["cli", "work"] as const).flatMap((product) => [
+    codebuddyCatalogFileName(product),
+    ...legacyCodebuddyCatalogFileNames(product),
+  ]),
+);
+
 /** 前缀族 → 裸模型 ID；档位模型原样透传，不做本地展开。 */
 export function codebuddyUpstreamModel(model: string): string | undefined {
   const route = codebuddyModelRoute(model);
