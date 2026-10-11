@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/zcode",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Agent Proxy zcode 插件；保留基线转换行为。",
   "type": "module",
   "exports": {

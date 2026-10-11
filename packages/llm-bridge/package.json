@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/llm-bridge",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Agent Proxy 的 llm-bridge 协议转换与流式处理接口。",
   "type": "module",
   "exports": {
