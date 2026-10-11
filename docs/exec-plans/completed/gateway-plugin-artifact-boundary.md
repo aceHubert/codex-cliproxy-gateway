@@ -67,11 +67,11 @@
 
 ## 进度记录
 
-- [ ] 里程碑 1：复核五家产物全集与 `cacheDirectory` 覆盖场景，确定导出形态。
-- [ ] 里程碑 2a：五个插件包导出产物清单常量。
-- [ ] 里程碑 2b：`gateway-composition.ts` 聚合 + `managedCatalogFiles` 收窄。
-- [ ] 里程碑 2c：`removeManagedRuntimeFiles` 与 `applyModelCatalogToml` 改造完成。
-- [ ] 里程碑 3：测试补齐、`check` + `pack:check` 通过、手工卸载演练、历史记录与归档。
+- [x] 里程碑 1：复核五家产物全集与 `cacheDirectory` 覆盖场景，确定导出形态（包级静态导出 `<PKG>_RUNTIME_ARTIFACTS`，文件名与落盘点同源）。
+- [x] 里程碑 2a：五个插件包导出产物清单常量（codebuddy legacy 命名并入其清单，共 12 文件）。
+- [x] 里程碑 2b：`gateway-composition.ts` 聚合（`installedPluginArtifactFiles` + `managedRuntimeCatalogFiles`）+ `managedCatalogFiles` 收窄为网关自有文件。
+- [x] 里程碑 2c：`removeManagedRuntimeFiles` 与 `applyModelCatalogToml` 改造完成（守卫清单必传注入，`model-composition` 转发层统一注入，webui 自动生效）。
+- [x] 里程碑 3：测试补齐（聚合清单结构、守卫受管值全集、卸载清理全集）、`bun run check`（971 测试通过）与 `pack:check` 通过、临时 HOME 手工卸载演练通过、历史记录（`docs/histories/2026-10/20261011-2348-plugin-artifact-boundary.md`）并归档。
 
 ## 决策记录
 
@@ -80,3 +80,7 @@
   - 聚合位置定在 `gateway-composition.ts`：它是 AGENTS.md 定义的显式装配入口，已是唯一同时 import 五家插件包的业务模块，不新增依赖边。
   - `model-state.ts` 保持叶子模块，`applyModelCatalogToml` 通过参数接收受管清单，由调用方注入，规避循环引用。
   - codebuddy 的 4 个 legacy 地域命名文件并入其导出清单：现行代码只在写入新产品文件时顺手清理旧文件，已停用机器上的残留只能由卸载清理兜底。
+- 2026-10-11（实施）：
+  - `applyModelCatalogToml` 的 `managedFiles` 设为必传参数而非可选默认：默认值若是窄清单，未来调用方漏传会让守卫静默拒绝历史插件指向；必传让遗漏成为编译错误。
+  - `model-composition.ts` 的 `updateCodexModelCatalog` 转发层统一注入 `managedRuntimeCatalogFiles(paths)`：cli 的 models 命令与 webui 的目录更新共用该转发层，注入一次两边生效；`model-state.ts` 的 `updateCodexModelCatalog` 保留 `managedFiles = managedCatalogFiles(paths)` 兜底默认，叶子测试无需感知组合层。
+  - 聚合产出两个公开函数：`installedPluginArtifactFiles`（纯插件产物，测试与边界断言用）与 `managedRuntimeCatalogFiles`（自有 + 插件全集，卸载清理与守卫共用），消费点不自行拼接。
