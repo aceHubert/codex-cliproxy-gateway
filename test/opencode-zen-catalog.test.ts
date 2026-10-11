@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   OPENCODE_ZEN_DISPLAY_PREFIX,
   OPENCODE_ZEN_PREFIX,
@@ -18,10 +18,10 @@ import {
   opencodeZenDefaultEffort,
   opencodeZenDisplayName,
   opencodeZenUpstreamModel,
-} from "../src/opencode/catalog.ts";
-import type { OpencodeZenModelMetadata } from "../src/opencode/catalog.ts";
-import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "../src/opencode/fingerprint.ts";
-import type { ModelCatalog } from "../src/types.ts";
+} from "@agent-proxy/opencode-zen/catalog";
+import type { OpencodeZenModelMetadata } from "@agent-proxy/opencode-zen/catalog";
+import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "@agent-proxy/opencode-zen/fingerprint";
+import type { ModelCatalog } from "../apps/gateway/src/types.ts";
 
 /** 零计费元数据条目（免费模型的默认形状）。 */
 const freeMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0, output: 0 }, ...extra });

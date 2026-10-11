@@ -1,10 +1,10 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import {
   compileModelOverrides,
   fetchCliProxyCatalog,
   fetchUpstreamCatalog,
-} from "../src/catalog.ts";
+} from "../apps/gateway/src/catalog.ts";
 
 test("上游统一目录排除 visibility 为 hide 的 CLIProxy 模型", async () => {
   const originalFetch = globalThis.fetch;

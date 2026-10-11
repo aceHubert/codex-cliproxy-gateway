@@ -1,0 +1,1670 @@
+import fs from "node:fs";
+import path from "node:path";
+import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
+import { readApiKey } from "./keychain.ts";
+import { instanceMarker, resolvePaths } from "./paths.ts";
+import { PluginRegistry, identifyClientEndpoint } from "@agent-proxy/plugin-api";
+import type { RequestBody } from "@agent-proxy/plugin-api";
+import {
+  dialUpstreamWebSocket,
+  forwardedHeaders,
+  isRealtimeCallRequest,
+  proxyRealtimeCall,
+  realtimeAccessError,
+  realtimeWebSocketHandler,
+  realtimeWebSocketTarget,
+  websocketUrl,
+} from "./realtime.ts";
+import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
+import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
+import { codexCatalogFile, writeStaticCatalog } from "./model-state.ts";
+import { createModelReloadReceiver } from "./model-reload.ts";
+import { atomicWrite } from "./toml.ts";
+import {
+  logExchange,
+  logGroupFromPath,
+  logRealtimeEvent,
+  pruneLogDir,
+  requestLogDir,
+  retainLogFile,
+  websocketLogFile,
+  localTime,
+  maskedHeaders,
+} from "./request-log.ts";
+import type { RequestLogSink, LogNamespace } from "./request-log.ts";
+import { logGatewayError, logRequestSummary } from "./process-log.ts";
+import { webUiPort } from "./ui-port.ts";
+import type { ProcessLogTarget } from "./types.ts";
+import type { GatewayConfig, ModelCatalog, ResolvedPaths } from "./types.ts";
+import { MOUNT_PATH, OFFICIAL_BASE_URL } from "./types.ts";
+import { configuredCatalogFile, configuredModelPrefix } from "./upstream-catalog.ts";
+
+const HOP_BY_HOP_HEADERS = new Set([
+  "connection",
+  "keep-alive",
+  "proxy-authenticate",
+  "proxy-authorization",
+  "te",
+  "trailer",
+  "transfer-encoding",
+  "upgrade",
+  "host",
+  "content-length",
+]);
+
+const COMPACTION_PREFIX = "ocx1:";
+const COMPACTION_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another LLM that will resume the task.
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences
+- What remains to be done (clear next steps)
+- Any critical data, examples, or references needed to continue
+Be concise, structured, and focused on helping the next LLM seamlessly continue the work.`;
+const SUMMARY_PREFIX = "Another language model started to solve this problem and produced a summary of its thinking process. You also have access to the state of the tools that were used by that language model. Use this to build on the work that has already been done and avoid duplicating work.\nHere is the summary produced by the other language model, use the information in this summary to assist with your own analysis:";
+const OPAQUE_COMPACTION_NOTE = "[earlier conversation was compacted; the summary is stored in a format this model cannot read]";
+const COMPACT_V1_RETAINED_CHAR_BUDGET = 80_000;
+
+type Route =
+  | { kind: "cliproxy"; upstreamModel: string }
+  | { kind: "official"; upstreamModel: unknown };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isGptModel(model: string): boolean {
+  return model.toLowerCase().startsWith("gpt-");
+}
+
+function uuid(): string {
+  return crypto.randomUUID().replaceAll("-", "");
+}
+
+function encodeCompactionSummary(summary: string): string {
+  return COMPACTION_PREFIX + Buffer.from(summary, "utf8").toString("base64");
+}
+
+function decodeCompactionSummary(value: unknown): string | null {
+  if (typeof value !== "string" || !value.startsWith(COMPACTION_PREFIX)) return null;
+  const encoded = value.slice(COMPACTION_PREFIX.length);
+  if (!encoded || encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) return null;
+  return Buffer.from(encoded, "base64").toString("utf8");
+}
+
+function compactionMessage(item: Record<string, unknown>): Record<string, unknown> {
+  const decoded = decodeCompactionSummary(item.encrypted_content);
+  return {
+    type: "message",
+    role: "user",
+    content: [{
+      type: "input_text",
+      text: decoded?.trim()
+        ? `${SUMMARY_PREFIX}\n\n${decoded}`
+        : OPAQUE_COMPACTION_NOTE,
+    }],
+  };
+}
+
+export function rewriteCompactionHistory(input: unknown): unknown {
+  if (!Array.isArray(input)) return input;
+  return input.map((item) => {
+    if (!isRecord(item) || item.type !== "compaction") return item;
+    // 本地 ocx1 摘要可还原为文本；上游 opaque 摘要必须原样回放给同一上游。
+    return decodeCompactionSummary(item.encrypted_content) ? compactionMessage(item) : item;
+  });
+}
+
+function stripInputImages(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripInputImages);
+  if (!isRecord(value)) return value;
+  if (value.type === "input_image") {
+    return { type: "input_text", text: "[image omitted for compaction]" };
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, stripInputImages(entry)]));
+}
+
+export function hasCompactionTrigger(input: unknown): boolean {
+  return Array.isArray(input) && input.some((item) => isRecord(item) && item.type === "compaction_trigger");
+}
+
+export function buildCompactionRequest(
+  body: Record<string, unknown>,
+  upstreamModel: string,
+  stream = false,
+): Record<string, unknown> {
+  const {
+    tools: _tools,
+    tool_choice: _toolChoice,
+    parallel_tool_calls: _parallelToolCalls,
+    additional_tools: _additionalTools,
+    stream_options: _streamOptions,
+    include: _include,
+    reasoning: _reasoning,
+    text: _text,
+    store: _store,
+    background: _background,
+    previous_response_id: _previousResponseId,
+    conversation: _conversation,
+    prompt_cache_key: _promptCacheKey,
+    ...rest
+  } = body;
+  const input = Array.isArray(body.input)
+    ? body.input.filter((item) => !isRecord(item)
+      || (item.type !== "compaction_trigger" && item.type !== "additional_tools"))
+    : [];
+  return {
+    ...rest,
+    model: upstreamModel,
+    stream,
+    input: [
+      ...stripInputImages(rewriteCompactionHistory(input)) as unknown[],
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: COMPACTION_PROMPT }],
+      },
+    ],
+  };
+}
+
+function textFromContent(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!Array.isArray(value)) return "";
+  return value
+    .filter((part) => isRecord(part)
+      && (part.type === "output_text" || part.type === "text")
+      && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("");
+}
+
+function chatCompletionText(payload: Record<string, unknown>): string {
+  if (!Array.isArray(payload.choices)) return "";
+  return payload.choices
+    .filter((choice) => isRecord(choice))
+    .flatMap((choice) => {
+      if (isRecord(choice.message)) return [textFromContent(choice.message.content)];
+      return typeof choice.text === "string" ? [choice.text] : [];
+    })
+    .join("")
+    .trim();
+}
+
+export function responseText(payload: Record<string, unknown>): string {
+  if (Array.isArray(payload.output)) {
+    const canonical = payload.output
+      .filter((item) => isRecord(item) && item.type === "message")
+      .map((item) => textFromContent(item.content))
+      .join("")
+      .trim();
+    if (canonical) return canonical;
+  }
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) return payload.output_text.trim();
+  if (typeof payload.text === "string" && payload.text.trim()) return payload.text.trim();
+  return chatCompletionText(payload);
+}
+
+type ParsedCompactionResponse = {
+  payload: Record<string, unknown>;
+  summary: string;
+  compactionItem?: Record<string, unknown>;
+};
+
+function compactionItemFromPayload(payload: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!Array.isArray(payload.output)) return undefined;
+  const item = payload.output.find((entry) => isRecord(entry)
+    && (entry.type === "compaction" || entry.type === "compaction_summary")
+    && typeof entry.encrypted_content === "string");
+  return isRecord(item) ? { ...item, type: "compaction" } : undefined;
+}
+
+function parseSseFrames(body: string): Record<string, unknown>[] {
+  const frames: Record<string, unknown>[] = [];
+  const blocks = body.split(/\r?\n\r?\n/);
+  for (const block of blocks) {
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n")
+      .trim();
+    if (!data || data === "[DONE]") continue;
+    try {
+      const parsed: unknown = JSON.parse(data);
+      if (isRecord(parsed)) {
+        const event = block.split(/\r?\n/).find((line) => line.startsWith("event:"))?.slice(6).trim();
+        if (event && typeof parsed.type !== "string") parsed.type = event;
+        frames.push(parsed);
+      }
+    } catch {
+      // 忽略非 JSON 的 SSE 注释/心跳，最终由无摘要错误统一报告。
+    }
+  }
+  return frames;
+}
+
+function parseCompactionResponseBody(body: string): ParsedCompactionResponse {
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!isRecord(parsed)) throw new Error("compaction response is not an object");
+    return { payload: parsed, summary: responseText(parsed), compactionItem: compactionItemFromPayload(parsed) };
+  }
+
+  const frames = parseSseFrames(body);
+  if (frames.length === 0) throw new Error("compaction response is neither JSON nor SSE");
+  let terminal: Record<string, unknown> | undefined;
+  let completed = false;
+  let failed = false;
+  const deltas: string[] = [];
+  let compactionItem: Record<string, unknown> | undefined;
+  for (const frame of frames) {
+    const type = typeof frame.type === "string" ? frame.type : "";
+    // 失败状态不可被后续文本或成功帧覆盖，避免用残缺摘要替换完整历史。
+    if (type === "error" || type === "response.error" || frame.error
+      || (isRecord(frame.response) && frame.response.error)) failed = true;
+    if (type === "response.output_text.delta" && typeof frame.delta === "string") {
+      deltas.push(frame.delta);
+      continue;
+    }
+    if (type === "response.output_text.done" && typeof frame.text === "string" && deltas.length === 0) {
+      deltas.push(frame.text);
+      continue;
+    }
+    if (type === "response.content_part.done" && isRecord(frame.part) && typeof frame.part.text === "string" && deltas.length === 0) {
+      deltas.push(frame.part.text);
+      continue;
+    }
+    if ((type === "response.output_item.done" || type === "response.output_item.added")
+      && isRecord(frame.item) && deltas.length === 0) {
+      if ((frame.item.type === "compaction" || frame.item.type === "compaction_summary")
+        && typeof frame.item.encrypted_content === "string") {
+        compactionItem = { ...frame.item, type: "compaction" };
+      }
+      const itemText = responseText({ output: [frame.item] });
+      if (itemText) deltas.push(itemText);
+      continue;
+    }
+    if (type === "response.completed" || type === "response.done" || type === "response.failed" || type === "response.incomplete") {
+      if (isRecord(frame.response)) terminal = frame.response;
+      else terminal = frame;
+      if (type === "response.failed" || type === "response.incomplete"
+        || (terminal.status !== undefined && terminal.status !== "completed")) failed = true;
+      else completed = true;
+    }
+    if (Array.isArray(frame.choices)) {
+      for (const choice of frame.choices) {
+        if (!isRecord(choice)) continue;
+        const delta = isRecord(choice.delta) ? choice.delta : choice.message;
+        if (isRecord(delta) && typeof delta.content === "string") deltas.push(delta.content);
+        if (choice.finish_reason === "stop") completed = true;
+        else if (choice.finish_reason !== undefined && choice.finish_reason !== null) failed = true;
+      }
+    }
+  }
+  const summary = deltas.join("").trim() || (terminal ? responseText(terminal) : "");
+  const payload = {
+    object: "response",
+    output: [],
+    ...terminal,
+    // SSE 必须有协议明确的成功终态，已有文本或 [DONE] 均不能证明摘要完整。
+    status: completed && !failed ? "completed" : "failed",
+  };
+  return { payload, summary, compactionItem };
+}
+
+async function readCompactionResponse(response: Response): Promise<ParsedCompactionResponse> {
+  return parseCompactionResponseBody(await response.text());
+}
+
+export function isCompletedCompactionPayload(payload: unknown): payload is Record<string, unknown> {
+  if (!isRecord(payload)) return false;
+  if (payload.status !== undefined) return payload.status === "completed";
+  if (typeof payload.output_text === "string" && payload.output_text.trim()) return true;
+  return chatCompletionText(payload).length > 0;
+}
+
+function compactionResponseShape(payload: Record<string, unknown>): string {
+  const topLevel = Object.keys(payload).sort().slice(0, 16).join(",") || "none";
+  const outputTypes = Array.isArray(payload.output)
+    ? payload.output.map((item) => isRecord(item) && typeof item.type === "string" ? item.type : typeof item).join(",") || "none"
+    : "missing";
+  const contentTypes = Array.isArray(payload.output)
+    ? payload.output
+      .filter((item) => isRecord(item) && Array.isArray(item.content))
+      .flatMap((item) => item.content as unknown[])
+      .map((part) => isRecord(part) && typeof part.type === "string" ? part.type : typeof part)
+      .join(",") || "none"
+    : "missing";
+  const summaryTypes = Array.isArray(payload.output)
+    ? payload.output
+      .filter((item) => isRecord(item) && Array.isArray(item.summary))
+      .flatMap((item) => item.summary as unknown[])
+      .map((part) => isRecord(part) && typeof part.type === "string" ? part.type : typeof part)
+      .join(",") || "none"
+    : "missing";
+  const choices = Array.isArray(payload.choices) ? String(payload.choices.length) : "missing";
+  return `top-level=[${topLevel}], output=[${outputTypes}], content=[${contentTypes}], summary=[${summaryTypes}], choices=${choices}`;
+}
+
+export function noCompactionSummaryError(message: string, payload: Record<string, unknown>): string {
+  return `${message} (${compactionResponseShape(payload)})`;
+}
+
+function compactUserMessages(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((item) => {
+    if (!isRecord(item) || (item.type !== undefined && item.type !== "message") || item.role !== "user") return [];
+    if (typeof item.content === "string") {
+      return item.content.trim() && !item.content.startsWith(SUMMARY_PREFIX) ? [item.content] : [];
+    }
+    if (!Array.isArray(item.content)) return [];
+    const text = item.content
+      .filter((part) => isRecord(part)
+        && (part.type === "input_text" || part.type === "text")
+        && typeof part.text === "string")
+      .map((part) => part.text as string)
+      .join("");
+    return text.trim() && !text.startsWith(SUMMARY_PREFIX) ? [text] : [];
+  });
+}
+
+export function compactV1Output(input: unknown, summary: string): Record<string, unknown>[] {
+  const selected: string[] = [];
+  let remaining = COMPACT_V1_RETAINED_CHAR_BUDGET;
+  const messages = compactUserMessages(input);
+  for (let index = messages.length - 1; index >= 0 && remaining > 0; index--) {
+    const message = messages[index];
+    selected.push(message.length <= remaining ? message : message.slice(-remaining));
+    remaining -= Math.min(message.length, remaining);
+  }
+  selected.reverse();
+  return [...selected, `${SUMMARY_PREFIX}\n${summary}`].map((text) => ({
+    type: "message",
+    role: "user",
+    content: [{ type: "input_text", text }],
+  }));
+}
+
+function syntheticCompactionResult(
+  payload: Record<string, unknown>,
+  upstreamModel: string,
+  summary: string,
+  compactionItem?: Record<string, unknown>,
+): { response: Record<string, unknown>; events: Array<{ event: string; data: Record<string, unknown> }> } {
+  const item = compactionItem ?? {
+    type: "compaction",
+    id: `cmp_${uuid()}`,
+    encrypted_content: encodeCompactionSummary(summary),
+  };
+  const response = {
+    id: typeof payload.id === "string" ? payload.id : `resp_${uuid()}`,
+    object: "response",
+    created_at: typeof payload.created_at === "number" ? payload.created_at : Math.floor(Date.now() / 1000),
+    status: "completed",
+    model: upstreamModel,
+    output: [item],
+    usage: payload.usage ?? null,
+  };
+  const created = { ...response, status: "in_progress", output: [], usage: null };
+  return {
+    response,
+    events: [
+      { event: "response.created", data: { type: "response.created", sequence_number: 0, response: created } },
+      {
+        event: "response.output_item.added",
+        data: {
+          type: "response.output_item.added",
+          sequence_number: 1,
+          output_index: 0,
+          item: { ...item, status: "in_progress" },
+        },
+      },
+      {
+        event: "response.output_item.done",
+        data: {
+          type: "response.output_item.done",
+          sequence_number: 2,
+          output_index: 0,
+          item,
+        },
+      },
+      { event: "response.completed", data: { type: "response.completed", sequence_number: 3, response } },
+    ],
+  };
+}
+
+export function syntheticCompactionResponse(
+  payload: Record<string, unknown>,
+  upstreamModel: string,
+  summary: string,
+  stream: boolean,
+  compactionItem?: Record<string, unknown>,
+): Response {
+  const result = syntheticCompactionResult(payload, upstreamModel, summary, compactionItem);
+  if (!stream) return Response.json(result.response);
+
+  const frames = result.events
+    .map(({ event, data }) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+    .join("");
+  return new Response(`${frames}data: [DONE]\n\n`, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+    },
+  });
+}
+
+function httpUrlFromWebSocket(url: string): string {
+  const parsed = new URL(url);
+  parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
+  return parsed.href;
+}
+
+async function handleResponsesWebSocketFrame(
+  frame: string,
+  target: { url: string; headers: Record<string, string> },
+): Promise<ResponseFrameAction | null> {
+  let payload: unknown;
+  try {
+    payload = JSON.parse(frame);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload)) return null;
+  const model = typeof payload.model === "string" ? payload.model : undefined;
+  if (!model || isGptModel(model)) return null;
+
+  if (hasCompactionTrigger(payload.input)) {
+    const compactionBody = { ...payload };
+    delete compactionBody.type;
+    const headers = new Headers(target.headers);
+    headers.set("accept", "text/event-stream");
+    headers.set("content-type", "application/json");
+    const upstream = await fetch(httpUrlFromWebSocket(target.url), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildCompactionRequest(compactionBody, model, true)),
+      redirect: "manual",
+    });
+    if (!upstream.ok) throw new Error(`Responses WebSocket compaction upstream returned HTTP ${upstream.status}`);
+    const result = await readCompactionResponse(upstream);
+    const payloadResult = result.payload;
+    if (!isCompletedCompactionPayload(payloadResult) || payloadResult.error) {
+      throw new Error("Responses WebSocket compaction upstream did not complete");
+    }
+    const summary = result.summary || responseText(payloadResult);
+    if (!summary && !result.compactionItem) throw new Error(noCompactionSummaryError(
+      "Responses WebSocket compaction upstream returned no summary text",
+      payloadResult,
+    ));
+    const synthetic = syntheticCompactionResult(payloadResult, model, summary, result.compactionItem);
+    return {
+      kind: "events",
+      events: synthetic.events.map(({ data }) => JSON.stringify(data)),
+    };
+  }
+
+  if (Array.isArray(payload.input) && payload.input.some((item) => isRecord(item) && item.type === "compaction")) {
+    payload.input = rewriteCompactionHistory(payload.input);
+    return { kind: "forward", frame: JSON.stringify(payload) };
+  }
+  return null;
+}
+
+export function compactionError(message: string): Response {
+  return Response.json({ error: { type: "invalid_response_error", message } }, { status: 502 });
+}
+
+export function normalizeBaseUrl(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+export function isLoopbackUrl(value: string): boolean {
+  const hostname = new URL(value).hostname;
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
+}
+
+/**
+ * 未开启 requestLogging 时返回 undefined，日志函数据此整体短路。
+ * processLog 由 serve 注入（paths.stdoutLog + maxGatewayLogBytes）；没有它时请求日志照写，
+ * 但不产生 gateway.log 里的请求摘要。
+ */
+function resolveLogSink(config: GatewayConfig, processLog?: ProcessLogTarget): RequestLogSink | undefined {
+  if (config.requestLogging !== true) return undefined;
+  return {
+    dir: requestLogDir(),
+    maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
+    processLog,
+  };
+}
+
+/** 错误响应体形态不统一：{error:{message}}、{error:"..."}、{detail:"..."} 或纯文本都出现过。 */
+function errorMessageFromBody(body: string): string {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (isRecord(parsed)) {
+      const error = parsed.error;
+      if (typeof error === "string") return error;
+      if (isRecord(error) && typeof error.message === "string") return error.message;
+      if (typeof parsed.detail === "string") return parsed.detail;
+      if (typeof parsed.message === "string") return parsed.message;
+    }
+  } catch {
+    // 非 JSON 响应体直接按原文记录。
+  }
+  return body.trim() || "(empty response body)";
+}
+
+export function joinUpstreamUrl(baseUrl: string, incomingUrl: string, mountPath = "/v1"): string {
+  const incoming = new URL(incomingUrl);
+  let relativePath = incoming.pathname;
+  if (relativePath === mountPath) relativePath = "";
+  else if (relativePath.startsWith(`${mountPath}/`)) relativePath = relativePath.slice(mountPath.length);
+  return `${normalizeBaseUrl(baseUrl)}${relativePath}${incoming.search}`;
+}
+
+export function decideRoute(model: unknown, prefix = "cliproxy/"): Route {
+  if (typeof model === "string" && model.startsWith(prefix)) {
+    const upstreamModel = model.slice(prefix.length);
+    if (!upstreamModel) throw new Error(`Model prefix ${prefix} must be followed by a model ID`);
+    return { kind: "cliproxy", upstreamModel };
+  }
+  return { kind: "official", upstreamModel: model };
+}
+
+function requestThreadId(request: Request, header = "thread-id"): string | undefined {
+  const threadId = request.headers.get(header)?.trim();
+  return threadId && threadId.length <= 128 ? threadId : undefined;
+}
+
+function rememberCpaThread(cpaThreads: Set<string>, threadId: string): void {
+  // ponytail: 仅保留进程内 thread UUID；实测内存成为问题时再加持久化清理策略。
+  cpaThreads.add(threadId);
+}
+
+/** turn 每条消息产生一个，比 thread 增长快，超限按插入序淘汰：图片请求距触发 turn 仅数秒。 */
+const MAX_REMEMBERED_CPA_TURNS = 4096;
+
+function rememberCpaTurn(cpaTurns: Set<string>, turnId: string): void {
+  if (cpaTurns.has(turnId)) return;
+  if (cpaTurns.size >= MAX_REMEMBERED_CPA_TURNS) {
+    const oldest = cpaTurns.values().next().value;
+    if (oldest !== undefined) cpaTurns.delete(oldest);
+  }
+  cpaTurns.add(turnId);
+}
+
+/** x-codex-turn-metadata 头里的 turn_id；缺头、非法 JSON、空值一律返回 undefined。 */
+function turnIdFromMetadataHeader(value: string | null): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed) || typeof parsed.turn_id !== "string") return undefined;
+    const turnId = parsed.turn_id.trim();
+    return turnId && turnId.length <= 128 ? turnId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function decideThreadRoute(
+  request: Request,
+  model: unknown,
+  prefix: string,
+  cpaThreads: Set<string>,
+  cpaTurns: Set<string>,
+): Route {
+  const route = decideRoute(model, prefix);
+  const threadId = requestThreadId(request);
+  if (route.kind === "cliproxy") {
+    if (threadId) rememberCpaThread(cpaThreads, threadId);
+    const turnId = turnIdFromMetadataHeader(request.headers.get("x-codex-turn-metadata"));
+    if (turnId) rememberCpaTurn(cpaTurns, turnId);
+    return route;
+  }
+  const parentThreadId = requestThreadId(request, "x-codex-parent-thread-id");
+  // 图片请求（/v1/images/generations）不带 thread-id，只有 x-codex-image-turn-id——
+  // 它等于触发图片的那个 turn 的 turn_id，且先于图片请求到达本网关，可作同源粘性键。
+  const imageTurnId = requestThreadId(request, "x-codex-image-turn-id");
+  const inherited = (threadId && cpaThreads.has(threadId))
+    || (parentThreadId && cpaThreads.has(parentThreadId))
+    || (imageTurnId && cpaTurns.has(imageTurnId));
+  if (!inherited) {
+    return route;
+  }
+  if (threadId) rememberCpaThread(cpaThreads, threadId);
+  return { kind: "cliproxy", upstreamModel: typeof model === "string" ? model : "" };
+}
+
+function stripRoutingHintPrefix(value: string, prefix: string): string {
+  return value.replace(/((?:^|[;,\s])model=)([^;,\s]+)/, (match, marker, model) =>
+    model.startsWith(prefix) ? `${marker}${model.slice(prefix.length)}` : match);
+}
+
+function copyRequestHeaders(request: Request, route: Route, apiKey: string, prefix: string): Headers {
+  const headers = new Headers(request.headers);
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
+  headers.delete("accept-encoding");
+  if (route.kind === "cliproxy") {
+    const routingHint = headers.get("x-codex-routing-hint");
+    if (routingHint) headers.set("x-codex-routing-hint", stripRoutingHintPrefix(routingHint, prefix));
+    headers.delete("authorization");
+    headers.delete("chatgpt-account-id");
+    headers.delete("x-api-key");
+    headers.delete("x-goog-api-key");
+    headers.delete("content-encoding");
+    if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
+  }
+  return headers;
+}
+
+function copyResponseHeaders(response: Response): Headers {
+  const headers = new Headers(response.headers);
+  for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
+  headers.delete("content-encoding");
+  return headers;
+}
+
+function isReservedOfficialRealtimePath(pathname: string, mountPath: string): boolean {  const livePath = `${mountPath}/live`;
+  const realtimePath = `${mountPath}/realtime`;
+  const realtimeCallsPath = `${realtimePath}/calls`;
+  return pathname === livePath
+    || pathname.startsWith(`${livePath}/`)
+    || pathname === realtimePath
+    || pathname === realtimeCallsPath
+    || pathname.startsWith(`${realtimeCallsPath}/`);
+}
+
+function officialRealtimeNotImplementedResponse(): Response {
+  return Response.json({
+    error: {
+      type: "unsupported_transport_error",
+      code: "official_realtime_proxy_not_implemented",
+      message: "Official Realtime /live proxying is not implemented yet.",
+    },
+  }, {
+    status: 426,
+    headers: { "x-codex-cliproxy-gateway": "official-realtime-not-implemented" },
+  });
+}
+
+/** 426 语义是"协商失败，请改用 HTTPS/SSE"——客户端会自动降级重试，不计入错误摘要。 */
+function websocketNotSupportedResponse(marker = "websocket-not-supported"): Response {
+  return new Response("WebSocket transport is not supported; retry with HTTPS/SSE.", {
+    status: 426,
+    headers: {
+      connection: "close",
+      "x-codex-cliproxy-gateway": marker,
+    },
+  });
+}
+
+/** Codex 在 x-codex-routing-hint 里给出完整模型名（含 cliproxy/ 前缀），GET 请求也带。 */
+export function modelFromRoutingHint(request: Request): string | undefined {
+  return request.headers.get("x-codex-routing-hint")
+    ?.match(/(?:^|[;,\s])model=([^;,\s]+)/)?.[1] || undefined;
+}
+
+/**
+ * Responses over WebSocket 的转发目标：Codex 试探（GET + upgrade）带 x-codex-routing-hint，
+ * 据此选上游；realtime 保留路径返回 null（维持原有 426 行为）。
+ */
+export function responsesWebSocketTarget(
+  request: Request,
+  config: GatewayConfig,
+  apiKey?: string,
+  cpaThreads = new Set<string>(),
+  cpaTurns = new Set<string>(),
+  registry = new PluginRegistry([]),
+): { url: string; headers: Record<string, string>; routeKind: "cliproxy" | "official" } | null {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") return null;
+  if (new URL(request.url).pathname.startsWith("/zai")) return null;
+  const mountPath = MOUNT_PATH;
+  if (isReservedOfficialRealtimePath(new URL(request.url).pathname, mountPath)) return null;
+  const prefix = configuredModelPrefix(config);
+  const hintedModel = modelFromRoutingHint(request);
+  if (hintedModel && identifyClientEndpoint(new URL(request.url).pathname, mountPath) && registry.match(hintedModel)) return null;
+  const route = config.upstreamOnly === true
+    ? { kind: "cliproxy", upstreamModel: "" } as const
+    : decideThreadRoute(request, hintedModel, prefix, cpaThreads, cpaTurns);
+  // 不做任何网关侧门控：CPA WebSocket 升级一律桥接 CLIProxy，由上游按请求决定
+  // 走 ws 还是 HTTP/SSE；上游不支持时握手失败，拨号失败路径回 426 令客户端降级。
+  const baseUrl = route.kind === "cliproxy" ? config.upstreamBaseUrl : OFFICIAL_BASE_URL;
+  const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
+  const headers = forwardedHeaders(request.headers, false);
+  if (route.kind === "cliproxy") {
+    const routingHint = headers["x-codex-routing-hint"];
+    if (routingHint) headers["x-codex-routing-hint"] = stripRoutingHintPrefix(routingHint, prefix);
+    // 与 HTTP 路径的 copyRequestHeaders 对齐：剥官方 OAuth，注入 CLIProxy key。
+    delete headers.authorization;
+    delete headers["chatgpt-account-id"];
+    delete headers["x-api-key"];
+    delete headers["x-goog-api-key"];
+    if (apiKey) headers.authorization = `Bearer ${apiKey}`;
+  }
+  return { url, headers, routeKind: route.kind };
+}
+
+async function readBodyBytes(request: Request): Promise<ArrayBuffer | undefined> {
+  if (request.method === "GET" || request.method === "HEAD") return undefined;
+  return request.arrayBuffer();
+}
+
+/**
+ * 解压并解析请求体。仅在确实需要 payload 时调用——拿得到 routing hint 且路由是 official 时，
+ * 请求原样透传，没必要为了判路由而解压几十 KB，也就不会因解码失败误拒一个本可透传的请求。
+ */
+function decodeJsonBody(
+  bytes: ArrayBuffer | undefined,
+  headers: Headers,
+): Record<string, unknown> | undefined {
+  if (!bytes || bytes.byteLength === 0) return undefined;
+  const encoding = headers.get("content-encoding")?.toLowerCase().trim();
+  const compressed = Buffer.from(bytes);
+  const decoded = !encoding || encoding === "identity"
+    ? compressed
+    : encoding === "zstd"
+      ? zstdDecompressSync(compressed)
+      : encoding === "gzip"
+      ? gunzipSync(compressed)
+      : encoding === "deflate"
+        ? inflateSync(compressed)
+        : encoding === "br"
+          ? brotliDecompressSync(compressed)
+          : (() => { throw new Error(`Unsupported content encoding: ${encoding}`); })();
+  const text = new TextDecoder().decode(decoded);
+  try {
+    const value: unknown = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : undefined;
+  } catch {
+    if (headers.get("content-type")?.includes("application/json")) {
+      throw new Error("Invalid JSON request body");
+    }
+    return undefined;
+  }
+}
+
+function validCatalog(value: unknown, requireNonEmpty = true): ModelCatalog {
+  const catalog = normalizeCatalog(value);
+  if ((requireNonEmpty && catalog.models.length === 0)
+    || !catalog.models.every((model) => model && typeof model.slug === "string" && model.slug)) {
+    throw new Error(`catalog does not contain a valid${requireNonEmpty ? " non-empty" : ""} models array`);
+  }
+  return catalog;
+}
+
+function readCatalog(file: string, requireNonEmpty = true): ModelCatalog {
+  return validCatalog(JSON.parse(fs.readFileSync(file, "utf8")), requireNonEmpty);
+}
+
+function mergeDynamicCatalog(native: ModelCatalog, config: GatewayConfig, catalogFile: string): ModelCatalog {
+  const proxy = readCatalog(catalogFile, false);
+  const prefix = configuredModelPrefix(config);
+  if (prefix && proxy.models.some((model) => model.slug.startsWith(prefix))) {
+    throw new Error("CPA catalog contains legacy prefixed model IDs; run models --sync");
+  }
+  return config.upstreamOnly === true ? proxy : mergeCatalog(native, proxy, prefix);
+}
+
+function modelCatalogResponse(
+  catalog: ModelCatalog,
+  clientVersion: string | null,
+  owner: "cliproxy" | "mixed" | "openai",
+  prefix = "cliproxy/",
+  registry = new PluginRegistry([]),
+): Response {
+  if (clientVersion) return Response.json(catalog);
+  return Response.json({
+    object: "list",
+    data: catalog.models.map((model) => ({
+      id: model.slug,
+      object: "model",
+      owned_by: registry.match(model.slug)?.plugin.id ?? (owner === "mixed"
+        ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
+        : owner),
+    })),
+  });
+}
+
+/**
+ * 官方目录 last-good 缓存。`client_version` 是消费客户端自报版本，`models --sync` 拿它
+ * 请求 CLIProxy，版本过低会被过滤掉 `max`/`ultra` reasoning 等级；官方刷新成功时把上游
+ * 返回的 `models` 原样全部写入（不增删字段），刷新失败只更新版本与时间戳、保留已有
+ * `models`，绝不清空目录。写盘失败静默忽略：缓存丢了下次请求会再写一次。
+ */
+function writeModelsCache(
+  file: string | undefined,
+  clientVersion: string | null,
+  models?: ModelCatalog["models"],
+): void {
+  if (!file || !clientVersion) return;
+  let preserved: { models?: ModelCatalog["models"] } & Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      preserved = parsed as { models?: ModelCatalog["models"] } & Record<string, unknown>;
+    }
+  } catch {}
+  try {
+    const cached = Array.isArray(models) ? models : preserved.models;
+    // Codex 会在缓存里附加自有字段（如 identity）；只更新本工具管理的三个键，
+    // 其余原样保留，避免每次 /models 请求都抹掉 Codex 的字段。
+    atomicWrite(file, `${JSON.stringify({
+      ...preserved,
+      fetched_at: new Date().toISOString(),
+      client_version: clientVersion,
+      ...(Array.isArray(cached) ? { models: cached } : {}),
+    }, null, 2)}\n`);
+  } catch {
+    // 缓存不参与请求结果，失败静默忽略。
+  }
+}
+
+async function catalogModelsResponse(
+  request: Request,
+  config: GatewayConfig,
+  clientVersionFile: string | undefined,
+  registry: PluginRegistry,
+  pluginCatalog: ModelCatalog = { models: [] },
+  staticCatalogPath?: string,
+  ownsLocalModel: (model: string) => boolean = (model) => Boolean(registry.match(model)),
+  instancePaths: ResolvedPaths = resolvePaths(),
+): Promise<Response> {
+  const incomingUrl = new URL(request.url);
+  const clientVersion = incomingUrl.searchParams.get("client_version");
+  const prefix = configuredModelPrefix(config);
+  // 上游已选目录固定按上游类型落在运行主目录，路径取网关构造时的实例快照。
+  const upstreamCatalogFile = configuredCatalogFile(instancePaths, config);
+  const respond = (catalog: ModelCatalog, owner: "cliproxy" | "mixed" | "openai") => {
+    const retained = catalog.models.filter((model) => !registry.match(model.slug));
+    let priority = Math.max(0, ...retained.map((model) => Number(model.priority) || 0)) + 100;
+    let merged: ModelCatalog = { models: [...retained, ...pluginCatalog.models.map((model) => ({ ...model, priority: priority++ }))] };
+    // 所有适配器与上游目录合并完成后统一按 excludedModels 过滤（仅本地兼容端模型，
+    // 官方与上游模型不受影响）：无论命中哪个来源，/models（含 client_version 的
+    // Codex 原始目录形态）都不再暴露被排除模型。
+    merged = filterExcludedModels(merged, config.excludedModels, ownsLocalModel);
+    return modelCatalogResponse(merged, clientVersion, owner, prefix, registry);
+  };
+  if (config.upstreamOnly === true) {
+    writeModelsCache(clientVersionFile, clientVersion);
+    try {
+      // 静态模式仅消费已发布的合成目录，缺失时明确报错，不退回官方或即时目录。
+      const catalog = readCatalog(staticCatalogPath ?? codexCatalogFile(instancePaths));
+      return modelCatalogResponse(filterExcludedModels(catalog, config.excludedModels, ownsLocalModel),
+        clientVersion, "cliproxy", prefix, registry);
+    } catch (error) {
+      return Response.json({ error: { message: `Unable to load static model catalog: ${error instanceof Error ? error.message : String(error)}; run models --sync` } }, { status: 502 });
+    }
+  }
+  const refreshOfficial = async (): Promise<ModelCatalog> => {
+    const headers = copyRequestHeaders(request, { kind: "official", upstreamModel: undefined }, "", prefix);
+    headers.delete("if-none-match");
+    headers.delete("if-modified-since");
+    const response = await fetch(joinUpstreamUrl(OFFICIAL_BASE_URL, request.url, MOUNT_PATH), {
+      method: "GET",
+      headers,
+      redirect: "manual",
+      signal: request.signal,
+    });
+    if (!response.ok) throw new Error(`official /models returned HTTP ${response.status}`);
+    return validCatalog(await response.json());
+  };
+  let native: ModelCatalog | undefined;
+  let refreshError: unknown;
+  try {
+    native = await refreshOfficial();
+    writeModelsCache(clientVersionFile, clientVersion, native.models);
+  } catch (error) {
+    refreshError = error;
+    writeModelsCache(clientVersionFile, clientVersion);
+    // 官方刷新失败时回退 last-good 缓存目录；缓存同样不可用才向客户端报 502。
+    if (clientVersionFile && fs.existsSync(clientVersionFile)) {
+      try {
+        native = readCatalog(clientVersionFile);
+      } catch {}
+    }
+  }
+  if (!native) {
+    if (pluginCatalog.models.length) {
+      let base: ModelCatalog = { models: [] };
+      try { base = mergeDynamicCatalog(base, config, upstreamCatalogFile); } catch { /* 有效 ZCode/CodeBuddy 目录独立可用。 */ }
+      return respond(base, "mixed");
+    }
+    return Response.json(
+      { error: { message: `Unable to load model catalog: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}` } },
+      { status: 502 },
+    );
+  }
+  try {
+    const catalog = mergeDynamicCatalog(native, config, upstreamCatalogFile);
+    return respond(catalog, "mixed");
+  } catch {
+    return respond(native, "openai");
+  }
+}
+
+/** mountPath 子树判定：只有这里的请求才可能被转发上游，其余一律本地 404。 */
+export function isUnderMountPath(pathname: string, mountPath: string): boolean {
+  if (!mountPath || mountPath === "/") return true;
+  return pathname === mountPath || pathname.startsWith(mountPath.endsWith("/") ? mountPath : `${mountPath}/`);
+}
+
+/** 被排除模型的推理请求拦截：模型已从 /models 撤下，会话继续点名它会直接 404，
+ * 绝不向对应上游转发；提示里给出解除排除的入口。 */
+function excludedModelResponse(model: string): Response {
+  return Response.json(
+    {
+      error: {
+        message: `Model "${model}" is excluded by the gateway's excludedModels configuration`,
+        hint: "Remove or narrow the exclusion (agent-proxy models --exclude, or the Web UI) to use this model",
+      },
+    },
+    { status: 404, headers: { "x-codex-cliproxy-gateway": "model-excluded" } },
+  );
+}
+
+export type ModelGatewayHandler = ((request: Request) => Promise<Response>) & {
+  close(): void;
+  reloadConfig(next: GatewayConfig): Promise<void>;
+  modelsReady(): Promise<void>;
+};
+
+/** 启动允许未登录的插件缺席；显式刷新仍由注册表执行严格契约。 */
+async function startupPluginCatalog(
+  registry: PluginRegistry,
+  processLog: ProcessLogTarget | undefined,
+  mountPath: string,
+): Promise<ModelCatalog> {
+  const catalogs = await Promise.all(registry.plugins.map(async (plugin): Promise<ModelCatalog> => {
+    try {
+      return await plugin.refreshCatalog();
+    } catch {
+      // 不记录原始异常：目录失败的详情可能包含认证信息或上游正文。
+      logGatewayError(processLog, {
+        requestTime: localTime(), method: "START", url: `${mountPath}/models`, status: 503,
+        message: `插件 ${plugin.id} 启动目录刷新不可用；将尝试缓存目录，其余插件和 default 继续就绪。`,
+      });
+      try { return await plugin.getCatalog(); }
+      catch { return { models: [] }; }
+    }
+  }));
+  return { models: catalogs.flatMap((catalog) => catalog.models) };
+}
+
+export function createPluginGatewayHandler(
+  config: GatewayConfig,
+  registry: PluginRegistry,
+  apiKey = readApiKey(),
+  realtimeProviderMode: RealtimeProviderMode = "invalid",
+  cpaThreads = new Set<string>(),
+  cpaTurns = new Set<string>(),
+  clientVersionFile?: string,
+  processLog?: ProcessLogTarget,
+  runtimePaths?: ResolvedPaths,
+  ownsLocalModel: (model: string) => boolean = (model) => Boolean(registry.match(model)),
+): ModelGatewayHandler {
+  // 运行态独立持有配置，模型热加载不会改写调用者或更换监听、路由与适配器实例。
+  config = { ...config };
+  // 健康身份与目录派生属于构造时的实例，不能随其他调用的路径上下文改变。
+  const effectivePaths = runtimePaths ?? resolvePaths();
+  const marker = instanceMarker(effectivePaths.runtimeHome);
+  const pluginRequests = new WeakSet<Request>();
+  const preparedBodies = new WeakMap<Request, { bytes?: ArrayBuffer; json?: Record<string, unknown> }>();
+  /** 本次请求实际打到哪个上游。日志包装层在 handleCore 之外，只能这样把它取回来。 */
+  const upstreams = new WeakMap<Request, string>();
+  const mountPath = MOUNT_PATH;
+  const prefix = configuredModelPrefix(config);
+  let modelExclusion = compileModelFilter(config.excludedModels);
+  let closed = false;
+  let ready: Promise<void> | undefined;
+  const modelsReady = (): Promise<void> => ready ??= registry.ready().then(() =>
+    config.upstreamOnly === true ? startupPluginCatalog(registry, processLog, mountPath) : registry.getCatalog()).then((catalog) => {
+    if (!closed && runtimePaths && config.upstreamOnly === true) {
+      writeStaticCatalog(runtimePaths, config, catalog.models, ownsLocalModel);
+    }
+  });
+  const reloadConfig = async (next: GatewayConfig): Promise<void> => {
+    // 首次静态发布失败后，显式模型命令仍可通过已修复的磁盘缓存恢复服务。
+    await modelsReady().catch(() => {});
+    if (closed) return;
+    // 先完成磁盘目录与派生元数据加载，再发布同一份排除规则给目录和推理入口。
+    const catalog = await registry.reloadCatalog();
+    if (closed) return;
+    const nextFilter = compileModelFilter(next.excludedModels);
+    const nextConfig = { ...config,
+      selectedModels: next.selectedModels?.slice(),
+      excludedModels: next.excludedModels?.slice(),
+    };
+    // 启动异步发布可能先写入旧规则；重载成功后再发布当前修订的完整静态目录。
+    if (nextConfig.upstreamOnly === true && runtimePaths) writeStaticCatalog(runtimePaths, nextConfig, catalog.models, ownsLocalModel);
+    config = nextConfig;
+    modelExclusion = nextFilter;
+    ready = Promise.resolve();
+  };
+  const logging = config.requestLogging === true;
+  const sink = resolveLogSink(config, processLog);
+  // 启动补扫一次：保留计数按时间全局生效，不必等某个分组再被写入。ZCode 适配器用的是
+  // 同一份 logDir/maxRequestLogs，这一次扫描同时覆盖两者。
+  if (sink) pruneLogDir(sink.dir, sink.maxLogs);
+
+  const handleCore = async (request: Request): Promise<Response> => {
+    const incomingUrl = new URL(request.url);
+
+    if (incomingUrl.pathname === "/zai" || incomingUrl.pathname.startsWith("/zai/")) return Response.json({ error: { message: "旧 /zai 入口已移除，请使用 Codex /v1/responses" } }, { status: 404 });
+
+    if (incomingUrl.pathname === "/healthz") {
+      // 实例标记（运行主目录哈希）：CLI 的 waitForHealth 用它区分「本实例就绪」与
+      // 「端口被另一个 agent-proxy 实例占用」。
+      return Response.json({
+        ok: true,
+        upstreamOnly: config.upstreamOnly === true,
+        prefix,
+        port: config.port,
+      }, { headers: { "x-ccp-instance": marker } });
+    }
+
+    // Web UI 在独立端口（本端口 + 1）上运行：模型端口不服务 /ui，也绝不把 /ui 转发上游。
+    if (incomingUrl.pathname === "/ui" || incomingUrl.pathname.startsWith("/ui/")) {
+      return Response.json(
+        {
+          error: {
+            message: "Web UI runs on its own port, separate from the model gateway",
+            hint: `Open http://127.0.0.1:${webUiPort(config)}/ui (or run: agent-proxy web)`,
+          },
+        },
+        { status: 404 },
+      );
+    }
+
+    // 白名单边界：只转发 mountPath 子树内的 API 请求。子树外的任何路径——浏览器对
+    // 端口的探测（/.well-known/*、favicon、根路径）、爬虫、误配置客户端——一律本地
+    // 404：绝不拼进上游 URL 转发（那会把带着 API key 的请求发给不存在的上游端点），
+    // 也不产生请求日志。
+    if (!isUnderMountPath(incomingUrl.pathname, mountPath)) {
+      return Response.json(
+        {
+          error: {
+            message: `Not found: ${incomingUrl.pathname} is outside the API mount ${mountPath}`,
+            hint: `Point the client base URL at http://<host>:${config.port}${mountPath}`,
+          },
+        },
+        { status: 404 },
+      );
+    }
+
+    if (incomingUrl.pathname === `${mountPath}/models` && request.method === "GET") {
+      return catalogModelsResponse(request, config, clientVersionFile, registry,
+        config.upstreamOnly === true ? { models: [] } : await registry.getCatalog(),
+        codexCatalogFile(effectivePaths), ownsLocalModel, effectivePaths);
+    }
+
+    const endpoint = identifyClientEndpoint(incomingUrl.pathname, mountPath);
+    const responsePath = endpoint?.from === "responses" && endpoint.operation === "generate";
+    const compactPath = endpoint?.operation === "compact";
+    const hintedModel = modelFromRoutingHint(request);
+    if (endpoint && request.headers.get("upgrade")?.toLowerCase() === "websocket" && hintedModel) {
+      return await registry.dispatchWebSocket({ request, url: incomingUrl, model: hintedModel, ...endpoint,
+        signal: request.signal, upgrade: () => false }, () => websocketNotSupportedResponse()) ?? websocketNotSupportedResponse();
+    }
+    if (endpoint && request.method === "POST" && (registry.plugins.length || config.excludedModels?.length)) {
+      const bytes = await readBodyBytes(request);
+      let json: Record<string, unknown> | undefined;
+      try { json = decodeJsonBody(bytes, request.headers); }
+      catch (error) {
+        if (hintedModel && registry.match(hintedModel)) {
+          pluginRequests.add(request);
+          logGatewayError(processLog, {
+            requestTime: localTime(), method: request.method, url: incomingUrl.pathname, status: 400,
+            message: "插件请求正文无效，请发送有效 JSON 对象。",
+          });
+          return Response.json({ error: { message: error instanceof Error ? error.message : "无效请求正文" } }, { status: 400 });
+        }
+      }
+      preparedBodies.set(request, { bytes, json });
+      const model = typeof json?.model === "string" ? json.model : hintedModel;
+      if (model && ownsLocalModel(model) && modelExclusion.isExcluded(model)) {
+        pluginRequests.add(request);
+        logGatewayError(processLog, {
+          requestTime: localTime(), method: request.method, url: incomingUrl.pathname, status: 404,
+          message: "请求模型已被网关排除，请调整模型排除规则。",
+        });
+        return excludedModelResponse(model);
+      }
+      if (model && registry.match(model)) {
+        pluginRequests.add(request);
+        const body: RequestBody = {
+          bytes: async () => new Uint8Array(bytes ?? new ArrayBuffer(0)).slice(),
+          json: async () => json,
+        };
+        return registry.dispatchHttp({ request, url: incomingUrl, model, ...endpoint, signal: request.signal, body },
+          () => { throw new Error("已归属插件的请求不能回退默认上游"); });
+      }
+    }
+
+    if (isRealtimeCallRequest(request, config)) {
+      return proxyRealtimeCall(request, config, realtimeProviderMode, sink, (url) => upstreams.set(request, url));
+    }
+
+    // Reserved for the HTTP call-create adapter and bidirectional WebSocket bridge.
+    // A normal fetch passthrough cannot proxy these Realtime transports safely.
+    if (isReservedOfficialRealtimePath(incomingUrl.pathname, mountPath)) {
+      return officialRealtimeNotImplementedResponse();
+    }
+
+    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      // startGateway 拦截不到时（无 server 的调用场景）的防御兜底；生产路径在 fetch 内已转发。
+      return websocketNotSupportedResponse();
+    }
+
+    // upstream-only 仍需经过下面的 Responses 路由：非 GPT 模型的 v1/v2 压缩需要
+    // 在网关重写并合成 compaction 条目，且下一轮要把 ocx1 摘要还原成可读文本。
+    // 其他路径继续直通，避免把模型流量无谓地改造成另一套协议。
+    const isUpstreamOnlyResponses = request.method === "POST" && (responsePath || compactPath);
+    if (config.upstreamOnly === true && !isUpstreamOnlyResponses) {
+      const headers = copyRequestHeaders(request, { kind: "cliproxy", upstreamModel: "" }, apiKey, prefix);
+      const contentEncoding = request.headers.get("content-encoding");
+      if (contentEncoding) headers.set("content-encoding", contentEncoding);
+      try {
+        const url = joinUpstreamUrl(config.upstreamBaseUrl, request.url, mountPath);
+        upstreams.set(request, url);
+        const upstream = await fetch(url, {
+          method: request.method,
+          headers,
+          body: request.method === "GET" || request.method === "HEAD" ? undefined : preparedBodies.get(request)?.bytes ?? request.body,
+          redirect: "manual",
+          signal: request.signal,
+        });
+        return new Response(upstream.body, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: copyResponseHeaders(upstream),
+        });
+      } catch (error) {
+        return Response.json(
+          {
+            error: {
+              message: "Gateway upstream request failed",
+              route: "cliproxy",
+              detail: error instanceof Error ? error.message : String(error),
+            },
+          },
+          { status: 502 },
+        );
+      }
+    }
+
+    // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
+    const hinted = modelFromRoutingHint(request);
+    let route = config.upstreamOnly === true || hinted === undefined
+      ? undefined
+      : decideThreadRoute(request, hinted, prefix, cpaThreads, cpaTurns);
+    let bytes: ArrayBuffer | undefined;
+    let json: Record<string, unknown> | undefined;
+    try {
+      bytes = preparedBodies.get(request)?.bytes ?? await readBodyBytes(request);
+      if (route === undefined || route.kind === "cliproxy") {
+        json = preparedBodies.get(request)?.json ?? decodeJsonBody(bytes, request.headers);
+        route ??= config.upstreamOnly === true
+          ? {
+              kind: "cliproxy",
+              upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
+            }
+          : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+      }
+      route ??= config.upstreamOnly === true
+        ? {
+            kind: "cliproxy",
+            upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
+          }
+        : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+    } catch (error) {
+      return Response.json(
+        { error: { message: error instanceof Error ? error.message : String(error) } },
+        { status: 400 },
+      );
+    }
+    // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
+    // 模型已从 /models 撤下，继续转发只会把请求送向未启用的上游。仅本地兼容端
+    // 模型参与排除，上游与官方模型不受历史规则影响。
+    if (request.method === "POST") {
+      const requestedModel = typeof json?.model === "string" ? json.model : hinted;
+      if (typeof requestedModel === "string" && ownsLocalModel(requestedModel)
+        && modelExclusion.isExcluded(requestedModel)) {
+        return excludedModelResponse(requestedModel);
+      }
+    }
+    const upstreamBase = route.kind === "cliproxy" ? config.upstreamBaseUrl : OFFICIAL_BASE_URL;
+    let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);
+    upstreams.set(request, upstreamUrl);
+    const headers = copyRequestHeaders(request, route, apiKey, prefix);
+
+    let body: ArrayBuffer | string | undefined = bytes;
+    if (route.kind === "cliproxy" && json && typeof json === "object") {
+      json.model = route.upstreamModel;
+      if (!isGptModel(route.upstreamModel) && !hasCompactionTrigger(json.input)) {
+        json.input = rewriteCompactionHistory(json.input);
+      }
+      body = JSON.stringify(json);
+      headers.set("content-type", "application/json");
+    }
+
+    try {
+      const isCompactV1 = incomingUrl.pathname === `${mountPath}/responses/compact`;
+      const isCompactV2 = hasCompactionTrigger(json?.input);
+      if (route.kind === "cliproxy" && !isGptModel(route.upstreamModel) && json && (isCompactV1 || isCompactV2)) {
+        upstreamUrl = `${normalizeBaseUrl(config.upstreamBaseUrl)}/responses`;
+        upstreams.set(request, upstreamUrl);
+        headers.set("accept", isCompactV2 ? "text/event-stream" : "application/json");
+        const upstream = await fetch(upstreamUrl, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(buildCompactionRequest(json, route.upstreamModel, isCompactV2)),
+          redirect: "manual",
+          signal: request.signal,
+        });
+        if (!upstream.ok) {
+          return new Response(upstream.body, {
+            status: upstream.status,
+            statusText: upstream.statusText,
+            headers: copyResponseHeaders(upstream),
+          });
+        }
+
+        let parsed: ParsedCompactionResponse;
+        try {
+          parsed = await readCompactionResponse(upstream);
+        } catch {
+          return compactionError("Upstream compaction returned invalid JSON or SSE");
+        }
+        const payload = parsed.payload;
+        if (!isCompletedCompactionPayload(payload) || payload.error) {
+          return compactionError(`Upstream compaction did not complete (status: ${String(isRecord(payload) ? payload.status ?? "unknown" : "unknown")})`);
+        }
+        const summary = parsed.summary || responseText(payload);
+        if (!summary && !parsed.compactionItem) {
+          return compactionError(noCompactionSummaryError("Upstream compaction returned no summary text", payload));
+        }
+        if (isCompactV1) {
+          if (!summary) return compactionError("Upstream compact response did not contain text for v1 history replacement");
+          return Response.json({ output: compactV1Output(json.input, summary) });
+        }
+        return syntheticCompactionResponse(payload, route.upstreamModel, summary, json.stream === true, parsed.compactionItem);
+      }
+
+      const upstream = await fetch(upstreamUrl, {
+        method: request.method,
+        headers,
+        body: request.method === "GET" || request.method === "HEAD" ? undefined : body,
+        redirect: "manual",
+        signal: request.signal,
+      });
+      return new Response(upstream.body, {
+        status: upstream.status,
+        statusText: upstream.statusText,
+        headers: copyResponseHeaders(upstream),
+      });
+    } catch (error) {
+      return Response.json(
+        {
+          error: {
+            message: "Gateway upstream request failed",
+            route: route.kind,
+            detail: error instanceof Error ? error.message : String(error),
+          },
+        },
+        { status: 502 },
+      );
+    }
+  };
+
+  const lifecycle = { modelsReady, reloadConfig, close: () => {
+    if (closed) return;
+    closed = true;
+    void registry.close().catch((error) => logGatewayError(processLog, {
+      requestTime: localTime(), method: "CLOSE", url: mountPath, status: 500,
+      message: error instanceof Error ? error.message : "插件关闭失败",
+    }));
+  } };
+  if (!logging) return Object.assign(handleCore, lifecycle);
+
+  return Object.assign(async (request: Request): Promise<Response> => {
+    const requestTime = localTime();
+    const startedAt = Date.now();
+    const incoming = new URL(request.url);
+    // 请求日志只记录 mountPath 子树内的模型 API 流量（目录请求 /models 除外）。
+    // healthz、/ui、favicon 与 /.well-known/* 等浏览器噪声都在子树之外：即使到达
+    // 模型端口也只会得到本地 404，天然不进请求日志。ZCode 在自身主消费链记录日志。
+    if (!isUnderMountPath(incoming.pathname, mountPath) || incoming.pathname === `${mountPath}/models`) {
+      return handleCore(request);
+    }
+    // 分组按请求路径，不按上游：缺模型信息时路由会回落到 official，用它命名文件会误导排查。
+    const group = logGroupFromPath(incoming.pathname);
+    let reqBody: unknown = null;
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      try {
+        const clone = request.clone();
+        const buffer = Buffer.from(await clone.arrayBuffer());
+        if (buffer.length > 0) {
+          const encoding = request.headers.get("content-encoding")?.toLowerCase().trim();
+          const decoded = !encoding || encoding === "identity"
+            ? buffer
+            : encoding === "zstd"
+              ? zstdDecompressSync(buffer)
+              : encoding === "gzip"
+                ? gunzipSync(buffer)
+                : encoding === "deflate"
+                  ? inflateSync(buffer)
+                  : encoding === "br"
+                    ? brotliDecompressSync(buffer)
+                    : buffer;
+          const text = new TextDecoder().decode(decoded);
+          try {
+            reqBody = JSON.parse(text);
+          } catch {
+            reqBody = text;
+          }
+        }
+      } catch {
+        // If decompression fails, log what we can.
+      }
+    }
+
+    const response = await handleCore(request);
+    if (pluginRequests.has(request)) return response;
+    const url = incoming.pathname + incoming.search;
+    const pluginNegotiation = hintedPluginId(request, registry);
+
+    // 必须异步消费 clone：await 会读完整个响应流，令 SSE 退化成一次性返回。
+    void response.clone().text().then((resBody) => {
+      const durationMs = Date.now() - startedAt;
+      logExchange(sink, group, {
+        requestTime,
+        method: request.method,
+        url: pluginNegotiation ? incoming.pathname : url,
+        reqHeaders: request.headers,
+        reqBody,
+        status: response.status,
+        resHeaders: response.headers,
+        resBody,
+        durationMs,
+      }, (pluginNegotiation?.replace(/[^a-zA-Z0-9_-]/g, "_") ?? "cliproxy") as LogNamespace);
+      // 进程日志里每条请求恰好一行：426 是协议协商（客户端会改用 HTTPS/SSE 重试），
+      // 不算故障，但仍是完成的一次请求，因此走摘要而不是错误摘要。
+      if (response.status >= 400 && response.status !== 426) {
+        logGatewayError(sink?.processLog, {
+          requestTime,
+          method: request.method,
+          url,
+          status: response.status,
+          message: errorMessageFromBody(resBody),
+          upstreamUrl: upstreams.get(request),
+          durationMs,
+        });
+      } else {
+        logRequestSummary(sink?.processLog, {
+          requestTime,
+          method: request.method,
+          url,
+          status: response.status,
+          upstreamUrl: upstreams.get(request),
+          durationMs,
+        });
+      }
+    }).catch(() => {
+      // Logging must never break the request flow.
+    });
+    return response;
+  }, lifecycle);
+}
+
+/**
+ * upstream-first 桥接：先拨通上游、成功后才 upgrade 客户端，上游拒绝时错误以真实
+ * 状态返回而不是 101 后静默断开。返回 undefined 表示已完成 upgrade，直接结束 fetch。
+ */
+async function bridgeUpstreamWebSocket(
+  request: Request,
+  server: Bun.Server<RealtimeSocketData>,
+  target: {
+    url: string;
+    headers: Record<string, string>;
+    routeKind?: "cliproxy" | "official";
+    prefix?: string;
+    pinCpaThread?: () => void;
+    noteTurnId?: (turnId: string) => void;
+    handleResponseFrame?: (frame: string) => Promise<ResponseFrameAction | null>;
+    pluginModelFamily?: (model: string) => string | undefined;
+  },
+  sink: RequestLogSink | undefined,
+  dialFailureResponse: (error: Error) => Response,
+): Promise<Response | undefined> {
+  const incoming = new URL(request.url);
+  const logGroup = logGroupFromPath(incoming.pathname);
+  // 整条 WebSocket 会话共用一个文件：多条连接（含 subagent 的 thread）共享 session-id，
+  // 按它聚合能把此前每秒一个文件的碎片收敛成每会话一个。
+  const logFile = websocketLogFile(logGroup, request.headers.get("session-id") ?? undefined);
+  // 会话期间文件持续被追加，裁剪必须跳过它，否则会删掉进程正握着的 inode。
+  const releaseLog = sink ? retainLogFile(sink.dir, logFile) : undefined;
+  const startedAt = Date.now();
+  const socket: RealtimeSocketData = {
+    url: target.url,
+    headers: target.headers,
+    queue: [],
+    queuedBytes: 0,
+    log: sink,
+    logFile,
+    releaseLog,
+    routeKind: target.routeKind,
+    prefix: target.prefix,
+    pinCpaThread: target.pinCpaThread,
+    noteTurnId: target.noteTurnId,
+    handleResponseFrame: target.handleResponseFrame,
+    pluginModelFamily: target.pluginModelFamily,
+    clientUrl: incoming.pathname + incoming.search,
+    requestTime: localTime(),
+    startedAt,
+  };
+  let upstream: WebSocket;
+  try {
+    upstream = await dialUpstreamWebSocket(target.url, target.headers);
+  } catch (cause) {
+    const error = cause instanceof Error ? cause : new Error(String(cause));
+    logRealtimeEvent(sink, logFile, {
+      event: "ws-dial-failed",
+      url: target.url,
+      // 握手请求不经过 logging wrapper，转发的头只能在这里留痕。
+      detail: {
+        durationMs: Date.now() - startedAt,
+        error: `${error.name}: ${error.message}`,
+        headers: maskedHeaders(target.headers),
+      },
+    });
+    releaseLog?.();
+    return dialFailureResponse(error);
+  }
+  logRealtimeEvent(sink, logFile, {
+    event: "ws-dial",
+    url: target.url,
+    detail: { durationMs: Date.now() - startedAt, headers: maskedHeaders(target.headers) },
+  });
+  if (server.upgrade(request, { data: { ...socket, upstream } })) return undefined;
+  upstream.close(1000, "Client upgrade failed");
+  releaseLog?.();
+  return new Response("WebSocket upgrade failed", { status: 400 });
+}
+
+export function startPluginGateway(
+  config: GatewayConfig,
+  registry: PluginRegistry,
+  realtimeProviderMode: RealtimeProviderMode = "invalid",
+  clientVersionFile?: string,
+  processLog?: ProcessLogTarget,
+  ownsLocalModel: (model: string) => boolean = (model) => Boolean(registry.match(model)),
+): Bun.Server<RealtimeSocketData> {
+  if (typeof Bun === "undefined") {
+    throw new Error("The gateway server must run with Bun");
+  }
+  const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
+  const cpaThreads = new Set<string>();
+  const cpaTurns = new Set<string>();
+  const paths = resolvePaths();
+  const handler = createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, processLog, paths, ownsLocalModel);
+  const ready = handler.modelsReady();
+  // 服务启动保留一次 agent 刷新，健康探测也等待静态目录发布完毕。
+  void ready.catch(() => {
+    logGatewayError(processLog, {
+      requestTime: localTime(), method: "START", url: `${MOUNT_PATH}/models`, status: 503,
+      message: "模型启动刷新或静态目录发布失败；请检查上游目录、agent 登录与模型排除规则后运行 models --sync",
+    });
+  });
+  const receiver = createModelReloadReceiver(paths, (next) => handler.reloadConfig(next));
+  let server: Bun.Server<RealtimeSocketData>;
+  try {
+    server = Bun.serve<RealtimeSocketData>({
+      hostname: config.host,
+      port: config.port,
+      idleTimeout: 255,
+      async fetch(request, server) {
+        const incoming = new URL(request.url);
+        // 模型初始化失败也不能改变本地命名空间边界，更不能把子树外 Upgrade 送往上游。
+        if (incoming.pathname !== "/healthz" && !isUnderMountPath(incoming.pathname, MOUNT_PATH)) {
+          await receiver.reloadPending().catch(() => {});
+          return handler(request);
+        }
+        try {
+          await receiver.reloadPending();
+          // 普通 default 推理不依赖其它 agent 的目录，不能被它们的启动网络请求阻塞。
+          if (incoming.pathname === "/healthz" || incoming.pathname === `${MOUNT_PATH}/models`) await handler.modelsReady();
+        } catch {
+          return Response.json({ error: { message: "模型目录尚未就绪；请检查网关日志并运行 models --sync" } }, { status: 503 });
+        }
+        // /ui 命名空间必须先于一切 WebSocket 分流拦截：带 Upgrade 头的 /ui 请求会被
+        // responsesWebSocketTarget 当作可桥接目标转发上游。Web UI 现在运行在独立端口上，
+        // 模型端口对 /ui 一律本地 404（见 handleCore），绝不经由任何转发路径。
+        if (incoming.pathname === "/ui" || incoming.pathname.startsWith("/ui/")) {
+          return handler(request);
+        }
+        if (incoming.pathname === "/zai" || incoming.pathname.startsWith("/zai/")) return handler(request);
+        const endpoint = identifyClientEndpoint(incoming.pathname, MOUNT_PATH);
+        const hintedModel = modelFromRoutingHint(request);
+        if (endpoint && hintedModel && request.headers.get("upgrade")?.toLowerCase() === "websocket" && registry.match(hintedModel)) {
+          return registry.dispatchWebSocket({ request, url: incoming, model: hintedModel, ...endpoint, signal: request.signal,
+            upgrade: (pluginSession, options) => server.upgrade(request, { headers: options?.headers,
+              data: { url: request.url, headers: {}, queue: [], queuedBytes: 0, pluginSession,
+                pluginId: registry.match(hintedModel)?.plugin.id,
+                pluginModelFamily: (model) => registry.match(model)?.plugin.id } }),
+          }, () => handler(request));
+        }
+        const target = realtimeWebSocketTarget(request, config);
+        if (target) {
+          const accessError = realtimeAccessError(request, realtimeProviderMode);
+          if (accessError) return accessError;
+          const sink = resolveLogSink(config, processLog);
+          return bridgeUpstreamWebSocket(request, server, target, sink, (error) => {
+            // sideband 拨号失败是真实故障：502 并进错误摘要（原先会退化成 101 后静默断开）。
+            const incoming = new URL(request.url);
+            logGatewayError(sink?.processLog, {
+              requestTime: localTime(),
+              method: request.method,
+              url: incoming.pathname + incoming.search,
+              status: 502,
+              message: `Realtime upstream WebSocket failed: ${error.message}`,
+              upstreamUrl: target.url,
+            });
+            return new Response("Realtime upstream WebSocket failed", {
+              status: 502,
+              headers: { "x-codex-cliproxy-gateway": "realtime-upstream-unavailable" },
+            });
+          });
+        }
+        // Responses over WebSocket：按 hint + thread 粘性选上游；拨号失败回 426 降级 HTTPS/SSE。
+        const wsTarget = responsesWebSocketTarget(request, config, apiKey, cpaThreads, cpaTurns, registry);
+        if (wsTarget) {
+          const threadId = requestThreadId(request);
+          return bridgeUpstreamWebSocket(
+            request,
+            server,
+            {
+              ...wsTarget,
+              pluginModelFamily: (model) => registry.match(model)?.plugin.id ?? (ownsLocalModel(model) ? "plugin" : undefined),
+              prefix: config.upstreamOnly === true ? "" : configuredModelPrefix(config),
+              pinCpaThread: threadId ? () => rememberCpaThread(cpaThreads, threadId) : undefined,
+              handleResponseFrame: wsTarget.routeKind === "cliproxy"
+                ? (frame) => handleResponsesWebSocketFrame(frame, wsTarget)
+                : undefined,
+              // official 连接不记 turn：官方会话的图片请求本就该走官方；若该连接后续
+              // 迁移到 cliproxy（pinCpaThread 重连），turn 帧会在新连接上重新发送并被记录。
+              noteTurnId: wsTarget.routeKind === "cliproxy"
+                ? (turnId) => rememberCpaTurn(cpaTurns, turnId)
+                : undefined,
+            },
+            resolveLogSink(config, processLog),
+            () => websocketNotSupportedResponse("websocket-upstream-unavailable"),
+          );
+        }
+        return handler(request);
+      },
+      websocket: pluginAwareWebSocketHandler,
+    });
+  } catch (error) {
+    receiver.close();
+    handler.close();
+    throw error;
+  }
+  const stop = server.stop.bind(server);
+  server.stop = (closeActiveConnections) => {
+    receiver.close();
+    handler.close();
+    return stop(closeActiveConnections);
+  };
+  const routingSummary = config.upstreamOnly === true
+    ? [`default models -> ${config.upstreamBaseUrl}`]
+    : [
+      `native models -> ${OFFICIAL_BASE_URL}`,
+      `${configuredModelPrefix(config)}* -> ${config.upstreamBaseUrl}`,
+    ];
+  console.log([
+    `--${new Date().toISOString()}--`,
+    `agent-proxy gateway listening on ${server.url}`,
+    ...routingSummary,
+    `realtime provider -> ${realtimeProviderMode}`,
+  ].join("\n"));
+  return server;
+}
+
+function hintedPluginId(request: Request, registry: PluginRegistry): string | undefined {
+  const model = modelFromRoutingHint(request);
+  return model ? registry.match(model)?.plugin.id : undefined;
+}
+
+/** 每个升级会话携带处理入口，Realtime 与插件的传输状态互不混用。 */
+const pluginAwareWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> = {
+  open(socket) {
+    if (socket.data.pluginSession) return socket.data.pluginSession.open?.(socket);
+    return realtimeWebSocketHandler.open?.(socket);
+  },
+  message(socket, data) {
+    if (socket.data.pluginSession) {
+      const text = typeof data === "string" ? data : new TextDecoder().decode(data);
+      let payload: unknown;
+      try { payload = JSON.parse(text); } catch { /* 非 JSON 传输交给插件处理。 */ }
+      if (isRecord(payload) && typeof payload.model === "string"
+        && socket.data.pluginModelFamily?.(payload.model) !== socket.data.pluginId) {
+        socket.close(1008, "模型归属已改变，请重新建立 WebSocket 连接");
+        return;
+      }
+      return socket.data.pluginSession.message(socket, typeof data === "string" ? data : new Uint8Array(data));
+    }
+    return realtimeWebSocketHandler.message(socket, data);
+  },
+  drain(socket) {
+    if (socket.data.pluginSession) return socket.data.pluginSession.drain?.(socket);
+    return realtimeWebSocketHandler.drain?.(socket);
+  },
+  close(socket, code, reason) {
+    if (socket.data.pluginSession) return socket.data.pluginSession.close?.(socket, code, reason);
+    return realtimeWebSocketHandler.close?.(socket, code, reason);
+  },
+};

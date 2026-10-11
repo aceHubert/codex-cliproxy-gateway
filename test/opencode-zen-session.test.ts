@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   OPENCODE_SESSION_PATTERN,
   createOpenCodeSessionId,
   createOpenCodeSessionResolver,
   createSessionBindingCache,
   decodeOpenCodeSessionTimestamp,
-} from "../src/opencode/session.ts";
+} from "@agent-proxy/opencode-zen/session";
 
 test("生成的 session id 符合 ses_ + 12位Hex + 14位Base62 的 30 字符结构", () => {
   for (let index = 0; index < 50; index++) {

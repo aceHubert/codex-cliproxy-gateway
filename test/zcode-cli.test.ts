@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { runCli } from "../src/cli.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../src/config.ts";
-import { resolvePaths } from "../src/paths.ts";
+import test from "./host-test.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 
 function installedConfig(paths: ReturnType<typeof resolvePaths>) {
   return {
+    agy: false, opencodeZen: false,
     $schema: GATEWAY_CONFIG_SCHEMA_URL,
     configVersion: GATEWAY_CONFIG_VERSION,
     host: "127.0.0.1",
@@ -133,7 +134,7 @@ test("config --zcode 显式拒绝缺失、非法和位置参数", async () => {
   }
 });
 
-test("config --zcode 拒绝会让新进程无法启动的组合，保留原配置", {
+test("config --zcode 忽略过时 prefix 残留并保存开关", {
   skip: process.platform !== "darwin",
 }, async () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "zcode-cli-reserved-prefix-"));
@@ -143,16 +144,16 @@ test("config --zcode 拒绝会让新进程无法启动的组合，保留原配�
   delete process.env.CODEX_HOME;
   const paths = resolvePaths();
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
-  // 保留前缀与启用 ZCode 的组合会被新进程的 validateZcodeConfig 拒绝启动：
-  // CLI 必须在写盘与重启之前挡下，否则网关直接不可用。
+  // 前缀已按上游类型派生：文件残留的 zcode/ 不再与启用 ZCode 冲突，
+  // 配置开关可以正常保存，过时 prefix 键由前置同步移除。
   const config = { ...installedConfig(paths), prefix: "zcode/" };
   fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(config)}\n`);
   fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, config })}\n`);
   try {
-    await assert.rejects(runCli(["config", "--zcode", "on"]), /前缀保留给 ZCode/);
-    // config 命令的非法组合确实未写入；文件差异只来自命令前置同步的同版本补键
-    // （新开关按缺省 false 回填并以格式化 JSON 重写，与 qoder/agy 落地时的行为一致）。
-    assert.equal(fs.readFileSync(paths.gatewayConfig, "utf8"), `${JSON.stringify({ ...config, agy: false, opencodeZen: false }, null, 2)}\n`);
+    await runCli(["config", "--zcode", "on"]);
+    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as Record<string, unknown>;
+    assert.equal(saved.zcode, true);
+    assert.equal("prefix" in saved, false);
   } finally {
     if (oldHome === undefined) delete process.env.HOME;
     else process.env.HOME = oldHome;

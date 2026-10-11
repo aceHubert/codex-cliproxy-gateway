@@ -1,0 +1,166 @@
+import fs from "node:fs";
+import { createHash } from "node:crypto";
+import { getVendorModelPresets } from "@agent-proxy/models";
+import { compileModelOverrides, synthesizeModelEntry } from "@agent-proxy/plugin-api";
+import { atomicWrite } from "@agent-proxy/plugin-api";
+import type { ModelCatalog } from "@agent-proxy/plugin-api";
+import type { ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
+
+const vendorModelIds = () => (getVendorModelPresets()["z.ai"] ?? []).map((model) => model.name);
+/** 旧版单 API Key 命名空间；新版多 Key 目录不再生成该前缀。 */
+const ZCODE_PREFIX = "zcode/";
+/** 套餐作用域前缀；API Key 因可有多个 provider，前缀由 provider ID 动态生成。 */
+const PLAN_PREFIXES: Partial<Record<ZcodeSelection["kind"], string>> = {
+  "individual-coding-plan": "zcode-individual-coding-plan/",
+  "team-coding-plan": "zcode-team-coding-plan/",
+  "start-plan": "zcode-start-plan/",
+};
+/** 显示名括号内与 ZCode 客户端模型选择器的套餐分组（个人/团队/免费）一致。 */
+const PLAN_DISPLAY_LABELS: Partial<Record<ZcodeSelection["kind"], string>> = {
+  "individual-coding-plan": "个人",
+  "team-coding-plan": "团队",
+  "start-plan": "免费",
+};
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+export function isZcodeModel(model: unknown): boolean {
+  return typeof model === "string" && /^zcode(?:\/|-)/i.test(model);
+}
+
+/** ZCode 对外模型 ID 的固定前缀族：旧 API Key 命名空间与各套餐作用域前缀。
+ * API Key 多 provider 的前缀（zcode-<providerId>/）由 provider ID 动态生成，不在此列。 */
+export function zcodeStaticModelPrefixes(): string[] {
+  return [ZCODE_PREFIX, ...Object.values(PLAN_PREFIXES)].filter(
+    (prefix): prefix is string => typeof prefix === "string",
+  );
+}
+
+/** 从对外模型 ID 解析套餐连接形态；未声明的 zcode- 段不属于任何套餐。 */
+export function zcodeModelPlan(model: string): ZcodeSelection["kind"] | undefined {
+  if (!isZcodeModel(model)) return undefined;
+  const id = model.toLowerCase();
+  for (const [kind, prefix] of Object.entries(PLAN_PREFIXES) as [ZcodeSelection["kind"], string][]) {
+    if (id.startsWith(prefix)) return kind;
+  }
+  return id.startsWith(ZCODE_PREFIX) || /^zcode-[^/]+\//.test(id) ? "api-key" : undefined;
+}
+
+export function zcodeAPIProviderPrefix(providerID: string): string {
+  return `zcode-${encodeURIComponent(providerID)}/`;
+}
+
+/** 从 `zcode-<providerId>/model` 提取 provider ID；URL 编码用于容忍特殊 ID。 */
+export function zcodeAPIProviderIDFromModel(model: string): string | undefined {
+  if (zcodeModelPlan(model) !== "api-key") return undefined;
+  const match = /^zcode-([^/]+)\//i.exec(model);
+  if (!match) return undefined;
+  try { return decodeURIComponent(match[1]!); }
+  catch { return undefined; }
+}
+
+/** 目录使用厂商规范名称，上游使用当前套餐配置中的原始模型拼写。 */
+export function zcodeUpstreamModel(model: string, snapshot: ZcodeProviderSnapshot): string | undefined {
+  const plan = zcodeModelPlan(model);
+  // 套餐段必须与快照的连接形态一致：会话选了哪个套餐，就只能用该套餐的模型拼写。
+  if (!plan || plan !== snapshot.plan) return;
+  const prefix = plan === "api-key"
+    ? model.toLowerCase().startsWith(zcodeAPIProviderPrefix(snapshot.providerID))
+      ? zcodeAPIProviderPrefix(snapshot.providerID)
+      : ZCODE_PREFIX
+    : PLAN_PREFIXES[plan]!;
+  if (!model.toLowerCase().startsWith(prefix.toLowerCase())) return;
+  const id = model.slice(prefix.length).toLowerCase();
+  if (!id) return;
+  if (!vendorModelIds().some((candidate) => candidate.toLowerCase() === id)) return;
+  return snapshot.modelIds.find((candidate) => candidate.toLowerCase() === id);
+}
+
+/** 归一化显示名：剥掉历史 ZCode 前缀/后缀，确保渠道标识只由投影层统一添加。 */
+function stripZcodeChannelLabel(name: string): string {
+  return name
+    .replace(/^ZCode\//, "")
+    .replace(/ \(ZCode[^)]*\)$/, "")
+    .replace(/（ZCode[^）]*）$/, "");
+}
+
+/**
+ * 仅由模型包的厂商预设合成全量裸 ID 目录。纯内存计算，
+ * 重建成本与模型条数同级，不需要磁盘缓存，也不携带任何套餐或授权信息。
+ */
+export function buildZcodeVendorCatalog(): ModelCatalog {
+  const vendorModels = getVendorModelPresets();
+  const modelIds = (vendorModels["z.ai"] ?? []).map((model) => model.name);
+  const vendors = compileModelOverrides(vendorModels, "vendor_models.json");
+  const preset = { models: modelIds.map((id, index) =>
+    synthesizeModelEntry(`z.ai/${id}`, index, { models: [] }, vendors)) };
+  return { models: preset.models.map((entry) => {
+    const slug = entry.slug.slice("z.ai/".length);
+    return {
+      ...entry,
+      slug,
+      display_name: entry.display_name ?? slug,
+      prefer_websockets: false,
+      // zcode 链路已把 Responses web_search 原生映射为 web_search_20250305（实测 z.ai 支持）。
+      supports_search_tool: true,
+    };
+  }) };
+}
+
+/** /models 只按快照套餐的支持集合筛选并加套餐作用域前缀，不重新合成厂商元数据。 */
+export function createZcodeCatalog(snapshot: ZcodeProviderSnapshot, cached: ModelCatalog): ModelCatalog {
+  return createZcodeCatalogForModels(
+    snapshot.modelIds,
+    cached,
+    snapshot.plan,
+    snapshot.plan === "api-key" ? snapshot.providerID : undefined,
+    snapshot.providerName,
+  );
+}
+
+/** 按套餐支持集合（或多个套餐/entitlement 的能力并集）合成带套餐作用域前缀的目录。 */
+export function createZcodeCatalogForModels(
+  modelIds: readonly string[],
+  cached: ModelCatalog,
+  plan: ZcodeSelection["kind"] = "api-key",
+  apiProviderID?: string,
+  apiProviderName?: string,
+): ModelCatalog {
+  const supported = new Set(modelIds.map((model) => model.toLowerCase()));
+  const prefix = plan === "api-key" && apiProviderID
+    ? zcodeAPIProviderPrefix(apiProviderID)
+    : PLAN_PREFIXES[plan] ?? ZCODE_PREFIX;
+  // 渠道统一用 ZCode/ 前缀标注（与 cliproxy/new-api 的同名条目区分），括号内只保留
+  // 套餐分组或多 Key 的 provider 名，不再重复 ZCode 字样。
+  const qualifier = plan === "api-key"
+    ? apiProviderID ? `（${apiProviderName ?? apiProviderID}）` : ""
+    : PLAN_DISPLAY_LABELS[plan] ? ` (${PLAN_DISPLAY_LABELS[plan]})` : "";
+  return { models: cached.models.filter((entry) => supported.has(entry.slug.toLowerCase())).map((entry) => ({
+    ...entry,
+    slug: `${prefix}${entry.slug}`,
+    display_name: `ZCode/${stripZcodeChannelLabel(entry.display_name ?? entry.slug)}${qualifier}`,
+  })) };
+}
+
+/** 启用 ZCode 时保留 zcode/ 顶层命名空间，防止上游同名条目与 ZCode 目录冲突。 */
+export function mergeZcodeCatalog(base: ModelCatalog, zcode: ModelCatalog): ModelCatalog {
+  const models = base.models.filter((model) => !isZcodeModel(model.slug));
+  const priority = Math.max(0, ...models.map((model) => Number(model.priority) || 0)) + 100;
+  return { models: [...models, ...zcode.models.map((model, index) => ({ ...model, priority: priority + index }))] };
+}
+
+/**
+ * 把当前套餐的对外目录落盘。watch 驱动的账号/套餐切换与启动首读都会经过这里，
+ * `/v1/models` 只消费内存中的同一份结果；配置失效时写入空 models，不留旧套餐模型。
+ * 内容未变化时不写盘，返回是否发生了实际变更。
+ */
+export function writeZcodeServedCatalog(file: string, catalog: ModelCatalog): boolean {
+  const contents = `${JSON.stringify({
+    content_hash: digest(catalog.models),
+    models: catalog.models,
+  }, null, 2)}\n`;
+  try {
+    if (fs.readFileSync(file, "utf8") === contents) return false;
+  } catch { /* 缺失或不可读时直接写入。 */ }
+  atomicWrite(file, contents);
+  return true;
+}

@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
-import { managedCodexServiceToml, managedCodexToml } from "../src/cli.ts";
-import { createGatewayHandler, startGateway } from "../src/gateway.ts";
-import { renderLaunchAgent } from "../src/launchd.ts";
-import { websocketLogFile } from "../src/request-log.ts";
+import { managedCodexServiceToml, managedCodexToml } from "../apps/gateway/src/cli.ts";
+import { createGatewayHandler, startGateway } from "../apps/gateway/src/gateway-composition.ts";
+import { renderLaunchAgent } from "../apps/gateway/src/launchd.ts";
+import { websocketLogFile } from "../apps/gateway/src/request-log.ts";
 import {
   checkFrameRouting,
   loadRealtimeProviderMode,
@@ -15,12 +15,14 @@ import {
   realtimeWebSocketHandler,
   realtimeWebSocketTarget,
   turnIdFromResponseCreate,
-} from "../src/realtime.ts";
-import { readRootTomlString, restoreRootTomlKeys } from "../src/toml.ts";
-import type { GatewayConfig } from "../src/types.ts";
+} from "../apps/gateway/src/realtime.ts";
+import { readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { routingPluginFamily } from "./plugin-routing-fixture.ts";
 
 function config(officialBaseUrl: string): GatewayConfig {
   return {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
     port: 0,
     mountPath: "/v1",
@@ -382,8 +384,8 @@ test("Realtime WebSocket targets distinguish normal connections and sidebands", 
     "sec-websocket-key": "client-generated",
     cookie: "secret",
   };
+  // 官方上游已写死为常量：oauth 会话一律指向 chatgpt.com/backend-api/codex。
   const backend = config("https://chatgpt.com/backend-api/codex");
-  const api = config("https://api.openai.com/v1");
 
   const backendNormal = realtimeWebSocketTarget(new Request(
     "http://127.0.0.1:8320/v1/live?model=gpt-realtime",
@@ -394,8 +396,8 @@ test("Realtime WebSocket targets distinguish normal connections and sidebands", 
   const apiNormal = realtimeWebSocketTarget(new Request(
     "http://127.0.0.1:8320/v1/realtime?model=gpt-realtime",
     { headers },
-  ), api);
-  assert.equal(apiNormal?.url, "wss://api.openai.com/v1/realtime?model=gpt-realtime");
+  ), backend);
+  assert.equal(apiNormal?.url, "wss://chatgpt.com/backend-api/codex?model=gpt-realtime");
 
   const framelessSideband = realtimeWebSocketTarget(new Request(
     "http://127.0.0.1:8320/v1/live/rtc_test",
@@ -428,7 +430,7 @@ test("WebSocket bridge forwards client close code and reason to the upstream soc
   } as unknown as WebSocket;
   const socket = {
     data: { url: "ws://example.invalid", headers: {}, upstream, queue: [], queuedBytes: 0 },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   realtimeWebSocketHandler.close?.(socket, 4001, "client-done");
   assert.deepEqual(forwarded, { code: 4001, reason: "client-done" });
 });
@@ -436,17 +438,17 @@ test("WebSocket bridge forwards client close code and reason to the upstream soc
 test("frame routing guards against Codex reusing one socket across upstreams", () => {
   // 实测 Codex 会复用同一条连接达 88 秒并在其上切换模型，握手时选定的上游会失配。
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-luna"}' },
     "official frame on an official socket passes through untouched",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"cliproxy/gpt-5.6-luna"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"cliproxy/gpt-5.6-luna"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reconnect" },
     "cliproxy frame on an official socket must trigger a reconnect, not reach the ChatGPT backend",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "cliproxy", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "cliproxy", "cliproxy/", routingPluginFamily),
     { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-luna"}' },
     "an unprefixed title model stays on the established CPA route",
   );
@@ -455,7 +457,7 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
   const stripped = checkFrameRouting(
     '{"type":"response.create","model":"cliproxy/gpt-5.6-luna","input":[]}',
     "cliproxy",
-    "cliproxy/",
+    "cliproxy/", routingPluginFamily,
   );
   assert.ok(stripped.kind === "forward");
   assert.deepEqual(JSON.parse(stripped.frame), {
@@ -466,15 +468,15 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
 
   // 无 model 字段的控制帧与非 JSON 帧原样透传。
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.cancel"}', "cliproxy", "cliproxy/"),
+    checkFrameRouting('{"type":"response.cancel"}', "cliproxy", "cliproxy/", routingPluginFamily),
     { kind: "forward", frame: '{"type":"response.cancel"}' },
   );
   assert.deepEqual(
-    checkFrameRouting("not json at all", "official", "cliproxy/"),
+    checkFrameRouting("not json at all", "official", "cliproxy/", routingPluginFamily),
     { kind: "forward", frame: "not json at all" },
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-sol"}', "cliproxy", ""),
+    checkFrameRouting('{"type":"response.create","model":"gpt-5.6-sol"}', "cliproxy", "", routingPluginFamily),
     { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-sol"}' },
     "upstream-only sockets forward every model without route switching",
   );
@@ -484,56 +486,56 @@ test("HTTP-only model families are refused locally on every bridged socket", () 
   // 2026-09-21 事故：official 预热桥上发 codebuddy-cn/* 帧被原样透传到 ChatGPT 后端，
   // 由后端回 400 "model is not supported when using Codex with a ChatGPT account"。
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "codebuddy-cn/hy4-preview-f", family: "codebuddy" },
     "codebuddy frame on an official socket must never reach the ChatGPT backend",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"codebuddy-intl/gpt-5.6-sol"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-intl/gpt-5.6-sol"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "codebuddy-intl/gpt-5.6-sol", family: "codebuddy" },
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"workbuddy-intl/auto"}', "cliproxy", "cliproxy/"),
-    { kind: "reject", model: "workbuddy-intl/auto", family: "workbuddy" },
+    checkFrameRouting('{"type":"response.create","model":"workbuddy-intl/auto"}', "cliproxy", "cliproxy/", routingPluginFamily),
+    { kind: "reject", model: "workbuddy-intl/auto", family: "codebuddy" },
     "HTTP-only frames must not leak to the CLIProxy upstream either",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "agy/gemini-3.8-flash-high", family: "agy" },
     "agy frame on an official socket must never reach the ChatGPT backend",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "cliproxy", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"agy/gemini-3.8-flash-high"}', "cliproxy", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "agy/gemini-3.8-flash-high", family: "agy" },
     "agy frame must not leak to the CLIProxy upstream either",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"opencode-zen/nemotron-3.5-lightning-free"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"opencode-zen/nemotron-3.5-lightning-free"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "opencode-zen/nemotron-3.5-lightning-free", family: "opencode-zen" },
     "opencode-zen frame on an official socket must never reach the ChatGPT backend",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}', "cliproxy", "cliproxy/"),
-    { kind: "reject", model: "OPENCODE-ZEN/exo-free", family: "opencode-zen" },
-    "opencode-zen frames must not leak to the CLIProxy upstream either, and detection is case-insensitive",
+    checkFrameRouting('{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}', "cliproxy", "cliproxy/", routingPluginFamily),
+    { kind: "forward", frame: '{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}' },
+    "插件模式区分大小写，大写模型不属于已注册命名空间",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "codebuddy/deepseek-v4.1-flash", family: "codebuddy" },
     "legacy region-less codebuddy/ slugs are refused as well",
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"zcode/glm-5.3"}', "official", "cliproxy/"),
+    checkFrameRouting('{"type":"response.create","model":"zcode/glm-5.3"}', "official", "cliproxy/", routingPluginFamily),
     { kind: "reject", model: "zcode/glm-5.3", family: "zcode" },
   );
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"CODEBUDDY-CN/hy4-preview-f"}', "official", "cliproxy/"),
-    { kind: "reject", model: "CODEBUDDY-CN/hy4-preview-f", family: "codebuddy" },
-    "family detection is case-insensitive like the adapters",
+    checkFrameRouting('{"type":"response.create","model":"CODEBUDDY-CN/hy4-preview-f"}', "official", "cliproxy/", routingPluginFamily),
+    { kind: "forward", frame: '{"type":"response.create","model":"CODEBUDDY-CN/hy4-preview-f"}' },
+    "插件模式区分大小写，大写模型不属于已注册命名空间",
   );
   // upstream-only 纯转发是纯管道，不做帧路由（既有设计）：空 prefix 整体跳过。
   assert.deepEqual(
-    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "cliproxy", ""),
+    checkFrameRouting('{"type":"response.create","model":"codebuddy-cn/hy4-preview-f"}', "cliproxy", "", routingPluginFamily),
     { kind: "reject", model: "codebuddy-cn/hy4-preview-f", family: "codebuddy" },
     "reserved HTTP-only namespaces are intercepted even in upstream-only mode",
   );
@@ -566,8 +568,9 @@ test("HTTP-only frames close the bridge for HTTPS/SSE negotiation and never reac
       routeKind: "official",
       prefix: "cliproxy/",
       log: { processLog: { file: processLog, maxBytes: 0 } },
+      pluginModelFamily: routingPluginFamily,
     },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   try {
     realtimeWebSocketHandler.message?.(
       socket,
@@ -645,7 +648,7 @@ test("bridged cliproxy sockets record turn ids for image request routing", () =>
       prefix: "cliproxy/",
       noteTurnId: (turnId: string) => noted.push(turnId),
     },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   realtimeWebSocketHandler.message?.(socket, JSON.stringify({
     type: "response.create",
     model: "cliproxy/gpt-5.6-luna",
@@ -668,7 +671,10 @@ test("bridged cliproxy sockets record turn ids for image request routing", () =>
 });
 
 test("WebSocket bridge records lifecycle events into the live route log", () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-realtime-ws-log-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-realtime-ws-log-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   try {
     const upstream = {
       readyState: WebSocket.OPEN,
@@ -685,7 +691,7 @@ test("WebSocket bridge records lifecycle events into the live route log", () => 
         log: { dir: logDir, maxLogs: 0 },
         logFile: websocketLogFile("v1-live", "01a01960-3a52-7311-9258-f9144ad58b65"),
       },
-    } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+    } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
 
     realtimeWebSocketHandler.message?.(socket, '{"type":"session.update"}');
     realtimeWebSocketHandler.close?.(socket, 1006, "");
@@ -698,7 +704,9 @@ test("WebSocket bridge records lifecycle events into the live route log", () => 
     // 1006 是排查 sideband 静默挂起的关键信号，必须落盘。
     assert.match(log, /\[realtime\] ws-client-close .*"code":1006/);
   } finally {
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
@@ -719,7 +727,7 @@ test("closing a WebSocket session releases its log file for retention", () => {
       queuedBytes: 0,
       releaseLog: () => { released += 1; },
     },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
 
   realtimeWebSocketHandler.close?.(socket, 1000, "done");
 
@@ -748,7 +756,7 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
       pinCpaThread() { pinned += 1; },
     },
     close(code: number, reason: string) { downstreamClosed.push({ code, reason }); },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
 
   realtimeWebSocketHandler.message?.(
     socket,
@@ -779,7 +787,7 @@ test("CPA route keeps an unprefixed Luna title frame on the CPA upstream", () =>
       prefix: "cliproxy/",
     },
     close() { throw new Error("CPA title frame must not close the downstream"); },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   const frame = '{"type":"response.create","model":"gpt-5.6-luna","input":[]}';
 
   realtimeWebSocketHandler.message?.(socket, frame);
@@ -857,14 +865,19 @@ test("Bun gateway bridges Realtime WebSocket text, binary, headers, and close", 
       },
     },
   });
-  const gateway = startGateway(config(`${upstream.url}v1`), "builtin");
-  const url = new URL("/v1/live", gateway.url);
+  const gateway = startGateway(
+    { ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${upstream.url}v1` },
+    "builtin",
+  );
+  const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
   const ClientWebSocket = WebSocket as unknown as new (
     url: string | URL,
     options: Bun.WebSocketOptions,
   ) => WebSocket;
-  const client = new ClientWebSocket(url, { headers: { authorization: "Bearer bridge-test" } });
+  const client = new ClientWebSocket(url, {
+    headers: { authorization: "Bearer bridge-test", "x-codex-routing-hint": "model=cliproxy/bridge-model" },
+  });
   client.binaryType = "arraybuffer";
   const messages: Array<string | Uint8Array> = [];
 
@@ -894,7 +907,8 @@ test("Bun gateway bridges Realtime WebSocket text, binary, headers, and close", 
     assert.equal(clientOpened, false);
     releaseUpstream();
     await bridged;
-    assert.equal(handshakeAuthorization, "Bearer bridge-test");
+    // cliproxy 路由剥客户端 OAuth 并注入网关 key：上游绝不能看到 bridge-test。
+    assert.notEqual(handshakeAuthorization, "Bearer bridge-test");
     assert.equal(messages[0], "hello");
     assert.deepEqual([...messages[1] as Uint8Array], [1, 2, 3]);
     client.close(1000, "done");
@@ -924,7 +938,7 @@ test("bridge open flushes queued frames to the pre-dialed upstream", () => {
       queue: ["queued-frame"],
       queuedBytes: 12,
     },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   realtimeWebSocketHandler.open?.(socket);
   assert.deepEqual(sent, ["queued-frame"]);
   assert.equal(socket.data.queue.length, 0);
@@ -936,13 +950,16 @@ test("bridge closes with 1011 when the upstream socket is missing", () => {
   const socket = {
     data: { url: "ws://example.invalid", headers: {}, queue: [], queuedBytes: 0 },
     close(code: number, reason: string) { closed.push({ code, reason }); },
-  } as unknown as Bun.ServerWebSocket<import("../src/realtime.ts").RealtimeSocketData>;
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
   realtimeWebSocketHandler.open?.(socket);
   assert.deepEqual(closed, [{ code: 1011, reason: "Realtime upstream WebSocket is unavailable" }]);
 });
 
 test("responses WebSocket probe is forwarded to the hinted upstream", async () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-log-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-log-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   let handshakeUrl = "";
   let handshakeAuthorization: string | null = null;
   let handshakeBeta: string | null = null;
@@ -961,7 +978,12 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     },
   });
   const gateway = startGateway(
-    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    {
+      ...config("https://chatgpt.com/backend-api/codex"),
+      upstreamBaseUrl: `${upstream.url}v1`,
+      requestLogging: true,
+      logDir,
+    },
     "builtin",
   );
   const url = new URL("/v1/responses", gateway.url);
@@ -974,7 +996,7 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     headers: {
       authorization: "Bearer official-oauth",
       "openai-beta": "responses_websockets=2026-02-06",
-      "x-codex-routing-hint": "model=gpt-5.6-luna",
+      "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna",
     },
   });
   try {
@@ -992,7 +1014,8 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     });
     assert.equal(reply, "hello-over-ws");
     assert.equal(handshakeUrl, `${upstream.url}v1/responses`);
-    assert.equal(handshakeAuthorization, "Bearer official-oauth");
+    // cliproxy 路由替换鉴权：客户端 OAuth 不得透传到上游。
+    assert.notEqual(handshakeAuthorization, "Bearer official-oauth");
     assert.equal(handshakeBeta, "responses_websockets=2026-02-06");
     const logFile = fs.readdirSync(logDir).find((name) => /^cliproxy-v1-responses-ws-[\w-]+\.log$/.test(name));
     assert.ok(logFile, `expected a v1-responses log, found: ${fs.readdirSync(logDir).join(", ") || "(empty)"}`);
@@ -1001,7 +1024,9 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
@@ -1166,7 +1191,10 @@ test("cliproxy WebSocket closes cleanly when compaction upstream returns an empt
 });
 
 test("responses WebSocket close writes a 101 request summary to gateway.log", async () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-summary-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-summary-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   const processLog = path.join(logDir, "gateway.log");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -1180,7 +1208,12 @@ test("responses WebSocket close writes a 101 request summary to gateway.log", as
     },
   });
   const gateway = startGateway(
-    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    {
+      ...config("https://chatgpt.com/backend-api/codex"),
+      upstreamBaseUrl: `${upstream.url}v1`,
+      requestLogging: true,
+      logDir,
+    },
     "builtin",
     undefined,
     undefined,
@@ -1196,7 +1229,7 @@ test("responses WebSocket close writes a 101 request summary to gateway.log", as
     headers: {
       authorization: "Bearer official-oauth",
       "openai-beta": "responses_websockets=2026-02-06",
-      "x-codex-routing-hint": "model=gpt-5.6-luna",
+      "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna",
     },
   });
   try {
@@ -1220,7 +1253,9 @@ test("responses WebSocket close writes a 101 request summary to gateway.log", as
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
@@ -1255,7 +1290,10 @@ function rawUpgradeRequest(url: URL, extraHeaders: Record<string, string>): Prom
 }
 
 test("responses WebSocket dial failure falls back to 426 negotiation semantics", async () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-fail-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-fail-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -1264,12 +1302,17 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
     },
   });
   const gateway = startGateway(
-    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    {
+      ...config("https://chatgpt.com/backend-api/codex"),
+      upstreamBaseUrl: `${upstream.url}v1`,
+      requestLogging: true,
+      logDir,
+    },
     "builtin",
   );
   try {
     const head = await rawUpgradeRequest(new URL("/v1/responses", gateway.url), {
-      "x-codex-routing-hint": "model=gpt-5.6-luna",
+      "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna",
     });
     assert.match(head, /^HTTP\/1\.1 426/);
     assert.match(head, /x-codex-cliproxy-gateway: websocket-upstream-unavailable/);
@@ -1284,12 +1327,17 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
   } finally {
     gateway.stop(true);
     upstream.stop(true);
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
 test("slow upstream handshakes within the dial budget still bridge instead of 426", { timeout: 30_000 }, async () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-slow-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-slow-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -1304,7 +1352,12 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
     },
   });
   const gateway = startGateway(
-    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    {
+      ...config("https://chatgpt.com/backend-api/codex"),
+      upstreamBaseUrl: `${upstream.url}v1`,
+      requestLogging: true,
+      logDir,
+    },
     "builtin",
   );
   const url = new URL("/v1/responses", gateway.url);
@@ -1316,7 +1369,7 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
   const client = new ClientWebSocket(url, {
     headers: {
       "openai-beta": "responses_websockets=2026-02-06",
-      "x-codex-routing-hint": "model=gpt-5.6-luna",
+      "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna",
     },
   });
   try {
@@ -1337,12 +1390,17 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
 test("realtime sideband dial failure surfaces as 502 instead of a silent 101", async () => {
-  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sideband-fail-"));
+  const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sideband-fail-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = logHome;
+  const logDir = path.join(logHome, "logs");
   const processLog = path.join(logDir, "gateway.log");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -1352,7 +1410,12 @@ test("realtime sideband dial failure surfaces as 502 instead of a silent 101", a
     },
   });
   const gateway = startGateway(
-    { ...config(`${upstream.url}v1`), requestLogging: true, logDir },
+    {
+      ...config("https://chatgpt.com/backend-api/codex"),
+      upstreamBaseUrl: `${upstream.url}v1`,
+      requestLogging: true,
+      logDir,
+    },
     "builtin",
     undefined,
     undefined,
@@ -1372,6 +1435,8 @@ test("realtime sideband dial failure surfaces as 502 instead of a silent 101", a
   } finally {
     gateway.stop(true);
     upstream.stop(true);
-    fs.rmSync(logDir, { recursive: true, force: true });
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
+    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });

@@ -1,15 +1,15 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolvePaths } from "../src/paths.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import {
   assertCodexHomeAvailable,
   claimCodexHome,
   releaseCodexHome,
   resolveInstalledCodexPaths,
-} from "../src/codex-ownership.ts";
+} from "../apps/gateway/src/codex-ownership.ts";
 
 function fixture(run: (home: string) => void): void {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ccp-codex-owner-")));
@@ -154,6 +154,20 @@ test("默认旧托管 state 保留对自定义客户端的原归属", () => fixt
   assert.throws(() => assertCodexHomeAvailable(a, false), /managed by gateway/);
   state(defaults.stateFile, { codexConfigManaged: false, codexHome: a.codexHome });
   assert.doesNotThrow(() => assertCodexHomeAvailable(a, false));
+}));
+
+test("新旧默认目录缺少 owner 时，托管 state 和客户端备份均保留原归属", () => fixture((home) => {
+  const a = instance(home, "A");
+  for (const directory of [".agent-proxy-gateway", ".codex-cliproxy-gateway"]) {
+    const file = path.join(home, directory, "state.json");
+    state(file, { configBackup: { backup: path.join(a.codexHome, "config.toml.bak-cliproxy-gateway-20261009183000") } });
+    assert.throws(() => assertCodexHomeAvailable(a, false), /managed by gateway/);
+    state(file, { codexConfigManaged: true, codexHome: a.codexHome });
+    assert.throws(() => assertCodexHomeAvailable(a, false), /managed by gateway/);
+    state(file, { codexConfigManaged: false, codexHome: a.codexHome });
+    assert.doesNotThrow(() => assertCodexHomeAvailable(a, false));
+    fs.rmSync(file);
+  }
 }));
 
 test("已完成客户端恢复的默认卸载记录不阻止另一实例取得归属", () => fixture((home) => {

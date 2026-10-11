@@ -2,15 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { createGatewayHandler, isAgyResponsesWebSocket } from "../src/gateway.ts";
-import { agyEnabled, createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "../src/agy/index.ts";
-import type { AgyDependencies } from "../src/agy/index.ts";
-import fingerprintData from "../src/agy/fingerprint-data.json";
-import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "../src/agy/transport.ts";
-import type { AgyCredentials } from "../src/agy/credentials.ts";
-import type { GatewayConfig } from "../src/types.ts";
-import { createAgyCatalogStore } from "../src/agy/catalog.ts";
+import test from "./host-test.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { agyEnabled, createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "@agent-proxy/agy";
+import type { AgyDependencies } from "@agent-proxy/agy";
+import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
+import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
+import type { AgyCredentials } from "@agent-proxy/agy/credentials";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { createAgyCatalogStore } from "@agent-proxy/agy/catalog";
+
+import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -24,6 +26,7 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
   let schedules = 0;
   const inferred: string[] = [];
   const adapter = createAgyAdapter({
+    zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   }, {
@@ -74,6 +77,7 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
 test("agy manual 显式刷新无缓存失败会报错", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-manual-fail-"));
   const adapter = createAgyAdapter({
+    zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   }, {
@@ -133,12 +137,15 @@ interface Fixture {
 
 async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamResponse: () => Response = upstream): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-gateway-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const config: GatewayConfig = {
+    opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: false, qoder: false, agy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
+  fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
   const handlers: Array<ReturnType<typeof createGatewayHandler>> = [];
   const originalFetch = globalThis.fetch;
   const inferBodies: Json[] = [];
@@ -182,6 +189,8 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -221,6 +230,7 @@ test("agy 上游错误只输出预定义分类，不回显错误正文", () => {
 
 test("agy 配置校验：类型、环回监听与前缀保留", () => {
   const base: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
@@ -372,8 +382,8 @@ test("agy WebSocket 升级一律本地 426", TIMEOUT, async () => {
     const upgrade = new Request("http://127.0.0.1:8327/v1/responses", {
       headers: { upgrade: "websocket", "x-codex-routing-hint": `model=${MODEL}` },
     });
-    assert.equal(isAgyResponsesWebSocket(upgrade, config), true);
-    assert.equal(isAgyResponsesWebSocket(new Request("http://127.0.0.1:8327/v1/responses", { headers: { upgrade: "websocket" } }), config), false);
+    assert.equal(matchesPluginUpgrade(upgrade, config, "agy"), true);
+    assert.equal(matchesPluginUpgrade(new Request("http://127.0.0.1:8327/v1/responses", { headers: { upgrade: "websocket" } }), config, "agy"), false);
     // handler 层同样必须拒绝：agy 上游不是 Responses WebSocket 端点，绝不桥接。
     const response = await create()(upgrade);
     assert.equal(response.status, 426);
@@ -426,13 +436,18 @@ test("agy 合并条目按 reasoning effort 选择档位，显式档位 slug 兼�
   });
 });
 
-test("agy 前缀大小写不敏感：AGY/x 归一后命中目录", TIMEOUT, async () => {
+test("agy 插件模式区分大小写，大写前缀保持原样进入默认链路", TIMEOUT, async () => {
   await fixture(async ({ create, inferBodies }) => {
     const handler = create();
     await handler(new Request("http://127.0.0.1:8327/v1/models"));
-    const response = await handler(request("AGY/gemini-3.8-flash"));
-    assert.equal(response.status, 200);
-    assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => Response.json({ defaultModel: (await new Request(input, init).json() as Json).model })) as typeof fetch;
+    try {
+      const response = await handler(request("AGY/gemini-3.8-flash"));
+      assert.equal(response.status, 200);
+      assert.deepEqual(await response.json(), { defaultModel: "AGY/gemini-3.8-flash" });
+      assert.equal(inferBodies.length, 0, "大写前缀不能调用 agy 插件");
+    } finally { globalThis.fetch = originalFetch; }
   });
 });
 

@@ -4,6 +4,7 @@
 
 | 日期 | 区域 | 债务描述 | 为什么会存在 | 计划中的后续动作 |
 | --- | --- | --- | --- | --- |
+| 2026-10-10 | 配置与 Web UI 插件化 | 现有配置字段布局、CLI 参数、校验体系、UI 页面与特殊交互继续沿用，配置 UI 继续枚举已知 agent；默认运行目录和五类 agent 缺省值按本轮 monorepo 计划迁移，静态 Schema 同步。`config.schema`/`defaults`/`cli`/`ui` 插件声明及 `plugins.<id>` 嵌套结构仅是后续候选，本轮不实施。 | UI 特性与特殊交互较多；插件启动时显式装配，不支持热安装、卸载或重新注册。模型 refresh、纯磁盘 config reload 与通知不等于插件代码热加载。本轮分为 monorepo/插件/安装配置迁移，以及独立 bridge 封装与兼容两个计划。 | 有独立需求时另建配置/UI 插件化方案，设计声明格式、配置结构迁移与 UI 交互及验收；见[执行计划](completed/codex-gateway-monorepo.md#后续备注配置与-web-ui-插件化)。 |
 | 2026-10-10 | Web UI i18n | `config:copyUrl`/`config:copyPath` 两键 zh 值仍为英文 "Copy URL"/"Copy Path"（迁移前即英文硬编码，两语言同值） | i18n 迁移按计划保持 UI 行为零变化，M4 词条治理范围未含此二键；见 [执行计划](completed/i18n-refactor.md) 进度记录「其他词条变更」 | 后续词条治理时把 zh 改为「复制地址」/「复制路径」，`test/ui-i18n.test.ts` 的混写回归断言不拦截纯英文值，无需改测试 |
 | 2026-10-09 | debug 调试转储的 Web UI 开关 | `config --debug on|off` 已交付，但 Web UI 没有 debug 开关：`applyWebUiConfigPatch` 的 `SUPPORTED_PATCH_FIELDS` 不含 `debug`，ConfigPage 也无对应表单项，浏览器侧无法切换 | Web UI 改动面（ConfigPage 表单、i18n 文案、api.ts 类型）远大于 CLI 一个 flag，本期按用户要求只交付 `--config` 开关；见 [执行计划](completed/agy-debug-dump-config-gate.md) | 需要浏览器侧管理时：把 `debug` 加入 `SUPPORTED_PATCH_FIELDS` 与 `WebUiConfigPatch`，ConfigPage 仿 `requestLogging` 增加 checkbox（含「含提示词、仅限本机排查」提示文案），并补 webui.test.ts 的 patch 用例 |
 | 2026-10-09 | 受管目录文件清单 | `managedCatalogFiles` 尚未收录 qoder/agy/opencode-zen 的目录缓存，卸载可能残留文件，`model_catalog_json` 守卫也不认可这些路径 | 本次只收敛 CodeBuddy/WorkBuddy 的产品文件命名，其他适配器清单缺口与改名无耦合 | 单独补齐各适配器实际目录文件路径，并覆盖卸载清理、TOML 受管守卫与临时实例定位；见 [执行计划](completed/codebuddy-catalog-file-per-product.md) |

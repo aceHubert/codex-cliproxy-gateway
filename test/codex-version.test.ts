@@ -1,14 +1,14 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import {
   FALLBACK_CLIENT_VERSION,
   parseCodexVersion,
   readCachedClientVersion,
   resolveCodexClientVersion,
-} from "../src/codex-version.ts";
+} from "../apps/gateway/src/codex-version.ts";
 
 test("parseCodexVersion extracts the version from codex --version output", () => {
   assert.equal(parseCodexVersion("codex-cli 0.153.4"), "0.153.4");

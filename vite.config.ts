@@ -2,8 +2,8 @@ import path from "node:path";
 import { defineConfig } from "vite";
 import { viteSingleFile } from "vite-plugin-singlefile";
 
-const UI_DIR = path.resolve(import.meta.dirname, "src/ui");
-const UI_DIST_DIR = path.resolve(import.meta.dirname, "dist/ui");
+const UI_DIR = path.resolve(import.meta.dirname, "apps/gateway/src/ui");
+const UI_DIST_DIR = path.resolve(import.meta.dirname, "apps/gateway/dist/ui");
 
 function envPort(name: string, fallback: number): number {
   const raw = process.env[name] ?? String(fallback);

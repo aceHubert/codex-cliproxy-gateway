@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   AgyCredentialError,
   agyCredentialsPresent,
   agyTokenStale,
   defaultAgyCredentialFile,
   loadAgyCredentials,
-} from "../src/agy/credentials.ts";
+} from "@agent-proxy/agy/credentials";
 
 const TIMEOUT = { timeout: 30_000 };
 

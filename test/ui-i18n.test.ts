@@ -1,14 +1,14 @@
-import { test } from "node:test";
+import { test } from "./host-test.ts";
 import assert from "node:assert/strict";
 import { createInstance, type i18n as I18nInstance } from "i18next";
-import zhCommon from "../src/ui/i18n/locales/zh/common.ts";
-import zhConfig from "../src/ui/i18n/locales/zh/config.ts";
-import zhLogs from "../src/ui/i18n/locales/zh/logs.ts";
-import zhModels from "../src/ui/i18n/locales/zh/models.ts";
-import enCommon from "../src/ui/i18n/locales/en/common.ts";
-import enConfig from "../src/ui/i18n/locales/en/config.ts";
-import enLogs from "../src/ui/i18n/locales/en/logs.ts";
-import enModels from "../src/ui/i18n/locales/en/models.ts";
+import zhCommon from "../apps/gateway/src/ui/i18n/locales/zh/common.ts";
+import zhConfig from "../apps/gateway/src/ui/i18n/locales/zh/config.ts";
+import zhLogs from "../apps/gateway/src/ui/i18n/locales/zh/logs.ts";
+import zhModels from "../apps/gateway/src/ui/i18n/locales/zh/models.ts";
+import enCommon from "../apps/gateway/src/ui/i18n/locales/en/common.ts";
+import enConfig from "../apps/gateway/src/ui/i18n/locales/en/config.ts";
+import enLogs from "../apps/gateway/src/ui/i18n/locales/en/logs.ts";
+import enModels from "../apps/gateway/src/ui/i18n/locales/en/models.ts";
 
 type Lang = "zh" | "en";
 type LooseT = (key: string, options?: Record<string, string | number>) => string;

@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test from "./host-test.ts";
 
 import {
   changelogArgs,
+  fixedReleaseVersion,
   prependChangelog,
   stageChangelog,
 } from "../scripts/changelog.ts";
@@ -33,6 +34,15 @@ test("changelog starts at the first commit when the repository has no tags", () 
     "--next-version-from-metadata",
     "--from=abc123",
   ]);
+});
+
+test("private root changelog uses the updated Lerna fixed product version", () => {
+  const version = fixedReleaseVersion({ version: "0.10.1" });
+  assert.deepEqual(changelogArgs("abc123", version), [
+    "bunx", "--no-install", "lerna-changelog", "--next-version=v0.10.1", "--from=abc123",
+  ]);
+  assert.equal(fixedReleaseVersion({ version: "0.10.1-beta.1" }), "0.10.1-beta.1");
+  assert.throws(() => fixedReleaseVersion({ version: "independent" }), /fixed/);
 });
 
 test("changelog stages CHANGELOG.md so lerna commits it with the release", async () => {

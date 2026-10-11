@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { createGatewayHandler } from "../src/gateway.ts";
-import { handleWebUiRequest } from "../src/webui.ts";
-import type { AgyDependencies } from "../src/agy/index.ts";
-import type { AgyCredentials } from "../src/agy/credentials.ts";
-import type { GatewayConfig, ResolvedPaths } from "../src/types.ts";
+import test from "./host-test.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { handleWebUiRequest } from "../apps/gateway/src/webui.ts";
+import type { AgyDependencies } from "@agent-proxy/agy";
+import type { AgyCredentials } from "@agent-proxy/agy/credentials";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -33,19 +33,22 @@ async function gatewayFixture(
   overrides: Partial<GatewayConfig> = {},
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-gw-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
     ...overrides,
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: CPA_MODELS }));
+  fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: CPA_MODELS }));
   fs.writeFileSync(path.join(directory, "codex-catalog.json"), JSON.stringify({ models: CPA_MODELS }));
   const upstreamCalls: string[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const target = String(input);
-    if (target.includes("official.invalid") && target.includes("/models")) {
+    if (target.includes("chatgpt.com/backend-api/codex") && target.includes("/models")) {
       return Response.json({ models: NATIVE_MODELS });
     }
     upstreamCalls.push(target);
@@ -68,6 +71,8 @@ async function gatewayFixture(
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -135,18 +140,21 @@ function agyCredential(): AgyCredentials {
 
 test("agy adapter models honor excludedModels in /v1/models and inference routing", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-agy-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
     excludedModels: [AGY_MODEL, "cliproxy/gamma"],
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: CPA_MODELS }));
+  fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: CPA_MODELS }));
   const inferBodies: Json[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const target = String(input);
-    if (target.includes("official.invalid") && target.includes("/models")) {
+    if (target.includes("chatgpt.com/backend-api/codex") && target.includes("/models")) {
       return Response.json({ models: NATIVE_MODELS });
     }
     if (target.includes(":fetchAvailableModels")) {
@@ -187,6 +195,8 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
     }
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -198,18 +208,21 @@ const OPENCODE_ZEN_EXCLUDED = "opencode-zen/exo-free";
 
 test("zen models honor excludedModels in /v1/models and are blocked on chat and responses", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-zen-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", opencodeZen: true,
     excludedModels: [OPENCODE_ZEN_EXCLUDED],
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: CPA_MODELS }));
+  fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: CPA_MODELS }));
   const opencodeZenInferCalls: string[] = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (input: string | URL | Request) => {
     const target = String(input);
-    if (target.includes("official.invalid") && target.includes("/models")) {
+    if (target.includes("chatgpt.com/backend-api/codex") && target.includes("/models")) {
       return Response.json({ models: NATIVE_MODELS });
     }
     throw new Error(`未模拟的上游调用：${target}`);
@@ -271,6 +284,8 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
     }
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -281,7 +296,7 @@ const UI_TOKEN = "ccp_test_token_0123456789abcdef";
 
 function webUiFixture(): { handler: (request: Request) => Promise<Response>; paths: ResolvedPaths; home: string } {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-ui-"));
-  const runtimeHome = path.join(home, ".codex-cliproxy-gateway");
+  const runtimeHome = path.join(home, ".agent-proxy-gateway");
   const codexHome = path.join(home, ".codex");
   fs.mkdirSync(runtimeHome, { recursive: true });
   fs.mkdirSync(codexHome, { recursive: true });
@@ -303,6 +318,7 @@ function webUiFixture(): { handler: (request: Request) => Promise<Response>; pat
     webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
   };
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     configVersion: "0.0.0-test",
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",

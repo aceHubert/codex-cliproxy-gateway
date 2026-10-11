@@ -2,9 +2,9 @@
 
 ## 目标
 
-沿用 `protocol-conversion-extraction.md` §6 的 agent 插件与 default 分层，让 upstream-only 模式保留所有显式启用的 agent 请求通道。`upstreamOnly` 是已保存配置中的只读路由输入，仅由 default 解释；agent 插件不因该标记改变注册、启用、转换或认证行为。
+本计划按当时的 agent 插件与 default 分层，让 upstream-only 模式保留所有显式启用的 agent 请求通道。`upstreamOnly` 是已保存配置中的只读路由输入，仅由 default 解释；agent 插件不因该标记改变注册、启用、转换或认证行为。
 
-状态：已完成并归档，bun run check 通过（类型检查、885 项测试、UI/CLI 构建）。本轮沿现有分派顺序落实插件/default 的语义边界，未实现新注册器。命令、模型热加载与 Codex 配置由 [独立执行计划](model-config-reload-and-cli-ownership.md) 承担。
+状态：已完成并归档，bun run check 通过（类型检查、885 项测试、UI/CLI 构建）。本轮沿现有分派顺序落实插件/default 的语义边界，未实现新注册器。旧协议抽离计划已由两份现行计划按职责取代：网关插件接口与生命周期见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)，协议转换封装与 agent 适配见 [llm-bridge 计划](../active/llm-bridge-conversion-compatibility.md)。本文件保留已完成工作的历史结果，不要求重新实施。命令、模型热加载与 Codex 配置由 [独立执行计划](model-config-reload-and-cli-ownership.md) 承担。
 
 ## 范围
 
@@ -16,10 +16,10 @@
 ## 背景（实施前）
 
 - 各适配器的 `*Enabled()` 当前要求 `upstreamOnly !== true`，导致开启 upstream-only 时 agent 通道整体禁用，并跳过对应安全校验。
-- `protocol-conversion-extraction.md` §6 已定义 agent 前缀注册表与 default：agent 优先匹配，default 内部选择第三方代理或官方。
+- 本计划实施时的设计草案采用 agent 前缀注册表与 default：agent 优先匹配，default 内部选择第三方代理或官方；这段背景记录不代表当前 monorepo 插件或转换架构已实施。
 - 当前 upstream-only 通用分支可直接转发第三方上游。解除 agent 启用限制后，必须确保插件先处理自己的入口，错误和拒绝不能再次落入 default。
 - 相关代码：`src/gateway.ts`、各 agent 的 `src/*/index.ts` 与对应请求路由测试。
-- 相关计划：[协议转换与插件拆分](../active/protocol-conversion-extraction.md)、[命令职责与配置热加载](model-config-reload-and-cli-ownership.md)、[Chat Completions 入口](../active/openai-chat-completions-endpoint.md)。
+- 相关计划：[网关插件接口与生命周期（monorepo 计划 S2）](codex-gateway-monorepo.md#s2网关插件接口与-default)、[llm-bridge 封装与协议兼容](../active/llm-bridge-conversion-compatibility.md)、[命令职责与配置热加载](model-config-reload-and-cli-ownership.md)。
 
 ## 行为约定
 
@@ -42,9 +42,9 @@
                                       └─ upstreamOnly=false → 现有代理/官方选择
 ```
 
-- 本轮沿既有 agent 分派顺序落实相同的插件/default 语义，不建立另一套 upstream-only 分派器。`register(prefix, fn)` 与 `setDefault()` 的注册器提取由协议拆分计划后续实现，不能将本轮分派变更描述为新注册器已完成。
+- 本轮沿既有 agent 分派顺序落实相同的插件/default 语义，不建立另一套 upstream-only 分派器，也未实现新注册器。后续网关插件注册与生命周期由 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default) 承接。
 - 保留 body model 与 routing hint 的既有优先级、大小写行为、别名结果、动态 ZCode 前缀和重叠前缀优先级。
-- 插件成功、转换失败、凭据错误、排除与入口拒绝都是已处理结果，直接返回；仅保留协议拆分计划明确允许的 decline。
+- 插件成功、转换失败、凭据错误、排除与入口拒绝都是已处理结果，直接返回；仅保留当时路由实现允许的 decline。
 - 不因为 upstream-only 将插件失败重试到第三方上游，不重复消费正文，不改变插件错误归属。
 - 不能只依据目录是否列出模型决定请求归属，目录外模型继续按既有通道规则处理。
 
@@ -65,13 +65,13 @@
 - 风险：原本保存但不生效的 agent 开关开始生效，而监听地址或前缀不满足要求。
   - 缓解：在启动与配置提交前执行真实启用校验，错误给出明确修复指引。
 - 风险：插件迁移改变错误回退、hint/body 冲突或前缀匹配结果。
-  - 缓解：复用协议拆分的行为矩阵；插件已处理结果不进入 default。
+  - 缓解：按 agent 先于 default 的行为矩阵验证；插件已处理结果不进入 default。后续插件注册迁移按 monorepo 计划 S2 验收。
 - 风险：把命令热加载与路由调整捆绑，导致重复配置状态或职责混杂。
   - 缓解：本计划仅消费运行时配置和目录契约，更新与发布由独立执行计划负责。
 
 ## 里程碑
 
-1. 对齐协议拆分计划 §6，固化两种 upstreamOnly 状态下的插件/default 行为矩阵。
+1. 固化两种 upstreamOnly 状态下的插件/default 行为矩阵；当前网关插件注册与生命周期目标见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)。
 2. 移除 agent 对 upstreamOnly 的启用依赖，完成安全校验与请求分派。
 3. 覆盖 HTTP、WS、认证、错误归属及默认路由回归。
 4. 与独立命令计划联调，完成历史记录并归档。
@@ -93,7 +93,7 @@
 - [x] 完成当前启用判定、HTTP/WS 分派和安全边界的只读分析。
 - [x] 确认 upstream-only 路由语义仅属于 default，agent 插件独立运行。
 - [x] 拆出命令、配置热加载、目录刷新与 Codex 配置计划。
-- [x] 保持协议拆分的插件/default 语义，移除 agent 对 upstreamOnly 的启用限制并调整现有路由。
+- [x] 保持已确认的 agent/default 路由语义，移除 agent 对 upstreamOnly 的启用限制并调整现有路由。
 - [x] 保持 HTTP-only agent 的 WS 协商、错误归属、前缀与认证安全边界。
 - [x] 完成最终全量验证与独立命令计划联调：bun run check，885 项测试通过。
 - [x] 记录实现历史并归档。

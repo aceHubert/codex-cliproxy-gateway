@@ -1,0 +1,41 @@
+{
+  "name": "@agent-proxy/agy",
+  "version": "0.10.0",
+  "description": "Agent Proxy agy 插件；保留基线转换行为。",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "import": "./dist/*.js",
+      "default": "./dist/*.js"
+    },
+    "./*.json": "./dist/*.json"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun ../../scripts/build-library.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "prepack": "bun ../../scripts/verify-package.ts ."
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aceHubert/codex-cliproxy-gateway.git"
+  },
+  "devDependencies": {
+    "@agent-proxy/models": "workspace:*"
+  },
+  "dependencies": {
+    "@agent-proxy/plugin-api": "workspace:*"
+  }
+}

@@ -1,0 +1,638 @@
+import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
+import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import os from "node:os";
+import path from "node:path";
+import { isIP } from "node:net";
+import { resolvePaths } from "@agent-proxy/plugin-api";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, zcodeConfigPresent, ZcodeConfigError } from "./config.ts";
+import type { ZcodeAPIKeyProvider, ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
+import { clearModelsCacheEntries, invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
+import {
+  buildZcodeVendorCatalog,
+  createZcodeCatalog,
+  isZcodeModel,
+  writeZcodeServedCatalog,
+  zcodeAPIProviderIDFromModel,
+  zcodeModelPlan,
+  zcodeUpstreamModel,
+} from "./catalog.ts";
+import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
+import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
+import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
+import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
+import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
+import { isZcodeRecord } from "./wire.ts";
+import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
+import type { ZcodeIdentity } from "./request-context.ts";
+import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
+import type { RequestLogSink } from "@agent-proxy/plugin-api";
+import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
+import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
+
+export interface ZcodeDependencies {
+  /** 目录管理层传入策略；manual 只在启动与显式命令发布模型变更。 */
+  catalogMode?: "dynamic" | "manual";
+  /** 共享目录采集器可禁止启动刷新，随后显式更新一次。 */
+  refreshCatalogOnStart?: boolean;
+  zcodeHome?: string;
+  /** 注入的自定义缓存绑定到 api-key（裸 zcode/）路由；其余套餐路由用 planCaches 覆盖。 */
+  configCache?: ZcodeConfigCache;
+  /** 按套餐注入的缓存（测试用）；注入模式下未覆盖的套餐不创建真实缓存。 */
+  planCaches?: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>>;
+  /** 按 API Key provider 注入的多个缓存（测试用）。 */
+  apiKeyCaches?: Record<string, ZcodeConfigCache>;
+  identity?: ZcodeIdentity;
+  /** Codex 自己的目录缓存；zcode-catalog.json 重建时过期它，让 Codex 重新拉取 /models。 */
+  codexModelsCacheFile?: string;
+  /** 对外目录文件 zcode-catalog.json 的存放目录；缺省为运行主目录。 */
+  cacheDirectory?: string;
+  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** 端点动态重映射；传 null 禁用（测试用），默认按官方客户端行为启用。 */
+  endpointRouting?: ZcodeEndpointRouting | null;
+  /** 客户端签名；传 null 禁用（测试用），默认按官方客户端行为启用。 */
+  clientSigning?: ZcodeClientSigning | null;
+  /** 进程日志目标（gateway.log）；未注入时 ZCode 请求不写请求摘要。 */
+  processLog?: ProcessLogTarget;
+}
+export type GatewayHandler = ((request: Request) => Promise<Response>) & { close(): void };
+
+/** 插件启停仅由 ZCode 开关决定，default 上游路由策略不参与。 */
+export function zcodeEnabled<Config extends AgentConfig>(config: Config): boolean {
+  return config.zcode === undefined || config.zcode === true;
+}
+
+export function validateZcodeConfig<Config extends AgentConfig>(config: Config): void {
+  if (config.zcode !== undefined && typeof config.zcode !== "boolean") throw new Error("zcode 必须为 boolean");
+  if (!zcodeEnabled(config)) return;
+  const host = config.host;
+  if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
+    throw new Error("启用 ZCode 时网关只能监听环回地址");
+  }
+  if (config.prefix && ("zcode/".startsWith(config.prefix) || config.prefix.startsWith("zcode/")
+    || config.prefix.startsWith("zcode-"))) {
+    throw new Error("启用 ZCode 时 zcode/ 与 zcode- 前缀保留给 ZCode，请调整第三方 prefix");
+  }
+}
+
+export function zcodeError(status: number, message: string, type = "invalid_request_error"): Response {
+  return Response.json({ error: { type, message } }, { status });
+}
+
+function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies = {}) {
+  validateZcodeConfig(config);
+  const enabled = zcodeEnabled(config);
+  const manual = dependencies.catalogMode === "manual";
+  // 自管目录文件一律放运行主目录，不从 catalogPath 位置倒推。
+  const cacheDirectory = dependencies.cacheDirectory ?? resolvePaths().runtimeHome;
+  // 厂商元数据只取模型包预设；账号或套餐刷新仅重新投影支持集合。
+  const vendorCatalog = enabled
+    ? buildZcodeVendorCatalog()
+    : undefined;
+  /** 套餐或选择变化时立即撤下 Codex 缓存里的旧 ZCode 条目，避免旧套餐模型继续可选。 */
+  const dropCachedZcodeModels = () => {
+    if (dependencies.codexModelsCacheFile) {
+      clearModelsCacheEntries(dependencies.codexModelsCacheFile, isZcodeModel);
+    }
+  };
+  const servedCatalogFile = path.join(cacheDirectory, "zcode-catalog.json");
+  /** 当前对外目录（各套餐作用域前缀的并集）。watch 或启动时重建，/v1/models 只读取这里。 */
+  let servedCatalog: ModelCatalog = { models: [] };
+  /** 已发布目录对应的各套餐快照；仅在身份变化时才重算，避免每次 /v1/models 重新求交集。 */
+  let publishedSnapshots: (ZcodeProviderSnapshot | undefined)[] | undefined;
+  const home = dependencies.zcodeHome ?? path.join(resolvePaths().home, ".zcode");
+  const injectedCaches = dependencies.planCaches !== undefined || dependencies.apiKeyCaches !== undefined
+    || dependencies.configCache !== undefined;
+  /** 收敛 Codex 缓存：撤下已不在当前对外目录里的 ZCode 条目；返回是否发生了删除。 */
+  const pruneCodexCache = (catalog: ModelCatalog): boolean => {
+    if (!dependencies.codexModelsCacheFile) return false;
+    const current = new Set(catalog.models.map((model) => model.slug.toLowerCase()));
+    return clearModelsCacheEntries(
+      dependencies.codexModelsCacheFile,
+      (slug) => isZcodeModel(slug) && !current.has(slug.toLowerCase()),
+    );
+  };
+  const publishServedCatalog = (catalog: ModelCatalog) => {
+    // 系统提示词在发布成品时替换（含 model_messages 模板）：zcode-catalog.json 落盘即终态，
+    // 与其它适配器的合成期替换对齐；Codex 客户端优先按模板渲染系统提示词，只改
+    // base_instructions 无效（2026-10-09 实测）。
+    servedCatalog = { models: catalog.models.map((entry) => withAgentSystemPrompt(entry, ZCODE_AGENT_SYSTEM_PROMPT)) };
+    const changed = writeZcodeServedCatalog(servedCatalogFile, servedCatalog);
+    if (!changed || !dependencies.codexModelsCacheFile) return;
+    // 目录变化：既撤下已下线条目，也过期新鲜度让 Codex 主动重拉一次。
+    pruneCodexCache(servedCatalog);
+    invalidateModelsCache(dependencies.codexModelsCacheFile);
+  };
+  /**
+   * 会话级套餐路由：模型 slug 的套餐段（zcode-<kind>/）或 API provider 段
+   * （zcode-<providerId>/）决定快照、目录与凭据来自哪条路由；每条路由一个
+   * 独立配置缓存，key 的解析与上游调用本身不变。
+   * start-plan 暂不暴露：zcode-plan 中继在鉴权之外还要求阿里云 captcha（code 3007），
+   * 网关无法 headless 通过，暴露了也无法调用（见 docs/exec-plans/tech-debt-tracker.md）。
+   */
+  type ZcodeRoute = {
+    plan: ZcodeSelection["kind"];
+    apiProviderID?: string;
+    cache?: ZcodeConfigCache;
+    snapshot?: ZcodeProviderSnapshot;
+  };
+  const planRoutes: ZcodeRoute[] = [
+    { plan: "individual-coding-plan" },
+    { plan: "team-coding-plan" },
+  ];
+  let synchronizeAPIKeyRoutes: (strict?: boolean) => void = () => {};
+  const republishFromPlans = (force = false) => {
+    if (!vendorCatalog) return;
+    const current = planRoutes.map((route) => route.snapshot);
+    const previous = publishedSnapshots;
+    if (!force && previous && current.length === previous.length
+      && current.every((snapshot, index) => snapshot === previous[index])) return;
+    publishedSnapshots = current;
+    // 各可用套餐目录的并集：单套餐失效只撤下自己的条目，其余套餐继续可选。
+    const models: ModelCatalog["models"] = [];
+    const seen = new Set<string>();
+    for (const route of planRoutes) {
+      if (!route.snapshot) continue;
+      for (const entry of createZcodeCatalog(route.snapshot, vendorCatalog).models) {
+        const slug = entry.slug.toLowerCase();
+        if (seen.has(slug)) continue;
+        seen.add(slug);
+        models.push(entry);
+      }
+    }
+    publishServedCatalog({ models });
+  };
+  if (enabled) {
+    // 注入模式（测试）只为显式给出的套餐建缓存，避免读到真实的 ~/.zcode。
+    const injected: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>> | undefined = dependencies.planCaches
+      ?? (dependencies.apiKeyCaches ? {} : dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
+    for (const route of planRoutes) {
+      route.cache = injected?.[route.plan]
+        ?? (injected ? undefined : createZcodeConfigCache(home, {
+          plan: route.plan,
+          refreshOnStart: false,
+          // 选择变化只撤下本套餐的快照并重发并集；另一个套餐的条目不受影响。
+          onSelectionChange: () => {
+            if (manual) return;
+            route.snapshot = undefined;
+            republishFromPlans();
+          },
+          onSnapshotChange: (snapshot) => {
+            if (manual) return;
+            route.snapshot = snapshot;
+            republishFromPlans();
+          },
+        }));
+    }
+    if (injected) {
+      const apiCaches = dependencies.apiKeyCaches
+        ?? (dependencies.planCaches?.["api-key"] || dependencies.configCache
+          ? { current: dependencies.planCaches?.["api-key"] ?? dependencies.configCache! }
+          : {});
+      for (const [apiProviderID, cache] of Object.entries(apiCaches)) {
+        planRoutes.push({ plan: "api-key", ...(apiProviderID === "current" ? {} : { apiProviderID }), cache });
+      }
+    } else {
+      const createAPIRoute = (provider: ZcodeAPIKeyProvider): ZcodeRoute => {
+        const route: ZcodeRoute = { plan: "api-key", apiProviderID: provider.providerID };
+        route.cache = createZcodeConfigCache(home, {
+          plan: "api-key",
+          apiProviderID: provider.providerID,
+          refreshOnStart: false,
+          onSelectionChange: () => {
+            if (manual) return;
+            route.snapshot = undefined;
+            republishFromPlans();
+          },
+          onSnapshotChange: (snapshot) => {
+            if (manual) return;
+            route.snapshot = snapshot;
+            republishFromPlans();
+          },
+        });
+        return route;
+      };
+      const synchronize = (republish = true, strict = false): void => {
+        let providers: ZcodeAPIKeyProvider[] = [];
+        try { providers = readZcodeAPIKeyProviders(home); }
+        catch (error) {
+          if (strict) throw error;
+          /* 动态目录撤下无效 API Key；套餐路由不受影响。 */
+        }
+        const targetIDs = new Set(providers.map((provider) => provider.providerID));
+        let changed = false;
+        const removed = planRoutes.filter((route) => route.plan === "api-key" && route.apiProviderID && !targetIDs.has(route.apiProviderID));
+        for (const route of removed) route.cache?.close();
+        if (removed.length) {
+          for (let index = planRoutes.length - 1; index >= 0; index--) {
+            if (removed.includes(planRoutes[index]!)) planRoutes.splice(index, 1);
+          }
+          changed = true;
+        }
+        for (const provider of providers) {
+          if (planRoutes.some((route) => route.plan === "api-key" && route.apiProviderID === provider.providerID)) continue;
+          planRoutes.push(createAPIRoute(provider));
+          changed = true;
+        }
+        if (changed && republish) republishFromPlans();
+      };
+      synchronizeAPIKeyRoutes = (strict) => synchronize(!manual, strict);
+      synchronize(false);
+      // /models 与未知 API 前缀请求都会重新同步，支持新增/删除 provider；现有
+      // provider 的 Key 与模型变化由各自 cache 的 provider_config watcher 驱动。
+    }
+  }
+  const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  const activeRequests = new Set<AbortController>();
+  const identity = enabled ? dependencies.identity ?? readZcodeIdentity() : undefined;
+  const endpointRouting = enabled && dependencies.endpointRouting !== null
+    ? dependencies.endpointRouting ?? new ZcodeEndpointRouting({
+      identity: identity!,
+      fetch: (url, init) => fetchUpstream(url, init),
+    })
+    : undefined;
+  // coding plan 官方客户端签名：逐请求补 X-Client-* 签名头；fail-open，失败按未签名继续。
+  const clientSigning = enabled && dependencies.clientSigning !== null
+    ? dependencies.clientSigning ?? new ZcodeClientSigning({ fetch: (url, init) => fetchUpstream(url, init) })
+    : undefined;
+  const contexts = createZcodeContexts();
+  const sink: RequestLogSink | undefined = config.requestLogging === true ? {
+    dir: requestLogDir(config),
+    maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
+    processLog: dependencies.processLog,
+  } : undefined;
+  let closed = false;
+  let refreshPromise: Promise<ModelCatalog> | undefined;
+  const readCatalog = async (mode: "get" | "refresh" | "reload"): Promise<ModelCatalog> => {
+    if (closed || !enabled) return { models: [] };
+    synchronizeAPIKeyRoutes(manual && mode !== "get");
+    const neverPublished = publishedSnapshots === undefined;
+    const results = await Promise.all(planRoutes.map(async (route) => {
+      if (!route.cache) return;
+      const previous = route.snapshot;
+      try {
+        const read = mode === "get" ? route.cache.get : route.cache[mode] ?? route.cache.get;
+        return { route, snapshot: await read.call(route.cache) };
+      } catch (error) {
+        if (manual && mode !== "get") {
+          // 固定个人/团队槽位可能尚未连接；有效目录的认证失败不能覆盖为部分快照。
+          if (previous) return { route, snapshot: previous };
+          if (!injectedCaches && !route.apiProviderID && !zcodeConfigPresent(home)) return { route, snapshot: undefined };
+          let metadataFailure: unknown = error;
+          if (mode === "refresh" && route.cache.reload) {
+            try {
+              await route.cache.reload();
+            } catch (metadataError) { metadataFailure = metadataError; }
+          }
+          if (metadataFailure instanceof ZcodeConfigError
+            && /没有可用的|未找到可用的官方 API Key provider/.test(metadataFailure.message)) {
+            return { route, snapshot: undefined };
+          }
+          throw error;
+        }
+        return { route, snapshot: undefined };
+      }
+    }));
+    if (closed) return { models: [] };
+    for (const result of results) if (result) result.route.snapshot = result.snapshot;
+    if (neverPublished && !planRoutes.some((route) => route.snapshot)) dropCachedZcodeModels();
+    republishFromPlans(mode !== "get");
+    return { models: servedCatalog.models };
+  };
+  const refreshCatalog = (): Promise<ModelCatalog> => {
+    if (refreshPromise) return refreshPromise;
+    const promise = readCatalog("refresh");
+    refreshPromise = promise;
+    void promise.finally(() => { if (refreshPromise === promise) refreshPromise = undefined; }).catch(() => {});
+    return promise;
+  };
+  /** 启动首读仍允许凭据授权，手动策略仅停止后续目录自动发布。 */
+  const startup = enabled && vendorCatalog && dependencies.refreshCatalogOnStart !== false
+    ? refreshCatalog() : Promise.resolve({ models: [] });
+  // 构造适配器与等待 modelsReady 之间允许异步间隙；失败由公开目录接口传递。
+  void startup.catch(() => {});
+
+  return {
+    async catalog(): Promise<ModelCatalog> {
+      await startup;
+      if (closed) return { models: [] };
+      return manual ? { models: servedCatalog.models } : readCatalog("get");
+    },
+    refreshCatalog,
+    async reloadCatalog(): Promise<ModelCatalog> {
+      await startup;
+      if (refreshPromise) await refreshPromise;
+      return readCatalog("reload");
+    },
+    async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+      const start = Date.now();
+      const requestTime = localTime();
+      const incoming = new URL(request.url);
+      const group = logGroupFromPath(incoming.pathname);
+      const zcode = isZcodeModel(input.model);
+      // 渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权与日志分流；模型 ID 不携带渠道。
+      let family: ZcodeFamily | undefined;
+      let key = "";
+      let upstreamUrl: string | undefined;
+      let upstreamRequestHeaders: Headers | undefined;
+      let upstreamRequestBody: unknown;
+      let logged = false;
+      const redact = (text: string) => {
+        if (!key) return text;
+        // 错误正文可能以任意 JSON 转义形式回显 key（\/、\uXXXX 及多层反斜杠嵌套）：
+        // 固定枚举变体漏掉转义形式时，客户端反序列化 JSON 即可还原完整密钥。逐字符
+        // 生成四种互斥形式（裸字符、反斜杠+字符、反斜杠+u 十六进制两种大小写），
+        // 保证每个字符位置的匹配分解唯一，避免灾难性回溯。
+        const pattern = [...key].map((char) => {
+          const escaped = char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+          const hex = char.codePointAt(0)!.toString(16).padStart(4, "0");
+          return `(?:${escaped}|\\\\{1,4}${escaped}|\\\\{1,4}u${hex}|\\\\{1,4}u${hex.toUpperCase()})`;
+        }).join("");
+        let result = text.replace(new RegExp(pattern, "gu"), "***");
+        let variant = key;
+        // 错误正文可能把请求又序列化成 JSON 字符串，连同转义形式一起遮蔽。
+        for (let depth = 0; depth < 4; depth++) {
+          result = result.replaceAll(variant, "***");
+          variant = JSON.stringify(variant).slice(1, -1);
+        }
+        return result;
+      };
+      const redactValue = (value: unknown): unknown => {
+        if (typeof value === "string") return redact(value);
+        if (Array.isArray(value)) return value.map(redactValue);
+        if (isZcodeRecord(value)) return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, redactValue(item)]));
+        return value;
+      };
+      const log = (status: number, body: string, headers = new Headers(), logicalError?: string) => {
+        if (logged || !zcode || !family) return;
+        logged = true;
+        const durationMs = Date.now() - start;
+        const at = incoming.pathname + incoming.search;
+        logExchange(sink, group, {
+          requestTime, method: request.method, url: at,
+          reqHeaders: request.headers, reqBody: redactValue(input),
+          status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
+        }, "zcode");
+        // 与网关主链一样，进程日志里每条请求恰好一行：逻辑错误也算错误，走错误摘要。
+        if (status >= 400 || logicalError) {
+          logGatewayError(sink?.processLog, {
+            requestTime, method: request.method, url: at,
+            status: logicalError && status < 400 ? 502 : status,
+            message: redact(logicalError ?? body), upstreamUrl, durationMs,
+          });
+        } else {
+          logRequestSummary(sink?.processLog, {
+            requestTime, method: request.method, url: at, status, upstreamUrl, durationMs,
+          });
+        }
+      };
+      const fail = (status: number, message: string, type?: string) => {
+        const response = zcodeError(status, redact(message), type);
+        log(status, JSON.stringify({ error: { type, message: redact(message) } }), response.headers);
+        return response;
+      };
+      if (closed || planRoutes.every((route) => !route.cache)) return fail(503, "ZCode 未启用或网关已关闭", "configuration_error");
+      const abort = new AbortController();
+      const onAbort = () => abort.abort(request.signal.reason);
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        request.signal.removeEventListener("abort", onAbort);
+        activeRequests.delete(abort);
+      };
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      activeRequests.add(abort);
+      try {
+        if (request.signal.aborted) onAbort();
+        abort.signal.throwIfAborted();
+        // 会话级套餐选择：模型 slug 的套餐段决定走哪条路由；key 的解析与上游调用链路不变。
+        const requested = typeof input.model === "string" ? input.model : "";
+        const requestedPlan = zcodeModelPlan(requested);
+        if (!manual && requestedPlan === "api-key") synchronizeAPIKeyRoutes();
+        const requestedProviderID = requestedPlan === "api-key" ? zcodeAPIProviderIDFromModel(requested) : undefined;
+        const route = planRoutes.find((entry) => {
+          if (entry.plan !== requestedPlan) return false;
+          if (requestedPlan !== "api-key") return true;
+          if (!requestedProviderID) return !entry.apiProviderID || planRoutes.find(
+            (candidate) => candidate.plan === "api-key" && candidate.apiProviderID,
+          ) === entry;
+          if (entry.apiProviderID === requestedProviderID) return true;
+          // 注入模式只有一个 legacy api-key 缓存时先命中，再由 zcodeUpstreamModel
+          // 按快照 providerID 精确拒绝不匹配的请求。
+          return !entry.apiProviderID;
+        });
+        if (!route?.cache) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
+        const currentSnapshot = await route.cache.get();
+        if (manual && !route.snapshot) await startup;
+        // 凭据与端点继续按原机制维护；手动目录模式只固定已发布的授权模型集合。
+        const snapshot = manual
+          ? { ...currentSnapshot, modelIds: route.snapshot?.modelIds ?? [] }
+          : currentSnapshot;
+        key = snapshot.apiKey;
+        family = snapshot.family;
+        abort.signal.throwIfAborted();
+        const model = zcodeUpstreamModel(requested, snapshot);
+        if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
+        const translated = translateZcodeRequest(input, model);
+        const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
+        const routedUrl = endpointRouting
+          // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中转）；resolve 内部 fail-open，失败保持原 URL。
+          ? (await endpointRouting.resolve(baseUpstreamUrl, key)).url
+          : baseUpstreamUrl;
+        upstreamUrl = routedUrl;
+        // 从当前快照重建协议头与会话归因，不采信入站客户端的 ZCode 身份或授权头。
+        const context = contexts.resolve(request, snapshot);
+        const headers = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
+        const beta = request.headers.get("anthropic-beta")?.trim();
+        if (beta && beta.length <= 1024 && /^[\x20-\x7e]+$/.test(beta)) headers.set("anthropic-beta", beta);
+        // 客户端签名作用域绑定 base origin 与当前会话；端点重映射发生在签名之后（先签后路由）。
+        const signingScope = {
+          apiKey: key,
+          baseUrl: snapshot.baseURL,
+          clientVersion: identity!.appVersion,
+          sessionId: context.sessionId,
+        };
+        // 版本未知（本机未装 ZCode）时无法声明可信客户端版本，跳过签名。
+        const signable = clientSigning !== undefined && signingScope.clientVersion !== "unknown";
+        const body = decorateZcodeBody(translated.body, context);
+        // 图片识别适配：请求含图片时把被吸收的 analyze_image 调用落到网关执行并续跑上游。
+        let gatewayTools: ZcodeGatewayToolsHook | undefined;
+        let continuationLegs = 0;
+        if (translated.vision) {
+          gatewayTools = {
+            maxContinuations: 3,
+            execute: async (call) => {
+              abort.signal.throwIfAborted();
+              const prompt = typeof call.input.prompt === "string" && call.input.prompt
+                ? call.input.prompt
+                : "请详细识别并提取这张图片中的所有内容。";
+              const image = matchZcodeAnalyzeImage(call.input.imageSource, translated.images);
+              if (!image) return "analyze_image 无法定位请求中的图片（imageSource 缺少有效引用）。请向用户说明或改用其他方式。";
+              try {
+                return await executeZcodeAnalyzeImage({
+                  url: routedUrl,
+                  model,
+                  image,
+                  prompt,
+                  headers: async () => {
+                    const requestHeaders = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
+                    if (signable) await clientSigning!.decorate(requestHeaders, signingScope);
+                    return requestHeaders;
+                  },
+                  fetchImpl: fetchUpstream,
+                  signal: abort.signal,
+                  // 错误正文脱敏必须在截断之前发生（见 ZcodeExecutorOptions.redact）。
+                  redact,
+                });
+              } catch (error) {
+                if (abort.signal.aborted) throw error;
+                // 降级旁白会把异常消息直接发给客户端（响应仍为 completed，失败事件的
+                // sanitizeError 覆盖不到）：先按同一规则抹掉上游错误正文可能回显的 key。
+                throw new Error(redact(error instanceof Error ? error.message : String(error)));
+              }
+            },
+            nextUpstream: async (calls) => {
+              abort.signal.throwIfAborted();
+              // 把被吸收的调用与执行结果回放为上游 tool_use/tool_result 消息对。
+              const toolUses = calls.map(({ call }) => ({ type: "tool_use", id: call.id, name: call.name, input: call.input }));
+              const toolResults = calls.map(({ call, result }) => ({
+                type: "tool_result", tool_use_id: call.id, content: [{ type: "text", text: result }],
+              }));
+              (body.messages as unknown[]).push({ role: "assistant", content: toolUses }, { role: "user", content: toolResults });
+              continuationLegs++;
+              // 续跑腿逐次重新签名（ts/nonce/PoW 不可复用）；签名失败按未签名继续。
+              const legHeaders = new Headers(headers);
+              if (signable) await clientSigning!.decorate(legHeaders, signingScope);
+              const response = await fetchUpstream(routedUrl, {
+                method: "POST", headers: legHeaders, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
+              });
+              if (!response.ok) {
+                // 与执行信封同规则：先对完整正文脱敏、后截断，避免跨边界 key 前缀泄漏。
+                const text = redact(await response.text().catch(() => ""));
+                throw new Error(`续跑上游返回 HTTP ${response.status}${text ? `：${text.slice(0, 200)}` : ""}`);
+              }
+              return response;
+            },
+          };
+        }
+        // 记录转换后真正发往上游的正文；未开启请求日志时不付出遍历脱敏的开销。
+        upstreamRequestBody = sink ? redactValue(body) : undefined;
+        const serializedBody = JSON.stringify(body);
+        const postUpstream = async (): Promise<{ response: Response; signed: boolean }> => {
+          // 每次发送都克隆基础头并现场签名；签名值（ts/nonce/PoW）不可跨请求复用。
+          const requestHeaders = new Headers(headers);
+          const signed = signable ? await clientSigning!.decorate(requestHeaders, signingScope) : false;
+          upstreamRequestHeaders = requestHeaders;
+          return {
+            response: await fetchUpstream(routedUrl, {
+              method: "POST", headers: requestHeaders, body: serializedBody, redirect: "manual", signal: abort.signal,
+            }),
+            signed,
+          };
+        };
+        let sent = await postUpstream();
+        let upstream = sent.response;
+        let upstreamErrorText: string | undefined;
+        if (!upstream.ok) {
+          let rawText = await upstream.text();
+          // 服务端密钥轮换会拒绝缓存的签名身份：作废重握手、重签一次；仍失败按原错误返回。
+          if (sent.signed && upstream.status === 401 && clientSigningVerifyRejection(rawText)) {
+            clientSigning!.invalidate(key, snapshot.baseURL);
+            sent = await postUpstream();
+            upstream = sent.response;
+            // 只有重试仍失败才读错误正文；成功响应的流必须留给后续 SSE 解析。
+            if (!upstream.ok) rawText = await upstream.text();
+          }
+          if (!upstream.ok) upstreamErrorText = rawText;
+        }
+        if (upstreamErrorText !== undefined) {
+          const text = redact(upstreamErrorText);
+          cleanup();
+          let message = text || `ZCode 上游返回 HTTP ${upstream.status}`;
+          try {
+            const error: unknown = redactValue(JSON.parse(text));
+            if (isZcodeRecord(error) && isZcodeRecord(error.error) && typeof error.error.message === "string") message = error.error.message;
+            else message = JSON.stringify(error);
+          } catch { /* 非 JSON 上游错误保留脱敏正文。 */ }
+          return fail(upstream.status, message, "upstream_error");
+        }
+        let chunks = "";
+        const stream = !mapResult && input.stream === true;
+        const response = await createZcodeResponse(upstream, {
+          model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
+          gatewayTools,
+          sanitizeError: (error) => ({
+            code: typeof error.code === "string" ? redact(error.code) : "upstream_error",
+            message: typeof error.message === "string" ? redact(error.message) : "ZCode 上游响应失败",
+          }),
+          abort: () => { abort.abort(); cleanup(); },
+          onChunk: (chunk) => { if (sink) chunks += chunk; },
+          onComplete: (payload) => {
+            cleanup();
+            // 剥离的内置工具与图片识别续跑腿数写进交换日志，避免“静默降级”无从排查。
+            const stripped = translated.dropped.length ? `\n--- stripped built-in tools: ${translated.dropped.join(", ")} ---` : "";
+            const visionLegs = continuationLegs > 0 ? `\n--- analyze_image continuation legs: ${continuationLegs} ---` : "";
+            if (!mapResult) log(stream ? 200 : payload.status === "failed" ? 502 : 200,
+              stream ? `${chunks}${stripped}${visionLegs}\n--- response.${payload.status} ---\n${JSON.stringify(redactValue(payload))}` : `${JSON.stringify(redactValue(payload))}${stripped}${visionLegs}`,
+              new Headers({ "content-type": stream ? "text/event-stream" : "application/json" }),
+              payload.status === "failed" ? JSON.stringify(payload.error ?? "响应失败") : undefined);
+          },
+        });
+        if (!mapResult) return response;
+        const payload: unknown = await response.json();
+        if (!response.ok || !isZcodeRecord(payload)) {
+          cleanup();
+          return fail(502, "ZCode 上游未完成上下文压缩", "invalid_response_error");
+        }
+        const mapped = mapResult(payload);
+        log(mapped.status, await mapped.clone().text(), mapped.headers);
+        cleanup();
+        return mapped;
+      } catch (error) {
+        abort.abort();
+        cleanup();
+        if (error instanceof ZcodeRequestError) return fail(400, error.message);
+        if (error instanceof ZcodeConfigError) return fail(503, error.message, "configuration_error");
+        if (request.signal.aborted) return fail(499, "ZCode 请求已取消", "request_cancelled");
+        return fail(502, "ZCode 上游请求失败", "upstream_error");
+      }
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      for (const route of planRoutes) route.cache?.close();
+      contexts.close();
+      for (const request of activeRequests) request.abort();
+      activeRequests.clear();
+    },
+  };
+}
+
+export function createZcodeAdapter<Config extends AgentConfig>(config: Config, dependencies: ZcodeDependencies = {}) {
+  return bindHostMethods(buildZcodeAdapter(config, dependencies));
+}
+
+export const ZCODE_MODEL_PATTERNS: readonly string[] = Object.freeze(["zcode/*","zcode-*/*"]);
+
+/** 插件只负责本代理路由，协议转换沿用原适配器实现。 */
+export function createZcodePlugin(host: HostServices<AgentConfig>, dependencies: ZcodeDependencies = {}): GatewayPlugin {
+  return withHostServices(host, () => {
+    const adapter = createZcodeAdapter(host.getConfig(), { fetch: host.fetch, ...dependencies });
+    return bindHostMethods({
+      id: "zcode",
+      modelPatterns: ZCODE_MODEL_PATTERNS,
+      websocket: false,
+      async handleHttp(context) {
+        const input = await context.body.json();
+        if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
+        if (context.from !== "responses") return Response.json({ error: { type: "invalid_request_error", message: "Zcode 模型仅支持 Responses API" } }, { status: 400 });
+        return adapter.forward(context.request, input as Record<string, unknown>);
+      },
+      getCatalog: () => adapter.catalog(),
+      refreshCatalog: () => adapter.refreshCatalog(),
+      reloadCatalog: () => adapter.reloadCatalog(),
+      ready: async () => {},
+      close: () => adapter.close(),
+    } satisfies GatewayPlugin, host);
+  });
+}

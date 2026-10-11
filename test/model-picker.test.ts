@@ -1,8 +1,8 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ModelPicker, retainAvailableModelIds } from "../src/ui/ModelPicker.tsx";
+import { ModelPicker, retainAvailableModelIds } from "../apps/gateway/src/ui/ModelPicker.tsx";
 
 test("模型选择首次渲染即展示当前配置，不依赖上游目录或网络请求", () => {
   const html = renderToStaticMarkup(createElement(ModelPicker, {

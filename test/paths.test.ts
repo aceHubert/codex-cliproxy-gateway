@@ -9,8 +9,8 @@ import {
   normalizeRuntimeHomeInput,
   resolvePaths,
   runWithInstancePaths,
-} from "../src/paths.ts";
-import { requestLogDir } from "../src/request-log.ts";
+} from "../apps/gateway/src/paths.ts";
+import { requestLogDir } from "../apps/gateway/src/request-log.ts";
 
 test("受管目录清单包含两个产品缓存，且遵循实例运行目录", () => {
   for (const root of [undefined, path.resolve("/tmp/ccp-catalog-instance")]) {
@@ -26,7 +26,7 @@ test("受管目录清单包含两个产品缓存，且遵循实例运行目录",
 test("runtimeHome override scopes instance state and the LaunchAgent to the config directory", () => {
   const env = { HOME: "/home/tester" };
   const production = resolvePaths(env);
-  assert.equal(production.runtimeHome, "/home/tester/.codex-cliproxy-gateway");
+  assert.equal(production.runtimeHome, "/home/tester/.agent-proxy-gateway");
   assert.equal(production.launchAgent, "/home/tester/Library/LaunchAgents/codex-cliproxy-gateway.plist");
 
   // `serve --config <dir>/config.json` 的临时实例：管理面文件全部落在配置同目录；
@@ -77,7 +77,7 @@ test("CODEX_CLIPROXY_HOME 重定向运行主目录：plist 留在 ~/Library/Laun
 
   // 空白值视为未设置，回落默认主目录。
   assert.equal(resolvePaths({ HOME: "/home/tester", CODEX_CLIPROXY_HOME: "   " }).runtimeHome,
-    "/home/tester/.codex-cliproxy-gateway");
+    "/home/tester/.agent-proxy-gateway");
 
   // serve --config 的显式实例目录比环境变量更具体，优先生效。
   const root = path.resolve("/tmp/ccp-instance");
@@ -110,8 +110,7 @@ test("调用级实例快照隔离运行目录，显式解析不受上下文影�
       "/tmp/ccp-override");
     // 运行时目录解析全部跟随上下文：serve --config 实例的日志/调试转储与缓存同根，
     // 不再按 Web UI 进程自身的 env 分裂。
-    assert.equal(requestLogDir({ catalogPath: "/x/catalog.json" } as Parameters<typeof requestLogDir>[0]),
-      path.resolve("/tmp/ccp-bound/logs"));
+    assert.equal(requestLogDir(bound), path.resolve("/tmp/ccp-bound/logs"));
     bound.runtimeHome = "/tmp/changed-snapshot";
     assert.equal(resolvePaths().runtimeHome, instance.runtimeHome);
   });

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test from "./host-test.ts";
 import {
   buildZcodeModelHeaders, buildZcodeSourceHeaders, createZcodeContexts,
   decorateZcodeBody, zcodePlan, type ZcodeIdentity,
-} from "../src/zcode/request-context.ts";
-import fingerprintData from "../src/zcode/fingerprint-data.json";
-import type { ZcodeProviderSnapshot, ZcodeSelection } from "../src/zcode/config.ts";
+} from "@agent-proxy/zcode/request-context";
+import fingerprintData from "@agent-proxy/zcode/fingerprint-data.json";
+import type { ZcodeProviderSnapshot, ZcodeSelection } from "@agent-proxy/zcode/config";
 
 const identity: ZcodeIdentity = {
   appVersion: "3.11.2", language: "zh-CN", timezone: "Asia/Shanghai",

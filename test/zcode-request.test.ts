@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { translateZcodeRequest, ZcodeRequestError } from "../src/zcode/request.ts";
-import { createZcodeResponse } from "../src/zcode/response.ts";
-import { encodeZcodeThinking } from "../src/zcode/wire.ts";
+import test from "./host-test.ts";
+import { translateZcodeRequest, ZcodeRequestError } from "@agent-proxy/zcode/request";
+import { createZcodeResponse } from "@agent-proxy/zcode/response";
+import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
 
 const clientModel = "zcode/GLM-5.3";
 function translate(body: Record<string, unknown>) { return translateZcodeRequest({ model: clientModel, ...body }, "glm-5.3"); }

@@ -1,26 +1,29 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createGatewayHandler } from "../src/gateway.ts";
-import { runCli } from "../src/cli.ts";
-import { resolvePaths } from "../src/paths.ts";
-import { readRootTomlString } from "../src/toml.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { readRootTomlString } from "../apps/gateway/src/toml.ts";
 import {
   clearModelsCacheEntries,
   fetchCliProxyCatalog,
   invalidateModelsCache,
-} from "../src/catalog.ts";
-import type { GatewayConfig } from "../src/types.ts";
+} from "../apps/gateway/src/catalog.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 test("dynamic /models refreshes official catalog and merges only CLIProxy rows", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-response-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [
     { slug: "test-model", context_window: 100000 },
   ] }));
   const config: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
@@ -52,7 +55,7 @@ test("dynamic /models refreshes official catalog and merges only CLIProxy rows",
       { slug: "gpt-fresh", context_window: 300000, priority: 7 },
       { slug: "cliproxy/test-model", display_name: "test-model", context_window: 100000, priority: 107 },
     ] });
-    assert.equal(captured?.url, "https://official.example/codex/models?client_version=1.2.3");
+    assert.equal(captured?.url, "https://chatgpt.com/backend-api/codex/models?client_version=1.2.3");
     assert.equal(captured?.headers.get("authorization"), "Bearer oauth-token");
     assert.equal(captured?.headers.get("chatgpt-account-id"), "account-1");
     assert.equal(captured?.headers.get("if-none-match"), null);
@@ -73,18 +76,23 @@ test("dynamic /models refreshes official catalog and merges only CLIProxy rows",
     assert.equal(JSON.parse(fs.readFileSync(clientVersionFile, "utf8")).client_version, "1.2.3");
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("dynamic /models returns 502 when official refresh fails", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-fallback-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: "test-model" }] }));
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
   try {
     const handler = createGatewayHandler({
+      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
       host: "127.0.0.1",
       port: 8320,
       mountPath: "/v1",
@@ -98,12 +106,16 @@ test("dynamic /models returns 502 when official refresh fails", async () => {
     assert.match(await response.text(), /official \/models returned HTTP 503/);
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("official refresh failure serves the last-good cached catalog and preserves models", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-last-good-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [{ slug: "test-model" }] }));
   const clientVersionFile = path.join(directory, "models-cache.json");
@@ -116,6 +128,7 @@ test("official refresh failure serves the last-good cached catalog and preserves
   globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as unknown as typeof fetch;
   try {
     const handler = createGatewayHandler({
+      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
       host: "127.0.0.1",
       port: 8320,
       mountPath: "/v1",
@@ -137,12 +150,16 @@ test("official refresh failure serves the last-good cached catalog and preserves
     assert.deepEqual(recorded.models, [{ slug: "gpt-cached", context_window: 200000 }]);
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("upstream-only /models 只消费合成静态目录，不访问官方", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-only-models-response-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   fs.writeFileSync(catalogPath, JSON.stringify({ models: [
     { slug: "raw-model-must-not-be-returned" },
@@ -156,6 +173,7 @@ test("upstream-only /models 只消费合成静态目录，不访问官方", asyn
   }) as unknown as typeof fetch;
   try {
     const handler = createGatewayHandler({
+      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
       host: "127.0.0.1",
       port: 8320,
       mountPath: "/v1",
@@ -184,14 +202,19 @@ test("upstream-only /models 只消费合成静态目录，不访问官方", asyn
     });
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
 test("缺失或损坏静态目录明确失败，动态模式仍回退官方目录", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cpa-catalog-official-fallback-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const catalogPath = path.join(directory, "cliproxy-catalog.json");
   const baseConfig: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
@@ -231,6 +254,8 @@ test("缺失或损坏静态目录明确失败，动态模式仍回退官方目�
     assert.match(await unavailable.text(), /official \/models returned HTTP 503/);
   } finally {
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -301,6 +326,7 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
   fs.mkdirSync(paths.codexHome, { recursive: true });
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify({
+    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
     port: 8320,
     mountPath: "/v1",
@@ -341,7 +367,7 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
     assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, cpaCatalog.models);
     const cpaConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
-    assert.equal(cpaConfig.catalogPath, paths.catalogFile);
+    assert.equal("catalogPath" in cpaConfig, false);
     assert.deepEqual(cpaConfig.selectedModels, ["proxy-model"]);
     assert.equal(cpaConfig.upstreamOnly, true);
     assert.equal(cpaConfig.websocket, undefined);
@@ -391,7 +417,7 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     });
     const splitConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
     assert.equal(splitConfig.upstreamOnly, false);
-    assert.equal(splitConfig.catalogPath, paths.catalogFile);
+    assert.equal("catalogPath" in splitConfig, false);
     assert.match(auditEntries(), /upstreamOnly: true -> false/);
     assert.match(auditEntries(), /model_catalog_json \(config.toml\): .+ -> null/);
 

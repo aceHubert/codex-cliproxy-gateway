@@ -2,16 +2,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
-import { createGatewayHandler, isQoderResponsesWebSocket } from "../src/gateway.ts";
-import { createQoderAdapter, qoderEnabled, safeQoderUpstreamError, validateQoderConfig } from "../src/qoder/index.ts";
-import type { QoderDependencies } from "../src/qoder/index.ts";
-import { QoderCredentialError } from "../src/qoder/credentials.ts";
-import type { QoderCredentials } from "../src/qoder/credentials.ts";
-import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT } from "../src/qoder/transport.ts";
-import type { QoderInferPayload } from "../src/qoder/transport.ts";
-import { checkFrameRouting } from "../src/realtime.ts";
-import type { GatewayConfig } from "../src/types.ts";
+import test from "./host-test.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { createQoderAdapter, qoderEnabled, safeQoderUpstreamError, validateQoderConfig } from "@agent-proxy/qoder";
+import type { QoderDependencies } from "@agent-proxy/qoder";
+import { QoderCredentialError } from "@agent-proxy/qoder/credentials";
+import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
+import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
+import type { QoderInferPayload } from "@agent-proxy/qoder/transport";
+import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+
+import { matchesPluginUpgrade, routingPluginFamily } from "./plugin-routing-fixture.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -92,12 +94,15 @@ interface Fixture {
 
 async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-gateway-"));
+  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
+  process.env.CODEX_CLIPROXY_HOME = directory;
   const config: GatewayConfig = {
+    agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: false, qoder: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
-  fs.writeFileSync(config.catalogPath, JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
+  fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
   const handlers: ReturnType<typeof createGatewayHandler>[] = [];
   const originalFetch = globalThis.fetch;
   // 通用网关目录也必须在本地模拟，测试禁止任何真实网络请求。
@@ -125,6 +130,8 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
+    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -255,10 +262,20 @@ test("Qoder 未知模型、auto 与旧前缀本地拒绝；国内版未登录时
     const cnResponse = await handler(request("qoder-cn/qfmodel"));
     assert.equal(cnResponse.status, 401);
     assert.match((await cnResponse.json() as Json).error.message, /国内版/);
-    for (const model of ["qoder/qfmodel", "qoder-intl/", "qoder-cn/", "qoder-intl/a/b"]) {
+    for (const model of ["qoder/qfmodel", "qoder-intl/a/b"]) {
       const response = await handler(request(model));
       assert.equal(response.status, 400, model);
     }
+    // 通配模式要求非空模型后缀；空后缀不匹配插件，由默认链路处理。
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => Response.json({ defaultModel: (await new Request(input, init).json() as Json).model })) as typeof fetch;
+    try {
+      for (const model of ["qoder-intl/", "qoder-cn/"]) {
+        const response = await handler(request(model));
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { defaultModel: model });
+      }
+    } finally { globalThis.fetch = originalFetch; }
     assert.equal(calls.length, 0);
     const malformed = new Request("http://127.0.0.1:8320/v1/responses", { method: "POST",
       headers: { "content-type": "application/json", "x-codex-routing-hint": `model=${MODEL}` }, body: "{broken" });
@@ -638,12 +655,12 @@ test("Qoder WebSocket 握手与所有地域帧均拒绝进入上游桥", TIMEOUT
     const handler = create();
     for (const model of [MODEL, "qoder-cn/qfmodel", "qoder/qfmodel"]) {
       const upgrade = new Request("http://127.0.0.1:8320/v1/responses", { headers: { upgrade: "websocket", "x-codex-routing-hint": `model=${model}` } });
-      assert.equal(isQoderResponsesWebSocket(upgrade, config), true);
+      assert.equal(matchesPluginUpgrade(upgrade, config, "qoder"), true);
       const response = await handler(upgrade);
       assert.equal(response.status, 426);
       assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "qoder-http-only");
       for (const route of ["official", "cliproxy"] as const) {
-        for (const prefix of ["cliproxy/", ""]) assert.deepEqual(checkFrameRouting(JSON.stringify({ type: "response.create", model }), route, prefix), { kind: "reject", model, family: "qoder" });
+        for (const prefix of ["cliproxy/", ""]) assert.deepEqual(checkFrameRouting(JSON.stringify({ type: "response.create", model }), route, prefix, routingPluginFamily), { kind: "reject", model, family: "qoder" });
       }
     }
     assert.equal(calls.length, 0);

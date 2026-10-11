@@ -1,10 +1,10 @@
-import test from "node:test";
+import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { realPathOrResolve } from "../src/paths.ts";
-import { composeInstallFailureMessage, restoredHealthUrl, runCli } from "../src/cli.ts";
+import { realPathOrResolve } from "../apps/gateway/src/paths.ts";
+import { composeInstallFailureMessage, restoredHealthUrl, runCli } from "../apps/gateway/src/cli.ts";
 
 test("restoredHealthUrl prefers the previous host and port after rollback", () => {
   const next = { host: "127.0.0.1", port: 9001 };
@@ -73,7 +73,7 @@ test("webui is removed and web service mode binds the default install config", a
   try {
     process.env.HOME = home;
     process.env.CODEX_CLIPROXY_UI_SERVICE = "1";
-    const defaultConfig = path.join(home, ".codex-cliproxy-gateway", "config.json");
+    const defaultConfig = path.join(home, ".agent-proxy-gateway", "config.json");
     await assert.rejects(runCli(["webui"]), /Unknown command: webui/);
     await assert.rejects(
       runCli(["webui", "--config", path.join(home, "other.json")]),

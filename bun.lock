@@ -3,14 +3,16 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "codex-cliproxy-gateway",
-      "dependencies": {
-        "bytes": "^3.1.2",
-        "i18next": "^26.4.2",
-        "llm-bridge": "2.0.1",
-        "react-i18next": "^17.0.16",
-      },
+      "name": "agent-proxy-monorepo",
       "devDependencies": {
+        "@agent-proxy/agy": "workspace:*",
+        "@agent-proxy/codebuddy": "workspace:*",
+        "@agent-proxy/llm-bridge": "workspace:*",
+        "@agent-proxy/models": "workspace:*",
+        "@agent-proxy/opencode-zen": "workspace:*",
+        "@agent-proxy/plugin-api": "workspace:*",
+        "@agent-proxy/qoder": "workspace:*",
+        "@agent-proxy/zcode": "workspace:*",
         "@anthropic-ai/sdk": "0.56.0",
         "@commitlint/cli": "^21.2.2",
         "@commitlint/config-conventional": "^21.2.2",
@@ -22,6 +24,7 @@
         "@types/react-dom": "^19.2.0",
         "commitizen": "^4.3.2",
         "cz-conventional-changelog-zh": "^0.0.2",
+        "i18next": "^26.4.2",
         "lerna": "^10.0.1",
         "lerna-changelog": "^2.2.0",
         "openai": "5.8.2",
@@ -33,11 +36,126 @@
         "yorkie": "^2.0.0",
       },
     },
+    "apps/gateway": {
+      "name": "@agent-proxy/gateway",
+      "version": "0.10.0",
+      "bin": {
+        "agent-proxy": "./dist/index.js",
+      },
+      "dependencies": {
+        "@agent-proxy/agy": "workspace:*",
+        "@agent-proxy/codebuddy": "workspace:*",
+        "@agent-proxy/opencode-zen": "workspace:*",
+        "@agent-proxy/plugin-api": "workspace:*",
+        "@agent-proxy/qoder": "workspace:*",
+        "@agent-proxy/zcode": "workspace:*",
+        "bytes": "^3.1.2",
+        "i18next": "^26.4.2",
+        "react": "^19.2.0",
+        "react-dom": "^19.2.0",
+        "react-i18next": "^17.0.16",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
+    "packages/agy": {
+      "name": "@agent-proxy/agy",
+      "version": "0.10.0",
+      "dependencies": {
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
+    "packages/codebuddy": {
+      "name": "@agent-proxy/codebuddy",
+      "version": "0.10.0",
+      "dependencies": {
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
+    "packages/llm-bridge": {
+      "name": "@agent-proxy/llm-bridge",
+      "version": "0.10.0",
+      "dependencies": {
+        "@anthropic-ai/sdk": "0.56.0",
+        "@google/generative-ai": "0.24.1",
+        "llm-bridge": "2.0.1",
+        "openai": "5.8.2",
+      },
+    },
+    "packages/models": {
+      "name": "@agent-proxy/models",
+      "version": "0.10.0",
+      "devDependencies": {
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+    },
+    "packages/opencode-zen": {
+      "name": "@agent-proxy/opencode-zen",
+      "version": "0.10.0",
+      "dependencies": {
+        "@agent-proxy/llm-bridge": "workspace:*",
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
+    "packages/plugin-api": {
+      "name": "@agent-proxy/plugin-api",
+      "version": "0.10.0",
+    },
+    "packages/qoder": {
+      "name": "@agent-proxy/qoder",
+      "version": "0.10.0",
+      "dependencies": {
+        "@agent-proxy/codebuddy": "workspace:*",
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
+    "packages/zcode": {
+      "name": "@agent-proxy/zcode",
+      "version": "0.10.0",
+      "dependencies": {
+        "@agent-proxy/llm-bridge": "workspace:*",
+        "@agent-proxy/plugin-api": "workspace:*",
+      },
+      "devDependencies": {
+        "@agent-proxy/models": "workspace:*",
+      },
+    },
   },
   "trustedDependencies": [
     "yorkie",
   ],
   "packages": {
+    "@agent-proxy/agy": ["@agent-proxy/agy@workspace:packages/agy"],
+
+    "@agent-proxy/codebuddy": ["@agent-proxy/codebuddy@workspace:packages/codebuddy"],
+
+    "@agent-proxy/gateway": ["@agent-proxy/gateway@workspace:apps/gateway"],
+
+    "@agent-proxy/llm-bridge": ["@agent-proxy/llm-bridge@workspace:packages/llm-bridge"],
+
+    "@agent-proxy/models": ["@agent-proxy/models@workspace:packages/models"],
+
+    "@agent-proxy/opencode-zen": ["@agent-proxy/opencode-zen@workspace:packages/opencode-zen"],
+
+    "@agent-proxy/plugin-api": ["@agent-proxy/plugin-api@workspace:packages/plugin-api"],
+
+    "@agent-proxy/qoder": ["@agent-proxy/qoder@workspace:packages/qoder"],
+
+    "@agent-proxy/zcode": ["@agent-proxy/zcode@workspace:packages/zcode"],
+
     "@anthropic-ai/sdk": ["@anthropic-ai/sdk@0.56.0", "", { "bin": { "anthropic-ai-sdk": "bin/cli" } }, "sha512-SLCB8M8+VMg1cpCucnA1XWHGWqVSZtIWzmOdDOEu3eTFZMB+A0sGZ1ESO5MHDnqrNTXz3safMrWx9x4rMZSOqA=="],
 
     "@babel/code-frame": ["@babel/code-frame@7.29.7", "", { "dependencies": { "@babel/helper-validator-identifier": "^7.29.7", "js-tokens": "^4.0.0", "picocolors": "^1.1.1" } }, "sha512-Aup7aUOfpbAUg2ROOJN6Iw5f9DMBlzu0mIkm/malLQFN/YQgO48wCj0Kxa3sEHJvPVFg7siR+qRInwXd2qhQKw=="],

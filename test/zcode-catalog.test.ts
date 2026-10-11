@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "node:test";
+import { test } from "./host-test.ts";
 import assert from "node:assert/strict";
-import vendorModels from "../models/vendor_models.json";
+import vendorModels from "@agent-proxy/models/vendor_models.json";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -14,8 +14,8 @@ import {
   zcodeAPIProviderPrefix,
   zcodeModelPlan,
   zcodeUpstreamModel,
-} from "../src/zcode/catalog.ts";
-import type { ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "../src/zcode/config.ts";
+} from "@agent-proxy/zcode/catalog";
+import type { ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "@agent-proxy/zcode/config";
 
 const IDS = vendorModels["z.ai"].map((entry) => entry.name);
 function snapshot(
@@ -33,9 +33,6 @@ function fixture(run: (file: string, root: string) => void): void {
   try { run(path.join(root, "cache", "zcode-catalog.json"), root); }
   finally { fs.rmSync(root, { recursive: true, force: true }); }
 }
-function write(file: string, value: unknown): void {
-  fs.writeFileSync(file, JSON.stringify(value));
-}
 function read(file: string): { content_hash: string; models: { slug: string }[] } {
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
@@ -50,31 +47,22 @@ test("ZCode 厂商目录由内置预设纯内存合成，不落盘", { timeout: 
   });
 });
 
-test("ZCode 厂商覆盖规则生效且不继承 GPT 设置或宣告 WebSocket", { timeout: 60_000 }, () => {
-  fixture((_file, root) => {
-    const overrides = path.join(root, "overrides.json");
-    write(overrides, { "z.ai": [{ name: IDS[0], description: "test-before", context_window: 123456 }] });
-    const first = buildZcodeVendorCatalog(overrides);
-    assert.equal(first.models[0]!.description, "test-before");
-    assert.equal(first.models[0]!.context_window, 123456);
-
-    write(overrides, {
-      "z.ai": [{ name: IDS[0], description: "test-after", context_window: 234567, prefer_websockets: true, supports_search_tool: true }],
-      openai: [{ name: "gpt-*", base_instructions: "test-GPT-only-instruction", service_tiers: ["test-GPT-only-tier"] }],
-    });
-    const changed = buildZcodeVendorCatalog(overrides);
-    assert.equal(changed.models[0]!.description, "test-after");
-    assert.equal(changed.models[0]!.context_window, 234567);
-    for (const entry of changed.models) {
-      assert.equal(entry.prefer_websockets, false);
-      assert.equal(entry.supports_search_tool, true);
-      assert.equal(entry.base_instructions, "");
-      assert.equal(entry.service_tiers, undefined);
-      assert.equal(entry.additional_speed_tiers, undefined);
-      assert.equal(entry.supports_image_detail_original, undefined);
-      assert.equal(JSON.stringify(entry).includes("test-GPT-only"), false);
+test("ZCode 厂商目录保留模型包预设，不继承 GPT 设置或宣告 WebSocket", () => {
+  const catalog = buildZcodeVendorCatalog();
+  for (const preset of vendorModels["z.ai"]) {
+    const entry = catalog.models.find(model => model.slug === preset.name)!;
+    assert.ok(entry);
+    const { name: _name, ...fields } = preset;
+    for (const [key, value] of Object.entries(fields)) {
+      assert.deepEqual(entry[key], value, `模型 ${preset.name} 保留预设字段 ${key}`);
     }
-  });
+    assert.equal(entry.prefer_websockets, false);
+    assert.equal(entry.supports_search_tool, true);
+    assert.equal(entry.base_instructions, "");
+    assert.equal(entry.service_tiers, undefined);
+    assert.equal(entry.additional_speed_tiers, undefined);
+    assert.equal(entry.supports_image_detail_original, undefined);
+  }
 });
 
 test("ZCode 对外目录按当前套餐落盘，内容不变时不重复写盘", { timeout: 60_000 }, () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { translateQoderResponse } from "../src/qoder/response.ts";
-import { translateQoderRequest } from "../src/qoder/request.ts";
+import test from "./host-test.ts";
+import { translateQoderResponse } from "@agent-proxy/qoder/response";
+import { translateQoderRequest } from "@agent-proxy/qoder/request";
 
 type Json = Record<string, unknown>;
 const encoder = new TextEncoder();
