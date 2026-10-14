@@ -45,16 +45,21 @@ export function writeStaticCatalog(paths: ResolvedPaths, config: GatewayConfig, 
   return catalog;
 }
 
-/** 只改写受管目录指向；遇到不可解析或用户自管的值时拒绝覆盖。 */
+/**
+ * 只改写受管目录指向；遇到不可解析或用户自管的值时拒绝覆盖。
+ * managedFiles 是受管目录文件全集（网关自有 + 已装配插件产物），由调用方注入；
+ * 本模块保持叶子地位，不 import 组合层，历史插件目录指向仍须被识别为受管值。
+ */
 export function applyModelCatalogToml(
   source: string,
   active: boolean,
   paths: ResolvedPaths,
   catalogFile: string,
+  managedFiles: string[],
 ): { patchedToml: string; previousCatalog: string | null } {
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
-  if (configuredCatalog && ![...managedCatalogFiles(paths), codexCatalogFile(paths), legacyCatalogFile].includes(configuredCatalog)) {
+  if (configuredCatalog && ![...managedFiles, codexCatalogFile(paths), legacyCatalogFile].includes(configuredCatalog)) {
     throw new Error(`Refusing to replace unmanaged model_catalog_json: ${configuredCatalog}`);
   }
   if (configuredCatalog === undefined && hasRootTomlKey(source, "model_catalog_json")) {
@@ -79,7 +84,11 @@ export async function updateCodexModelCatalog(
   paths: ResolvedPaths,
   config: GatewayConfig,
   catalogSource: ModelCatalogSource,
-  { refreshAdapters = false, manual: manualOverride }: { refreshAdapters?: boolean; manual?: boolean } = {},
+  {
+    refreshAdapters = false,
+    manual: manualOverride,
+    managedFiles = managedCatalogFiles(paths),
+  }: { refreshAdapters?: boolean; manual?: boolean; managedFiles?: string[] } = {},
 ): Promise<{ catalogPath: string; count: number; manual: boolean; tomlChanged: boolean }> {
   const stateSource = fs.existsSync(paths.stateFile) ? fs.readFileSync(paths.stateFile, "utf8") : undefined;
   const state: ModelInstallState = stateSource === undefined ? {} : JSON.parse(stateSource);
@@ -91,7 +100,7 @@ export async function updateCodexModelCatalog(
   // 先执行受管值守卫，拒绝后不发网络请求也不写入任何目录快照。
   const { patchedToml, previousCatalog } = manual
     ? { patchedToml: source, previousCatalog: readRootTomlString(source, "model_catalog_json") ?? null }
-    : applyModelCatalogToml(source, active, paths, catalogPath);
+    : applyModelCatalogToml(source, active, paths, catalogPath, managedFiles);
   const tomlChanged = patchedToml !== source;
   const previousSnapshot = fs.existsSync(catalogPath) ? fs.readFileSync(catalogPath, "utf8") : undefined;
   let snapshotWritten = false;

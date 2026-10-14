@@ -350,13 +350,21 @@ const PROBE_TTL_MS = 24 * 60 * 60 * 1000;
  * 可见目录在原始 id 列表之上叠加两层数据：官方元数据（deprecated 过滤 + 端点协议）
  * 与无元数据模型的探针裁决；元数据不可用时保守不过滤。
  */
+/** opencode-zen 落在缓存目录的产物清单（成品目录与原始元数据，与落盘点同源）；卸载清理与受管值守卫经组合层聚合消费。 */
+const OPENCODE_ZEN_CATALOG_FILE_NAME = "opencode-zen-catalog.json";
+const OPENCODE_ZEN_METADATA_FILE_NAME = "opencode-zen-metadata.json";
+export const OPENCODE_ZEN_RUNTIME_ARTIFACTS: readonly string[] = Object.freeze([
+  OPENCODE_ZEN_CATALOG_FILE_NAME,
+  OPENCODE_ZEN_METADATA_FILE_NAME,
+]);
+
 export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOptions) {
   const now = options.now ?? Date.now;
   const ttlMs = Math.max(60_000, options.ttlMs ?? CATALOG_TTL_MS);
   const metadataTtlMs = Math.max(60_000, options.metadataTtlMs ?? METADATA_TTL_MS);
   const probeTtlMs = Math.max(60_000, options.probeTtlMs ?? PROBE_TTL_MS);
-  const metadataFile = path.join(options.cacheDirectory, "opencode-zen-metadata.json");
-  const catalogFile = path.join(options.cacheDirectory, "opencode-zen-catalog.json");
+  const metadataFile = path.join(options.cacheDirectory, OPENCODE_ZEN_METADATA_FILE_NAME);
+  const catalogFile = path.join(options.cacheDirectory, OPENCODE_ZEN_CATALOG_FILE_NAME);
   let cached: CachedCatalog | undefined;
   let retryAt = 0;
   let metadataRetryAt = 0;

@@ -1,4 +1,4 @@
-import { createConfiguredPluginRegistry, isInstalledPluginModel, type ModelCatalogDependencies } from "./gateway-composition.ts";
+import { createConfiguredPluginRegistry, isInstalledPluginModel, managedRuntimeCatalogFiles, type ModelCatalogDependencies } from "./gateway-composition.ts";
 import {
   rebuildStaticCatalog as rebuildWithSource,
   updateCodexModelCatalog as updateWithSource,
@@ -69,5 +69,9 @@ export function updateCodexModelCatalog(
   dependencies: ModelCatalogDependencies = {},
   options: { refreshAdapters?: boolean; manual?: boolean } = {},
 ) {
-  return updateWithSource(paths, config, createCatalogSource(config, dependencies), options);
+  // 受管值守卫要识别插件目录缓存的历史指向；组合层聚合注入，model-state 保持叶子。
+  return updateWithSource(paths, config, createCatalogSource(config, dependencies), {
+    ...options,
+    managedFiles: managedRuntimeCatalogFiles(paths),
+  });
 }

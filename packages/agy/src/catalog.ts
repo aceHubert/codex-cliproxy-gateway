@@ -344,12 +344,16 @@ interface CacheFile {
  * 目录存储：内存 + 磁盘双指纹缓存、TTL、单飞刷新、失败回退 last-good。
  * 账号切换（identity 变化）后旧 key 条目不复用。
  */
+/** agy 落在缓存目录的产物清单（目录缓存，与落盘点同源）；卸载清理与受管值守卫经组合层聚合消费。 */
+const AGY_CATALOG_FILE_NAME = "agy-catalog.json";
+export const AGY_RUNTIME_ARTIFACTS: readonly string[] = Object.freeze([AGY_CATALOG_FILE_NAME]);
+
 export function createAgyCatalogStore(options: AgyCatalogStoreOptions) {
   const now = options.now ?? Date.now;
   const ttlMs = Math.max(60_000, options.ttlMs ?? CATALOG_TTL_MS);
   const endpoint = options.endpoint ?? AGY_ENDPOINT;
   const endpointDigest = createHash("sha256").update(endpoint).digest("hex").slice(0, 16);
-  const cacheFile = path.join(options.cacheDirectory, "agy-catalog.json");
+  const cacheFile = path.join(options.cacheDirectory, AGY_CATALOG_FILE_NAME);
   let cached: CachedCatalog | undefined;
   let retryAt = 0;
   let refreshing: Promise<void> | undefined;

@@ -320,6 +320,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
 }
 export { getActiveSources, withInstanceContext } from "./credentials.ts";
 export type { QoderInstanceContext } from "./credentials.ts";
+export { QODER_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
 export function createQoderAdapter<Config extends AgentConfig>(config: Config, dependencies: QoderDependencies = {}) {
   return bindHostMethods(buildQoderAdapter(config, dependencies));
