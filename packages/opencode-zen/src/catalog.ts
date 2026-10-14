@@ -2,9 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { getCodexModelSnapshot } from "@agent-proxy/models";
-import { invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
+import { invalidateModelsCache } from "@agent-proxy/plugin-api";
 import { atomicWrite } from "@agent-proxy/plugin-api";
-import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "./fingerprint.ts";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 
 /**
@@ -138,7 +137,11 @@ export function buildOpencodeZenCatalog(
       delete model.max_context_window;
       delete model.effective_context_window_percent;
     }
-    return withAgentSystemPrompt(model, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
+    // 提示词回落（2026-10-14 决策）：门禁不检查 system 内容后不再替换 base_instructions /
+    // instructions_template，条目保留 gpt-5.5 快照基底的官方 Codex 提示词——客户端由此
+    // 恢复自身的操作性指令（apply_patch freeform 协议、shell 约定）。OpenCode 官方
+    // 模板仍留在 fingerprint-data.json 作回退材料。
+    return model;
   });
   return { models };
 }
@@ -319,7 +322,7 @@ interface CachedCatalog {
   ids: string[];
   metadata?: { fetchedAt: number; models: Record<string, OpencodeZenModelMetadata> };
   verdicts?: Record<string, OpencodeZenProbeVerdictEntry>;
-  /** 成品条目（`base_instructions` 与 `model_messages` 模板已替换）：刷新时合成，
+  /** 成品条目（保留 gpt-5.5 基底的官方 Codex 提示词）：刷新时合成，
    *  与 `opencode-zen-catalog.json` 内容一致；serve 路径只读，不重建。 */
   models?: ModelEntry[];
 }
@@ -334,7 +337,7 @@ const PROBE_TTL_MS = 24 * 60 * 60 * 1000;
  *
  * 可见目录在原始 id 列表之上叠加两层数据：官方元数据（deprecated 过滤 + 端点协议）
  * 与无元数据模型的探针裁决；两层数据随主缓存落盘，元数据不可用时保守不过滤。
- * 合成好的条目（base_instructions + model_messages 模板已替换）同样落盘，
+ * 合成好的条目（提示词保留快照基底，不再替换）同样落盘，
  * `/v1/models` 侧只读缓存并合并，不重建条目。
  */
 /**
@@ -343,8 +346,8 @@ const PROBE_TTL_MS = 24 * 60 * 60 * 1000;
  *
  * - `opencode-zen-metadata.json`：原始数据（ids + 官方元数据 + 探针裁决）。ids 按目录
  *   TTL（10 分钟）刷新，元数据按 6 小时 TTL 刷新，裁决 24 小时。
- * - `opencode-zen-catalog.json`：由上述数据生成的**成品目录**（`base_instructions` 与
- *   `model_messages` 模板已替换），每次刷新元数据时同步重新生成；`/v1/models` 侧只读
+ * - `opencode-zen-catalog.json`：由上述数据生成的**成品目录**（提示词保留快照基底），
+ *   每次刷新元数据时同步重新生成；`/v1/models` 侧只读
  *   合并这一份，不在运行时重建条目。
  *
  * 可见目录在原始 id 列表之上叠加两层数据：官方元数据（deprecated 过滤 + 端点协议）
