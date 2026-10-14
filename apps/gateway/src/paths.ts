@@ -134,14 +134,15 @@ export function catalogFileFor(paths: ResolvedPaths, upstreamType: UpstreamType)
   return path.join(paths.runtimeHome, `${upstreamType}-catalog.json`);
 }
 
-/** 网关自管的全部目录文件；新增上游类型时必须同步补充，供卸载清理与 config.toml 守卫使用。 */
+/**
+ * 网关自管的目录文件；新增上游类型时必须同步补充，供卸载清理与 config.toml 守卫使用。
+ * 只列网关自有文件：插件目录缓存由各插件包的 *_RUNTIME_ARTIFACTS 自行声明，
+ * 经 gateway-composition 聚合，本模块不持有插件产物文件名。
+ */
 export function managedCatalogFiles(paths: ResolvedPaths): string[] {
   return [
     catalogFileFor(paths, "cliproxy"),
     catalogFileFor(paths, "newapi"),
     path.join(paths.runtimeHome, "codex-catalog.json"),
-    path.join(paths.runtimeHome, "zcode-catalog.json"),
-    path.join(paths.runtimeHome, "codebuddy-catalog.json"),
-    path.join(paths.runtimeHome, "workbuddy-catalog.json"),
   ];
 }

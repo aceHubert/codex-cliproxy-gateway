@@ -70,7 +70,7 @@ export interface ResponsesShellOptions {
   encodeReasoning?: (text: string, signature: string) => string | undefined;
   onTerminal?: (response: Json) => void;
   sanitizeError?: (error: Json) => Json;
-  /** custom 工具的输入在收尾时以单条完整 delta 下发（z.ai 形状）；缺省只在流中下发增量。 */
+  /** custom 工具总是在收尾校验后以单条正文 delta 下发；启用此选项也不会重复发送。 */
   customToolInputAtClose?: boolean;
   /** 工具参数没有任何增量时在收尾重放一条完整 delta（z.ai 形状）。 */
   replayToolArgumentsAtClose?: boolean;
@@ -243,9 +243,8 @@ export class ResponsesOutputShell {
     if (!block || block.kind !== "tool") throw new Error("tool delta 引用了未声明的工具调用");
     block.hasDelta = true;
     block.arguments += value;
-    if (block.custom) {
-      this.pending.push(this.event("response.custom_tool_call_input.delta", { ...this.fields(block), delta: value }));
-    } else {
+    // custom 的增量是上游 JSON 包装，必须完整校验并解包后才能作为可执行正文下发。
+    if (!block.custom) {
       (block.item as { arguments: string }).arguments = block.arguments;
       this.pending.push(this.event("response.function_call_arguments.delta", { ...this.fields(block), delta: value }));
     }
@@ -333,7 +332,7 @@ export class ResponsesOutputShell {
         const input = (parsed as Json).input;
         if (typeof input !== "string") throw new Error("custom tool input 必须是字符串");
         block.item.input = input;
-        if (input && this.options.customToolInputAtClose) {
+        if (input) {
           this.pending.push(this.event("response.custom_tool_call_input.delta", { ...base, delta: input }));
         }
         this.pending.push(this.event("response.custom_tool_call_input.done", { ...base, input }));
@@ -349,9 +348,10 @@ export class ResponsesOutputShell {
   }
 
   /** 关闭全部仍开放的块（按 open 顺序）。 */
-  closeAllBlocks(): void {
+  closeAllBlocks(options: { skipCustomTools?: boolean } = {}): void {
     for (const [key, block] of this.blocks) {
       if (block.item.status !== "in_progress") continue;
+      if (options.skipCustomTools && block.custom) continue;
       this.closeBlock(key);
     }
   }
@@ -428,7 +428,10 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
   const shell = new ResponsesOutputShell({
     model: options.model,
     encodeReasoning: options.encodeReasoning,
-    onTerminal: (response) => safely(() => options.onComplete?.(structuredClone(response))),
+    onTerminal: (response) => {
+      safely(() => options.onComplete?.(structuredClone(response)));
+      finalResolve(structuredClone(response));
+    },
     sanitizeError: options.sanitizeError,
   });
   let finalResolve!: (value: Json | undefined) => void;
@@ -436,6 +439,8 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
     finalResolve = resolve;
   });
   let canceled = false;
+  let messageEnded = false;
+  const customCalls = new Map<string, boolean>();
   const handleAbort = (): void => {
     if (canceled || shell.finished) return;
     canceled = true;
@@ -470,6 +475,7 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
           namespace: identity?.namespace,
           custom: identity?.custom === true,
         });
+        if (identity?.custom === true) customCalls.set(event.tool_call.id, false);
         break;
       }
       case "tool_call_delta": {
@@ -477,7 +483,9 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
         break;
       }
       case "tool_call_end": {
-        if (shell.blocksOpen(event.tool_call.id)) shell.closeBlock(event.tool_call.id);
+        // custom 等待响应终态，避免上游先结束工具块、随后报告截断时执行残缺输入。
+        if (customCalls.has(event.tool_call.id)) customCalls.set(event.tool_call.id, true);
+        else if (shell.blocksOpen(event.tool_call.id)) shell.closeBlock(event.tool_call.id);
         break;
       }
       case "message_end": {
@@ -485,6 +493,7 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
           throw new Error(`上游返回了不支持的结束原因：${event.raw_stop_reason ?? "unknown"}`);
         }
         shell.mergeUsage(bridgeUsageToJson(event.usage));
+        messageEnded = true;
         incomplete = event.stop_reason === "length" || event.stop_reason === "content_filter";
         incompleteReason = event.stop_reason === "length" ? "max_output_tokens" : event.stop_reason === "content_filter" ? "content_filter" : undefined;
         break;
@@ -533,7 +542,11 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
       }
       if (canceled) return;
       if (!shell.finished) {
-        shell.closeAllBlocks();
+        if (!messageEnded) throw new Error("上游响应提前断开，缺少 message_end 终态");
+        if (!incomplete && [...customCalls.values()].some((ended) => !ended)) {
+          throw new Error("custom 工具调用提前断开，缺少 tool_call_end");
+        }
+        shell.closeAllBlocks({ skipCustomTools: incomplete });
         shell.terminal(incomplete ? "incomplete" : "completed", incomplete ? { incompleteReason } : {});
       }
       yield* shell.drain();
@@ -575,6 +588,9 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
       },
       async cancel() {
         handleAbort();
+        // 未开始读取的生成器不会进入 finally，取消也必须完成 final Promise。
+        finalResolve(structuredClone(shell.finalResponse));
+        options.signal?.removeEventListener("abort", handleAbort);
         safely(options.abort);
         await iterator.return(undefined);
       },
@@ -609,9 +625,48 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
   let error: { message: string; code?: string } | undefined;
 
   const chunkBase = (): Json => ({ id, object: "chat.completion.chunk", created, model });
+  const completionSnapshot = (): Json => ({
+    id,
+    object: "chat.completion",
+    created,
+    model,
+    choices: [
+      {
+        index: 0,
+        message: {
+          role: "assistant",
+          ...(message.content === "" && toolCalls.length > 0 ? { content: null } : { content: message.content }),
+          ...(refusal ? { refusal } : {}),
+          ...(toolCalls.length > 0 ? { tool_calls: toolCalls.map((call) => ({ id: call.id, type: "function", function: call.function })) } : {}),
+        },
+        finish_reason: finishReason ?? "stop",
+      },
+    ],
+    ...(usageHolder.usage ? { usage: usageHolder.usage } : {}),
+  });
+  let settled = false;
+  let completion: Json | undefined;
+  const settleFinal = (): void => {
+    if (settled) return;
+    settled = true;
+    if (!canceled && !error) {
+      completion = completionSnapshot();
+      safely(() => options.onComplete?.(structuredClone(completion!)));
+    }
+    finalResolve(structuredClone(completion));
+  };
+  const handleAbort = (): void => {
+    if (settled) return;
+    canceled = true;
+    settleFinal();
+    safely(options.abort);
+  };
+  options.signal?.addEventListener("abort", handleAbort, { once: true });
+  if (options.signal?.aborted) handleAbort();
 
   async function* frames(): AsyncGenerator<Json | "[DONE]" | { __error: { message: string; code?: string } }> {
     try {
+      if (canceled) return;
       yield { ...chunkBase(), choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] };
       const source = options.transform ? options.transform(events) : events;
       for await (const event of source) {
@@ -667,6 +722,7 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
           }
           case "error": {
             error = { message: event.error.message, code: event.error.code ?? "upstream_error" };
+            yield { __error: error };
             return;
           }
         }
@@ -680,7 +736,10 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
       yield "[DONE]";
     } catch ( upstreamError) {
       error = { message: upstreamError instanceof Error ? upstreamError.message : String(upstreamError), code: "upstream_protocol_error" };
+      if (!canceled) yield { __error: error };
     } finally {
+      settleFinal();
+      options.signal?.removeEventListener("abort", handleAbort);
       safely(options.abort);
     }
   }
@@ -714,7 +773,8 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
         controller.enqueue(encoder.encode(chunk));
       },
       async cancel() {
-        canceled = true;
+        handleAbort();
+        options.signal?.removeEventListener("abort", handleAbort);
         safely(options.abort);
         await iterator.return(undefined);
       },
@@ -730,33 +790,12 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
   }
   if (error) {
     const sanitized = options.sanitizeError ? options.sanitizeError(error as Json) : (error as Json);
-    finalResolve(undefined);
     return {
       response: Response.json({ error: { message: sanitized.message, code: sanitized.code ?? "upstream_error", type: "upstream_error" } }, { status: 502 }),
       final,
     };
   }
-  const completion: Json = {
-    id,
-    object: "chat.completion",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: "assistant",
-          ...(message.content === "" && toolCalls.length > 0 ? { content: null } : { content: message.content }),
-          ...(refusal ? { refusal } : {}),
-          ...(toolCalls.length > 0 ? { tool_calls: toolCalls.map((call) => ({ id: call.id, type: "function", function: call.function })) } : {}),
-        },
-        finish_reason: finishReason ?? "stop",
-      },
-    ],
-    ...(usageHolder.usage ? { usage: usageHolder.usage } : {}),
-  };
-  safely(() => options.onComplete?.(structuredClone(completion)));
-  finalResolve(structuredClone(completion));
+  if (canceled) return { response: Response.json({ error: { message: "响应已取消", code: "response_cancelled", type: "upstream_error" } }, { status: 502 }), final };
   return { response: Response.json(completion), final };
 }
 
@@ -795,8 +834,64 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
     return block;
   };
 
+  const messageSnapshot = (): Json => {
+    const content: Json[] = [];
+    for (const block of blocks) {
+      if (block.type === "text" && block.text) {
+        content.push({ type: "text", text: block.text });
+      } else if (block.type === "thinking") {
+        content.push({ type: "thinking", thinking: block.thinking, ...(block.signature ? { signature: block.signature } : {}) });
+      } else if (block.type === "tool_use") {
+        let input: Json = {};
+        try {
+          const parsed: unknown = JSON.parse(block.arguments || "{}");
+          if (isRecord(parsed)) input = parsed;
+        } catch {
+          /* 未完成的参数按空对象聚合，与流式语义一致。 */
+        }
+        content.push({ type: "tool_use", id: block.toolId, name: block.toolName, input });
+      }
+    }
+    return {
+      id,
+      type: "message",
+      role: "assistant",
+      model,
+      content: content.length > 0 ? content : [{ type: "text", text: "" }],
+      stop_reason: stopReason ?? (sawToolUse ? "tool_use" : "end_turn"),
+      stop_sequence: null,
+      usage: {
+        input_tokens: usage.input ?? 0,
+        output_tokens: usage.output ?? 0,
+        ...(usage.cacheRead !== undefined ? { cache_read_input_tokens: usage.cacheRead } : {}),
+        ...(usage.cacheCreation !== undefined ? { cache_creation_input_tokens: usage.cacheCreation } : {}),
+        ...(usage.billing ?? {}),
+      },
+    };
+  };
+  let settled = false;
+  let message: Json | undefined;
+  const settleFinal = (): void => {
+    if (settled) return;
+    settled = true;
+    if (!canceled && aggregatedError === undefined) {
+      message = messageSnapshot();
+      safely(() => options.onComplete?.(structuredClone(message!)));
+    }
+    finalResolve(structuredClone(message));
+  };
+  const handleAbort = (): void => {
+    if (settled) return;
+    canceled = true;
+    settleFinal();
+    safely(options.abort);
+  };
+  options.signal?.addEventListener("abort", handleAbort, { once: true });
+  if (options.signal?.aborted) handleAbort();
+
   async function* frames(): AsyncGenerator<string | Json> {
     try {
+      if (canceled) return;
       yield `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id, type: "message", role: "assistant", model: options.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`;
       yield "event: ping\ndata: {\"type\": \"ping\"}\n\n";
       const source = options.transform ? options.transform(events) : events;
@@ -910,8 +1005,10 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
       yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n";
     } catch ( upstreamError) {
       aggregatedError = upstreamError instanceof Error ? upstreamError.message : String(upstreamError);
-      yield `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "upstream_error", message: aggregatedError } })}\n\n`;
+      if (!canceled) yield `event: error\ndata: ${JSON.stringify({ type: "error", error: { type: "upstream_error", message: aggregatedError } })}\n\n`;
     } finally {
+      settleFinal();
+      options.signal?.removeEventListener("abort", handleAbort);
       safely(options.abort);
     }
   }
@@ -930,7 +1027,8 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
         controller.enqueue(encoder.encode(chunk));
       },
       async cancel() {
-        canceled = true;
+        handleAbort();
+        options.signal?.removeEventListener("abort", handleAbort);
         safely(options.abort);
         await iterator.return(undefined);
       },
@@ -943,48 +1041,13 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
   for await (const frame of frames()) {
     if (typeof frame === "string") safely(() => options.onChunk?.(frame));
   }
-  if (aggregatedError) {
-    finalResolve(undefined);
+  if (aggregatedError !== undefined) {
     return {
       response: Response.json({ type: "error", error: { type: "upstream_error", message: aggregatedError } }, { status: 502 }),
       final,
     };
   }
-  const content: Json[] = [];
-  for (const block of blocks) {
-    if (block.type === "text" && block.text) {
-      content.push({ type: "text", text: block.text });
-    } else if (block.type === "thinking") {
-      content.push({ type: "thinking", thinking: block.thinking, ...(block.signature ? { signature: block.signature } : {}) });
-    } else if (block.type === "tool_use") {
-      let input: Json = {};
-      try {
-        const parsed: unknown = JSON.parse(block.arguments || "{}");
-        if (isRecord(parsed)) input = parsed;
-      } catch {
-        /* 未完成的参数按空对象聚合，与流式语义一致。 */
-      }
-      content.push({ type: "tool_use", id: block.toolId, name: block.toolName, input });
-    }
-  }
-  const message: Json = {
-    id,
-    type: "message",
-    role: "assistant",
-    model: options.model,
-    content: content.length > 0 ? content : [{ type: "text", text: "" }],
-    stop_reason: stopReason ?? (sawToolUse ? "tool_use" : "end_turn"),
-    stop_sequence: null,
-    usage: {
-      input_tokens: usage.input ?? 0,
-      output_tokens: usage.output ?? 0,
-      ...(usage.cacheRead !== undefined ? { cache_read_input_tokens: usage.cacheRead } : {}),
-      ...(usage.cacheCreation !== undefined ? { cache_creation_input_tokens: usage.cacheCreation } : {}),
-      ...(usage.billing ?? {}),
-    },
-  };
-  safely(() => options.onComplete?.(structuredClone(message)));
-  finalResolve(structuredClone(message));
+  if (canceled) return { response: Response.json({ type: "error", error: { type: "upstream_error", message: "响应已取消" } }, { status: 502 }), final };
   return { response: Response.json(message), final };
 }
 

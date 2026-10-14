@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/llm-bridge",
-  "version": "0.10.0",
+  "version": "0.11.1",
   "description": "Agent Proxy 的 llm-bridge 协议转换与流式处理接口。",
   "type": "module",
   "exports": {
@@ -17,7 +17,8 @@
     "./*.json": "./dist/*.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "bun ../../scripts/build-library.ts",
@@ -35,7 +36,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.56.0",
     "@google/generative-ai": "0.24.1",
-    "openai": "5.8.2",
-    "llm-bridge": "2.0.1"
+    "llm-bridge": "2.0.1",
+    "openai": "5.8.2"
   }
 }

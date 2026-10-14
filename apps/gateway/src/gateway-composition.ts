@@ -1,10 +1,11 @@
 import { PluginRegistry, compileModelPattern } from "@agent-proxy/plugin-api";
 import type { GatewayPlugin, HttpRequestContext } from "@agent-proxy/plugin-api";
-import { createZcodePlugin, ZCODE_MODEL_PATTERNS, type ZcodeDependencies } from "@agent-proxy/zcode";
-import { createCodebuddyPlugin, CODEBUDDY_MODEL_PATTERNS, type CodebuddyDependencies } from "@agent-proxy/codebuddy";
-import { createQoderPlugin, QODER_MODEL_PATTERNS, type QoderDependencies } from "@agent-proxy/qoder";
-import { createAgyPlugin, AGY_MODEL_PATTERNS, type AgyDependencies } from "@agent-proxy/agy";
-import { createOpencodeZenPlugin, OPENCODE_ZEN_MODEL_PATTERNS, type OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
+import path from "node:path";
+import { createZcodePlugin, ZCODE_MODEL_PATTERNS, ZCODE_RUNTIME_ARTIFACTS, type ZcodeDependencies } from "@agent-proxy/zcode";
+import { createCodebuddyPlugin, CODEBUDDY_MODEL_PATTERNS, CODEBUDDY_RUNTIME_ARTIFACTS, type CodebuddyDependencies } from "@agent-proxy/codebuddy";
+import { createQoderPlugin, QODER_MODEL_PATTERNS, QODER_RUNTIME_ARTIFACTS, type QoderDependencies } from "@agent-proxy/qoder";
+import { createAgyPlugin, AGY_MODEL_PATTERNS, AGY_RUNTIME_ARTIFACTS, type AgyDependencies } from "@agent-proxy/agy";
+import { createOpencodeZenPlugin, OPENCODE_ZEN_MODEL_PATTERNS, OPENCODE_ZEN_RUNTIME_ARTIFACTS, type OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
 import { agentConfigEnabled } from "./config.ts";
 import { createGatewayHostServices } from "./host-services.ts";
 import {
@@ -14,7 +15,7 @@ import {
   createPluginGatewayHandler, startPluginGateway,
 } from "./gateway.ts";
 import { readApiKey } from "./keychain.ts";
-import { resolvePaths } from "./paths.ts";
+import { managedCatalogFiles, resolvePaths } from "./paths.ts";
 import type { RealtimeProviderMode } from "./realtime.ts";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
 
@@ -36,6 +37,19 @@ const installedPatterns = [
 /** 禁用插件仍属于本地命名空间，排除规则不得因开关变化失效。 */
 export function isInstalledPluginModel(model: string): boolean {
   return installedPatterns.some((pattern) => Boolean(pattern.match(model)));
+}
+
+/** 已装配插件自声明的运行主目录落盘产物；文件名由各插件包导出，业务侧只聚合拼接，不自行维护清单。 */
+export function installedPluginArtifactFiles(runtimePaths: ResolvedPaths = resolvePaths()): string[] {
+  return [
+    ...ZCODE_RUNTIME_ARTIFACTS, ...CODEBUDDY_RUNTIME_ARTIFACTS, ...QODER_RUNTIME_ARTIFACTS,
+    ...AGY_RUNTIME_ARTIFACTS, ...OPENCODE_ZEN_RUNTIME_ARTIFACTS,
+  ].map((name) => path.join(runtimePaths.runtimeHome, name));
+}
+
+/** 卸载清理与 config.toml 受管值守卫共用的目录文件全集：网关自有文件加已装配插件产物。 */
+export function managedRuntimeCatalogFiles(runtimePaths: ResolvedPaths = resolvePaths()): string[] {
+  return [...managedCatalogFiles(runtimePaths), ...installedPluginArtifactFiles(runtimePaths)];
 }
 
 /** 业务装配显式列出已安装插件，核心注册表不探测或下载插件。 */

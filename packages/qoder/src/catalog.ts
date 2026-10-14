@@ -244,13 +244,17 @@ interface CachedCatalog {
   models: ModelEntry[];
 }
 
+/** 区域目录缓存文件名（与落盘点同源）；卸载清理与受管值守卫经组合层聚合消费。 */
+const QODER_CATALOG_FILE_NAMES = { cn: "qoder-cn-catalog.json", intl: "qoder-intl-catalog.json" } as const;
+export const QODER_RUNTIME_ARTIFACTS: readonly string[] = Object.freeze([QODER_CATALOG_FILE_NAMES.cn, QODER_CATALOG_FILE_NAMES.intl]);
+
 /** 区域目录存储：账号隔离、原子缓存、单飞刷新、同账号失败回退。 */
 export function createQoderCatalogStore(options: QoderCatalogStoreOptions) {
   const region = options.region ?? "intl";
   const label = QODER_REGION_LABELS[region];
   const now = options.now ?? Date.now;
   const ttlMs = options.ttlMs ?? QODER_CATALOG_TTL_MS;
-  const file = path.join(options.cacheDirectory, region === "cn" ? "qoder-cn-catalog.json" : "qoder-intl-catalog.json");
+  const file = path.join(options.cacheDirectory, QODER_CATALOG_FILE_NAMES[region]);
   let cached: CachedCatalog | undefined;
   let retry: { key: string; at: number } | undefined;
   let refreshing: Promise<void> | undefined;

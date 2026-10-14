@@ -43,6 +43,7 @@ import {
   syncGatewayConfigFile,
   waitForHealth,
 } from "../apps/gateway/src/cli.ts";
+import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
 import {
   applyModelPickerKey,
   chooseModels,
@@ -287,22 +288,22 @@ test("model catalog toml accepts any managed catalog file and repoints to the ac
   try {
     // 从 newapi 切回 cliproxy：config.toml 指向的 newapi-catalog.json 也是受管值，允许改写指向。
     const source = `model_catalog_json = "${newapiCatalog}"\n`;
-    const { patchedToml, previousCatalog } = applyModelCatalogToml(source, true, paths, paths.catalogFile);
+    const { patchedToml, previousCatalog } = applyModelCatalogToml(source, true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
     assert.equal(previousCatalog, newapiCatalog);
     assert.equal(readRootTomlString(patchedToml, "model_catalog_json"), paths.catalogFile);
 
-    for (const product of ["codebuddy", "workbuddy"]) {
-      const productCatalog = path.join(paths.runtimeHome, `${product}-catalog.json`);
-      const productSource = `model_catalog_json = "${productCatalog}"\n`;
-      const repointed = applyModelCatalogToml(productSource, true, paths, paths.catalogFile);
-      assert.equal(repointed.previousCatalog, productCatalog);
+    // 插件目录缓存也是受管值：历史 install 曾把 model_catalog_json 指向它们，必须允许迁移。
+    for (const pluginCatalog of installedPluginArtifactFiles(paths)) {
+      const pluginSource = `model_catalog_json = "${pluginCatalog}"\n`;
+      const repointed = applyModelCatalogToml(pluginSource, true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
+      assert.equal(repointed.previousCatalog, pluginCatalog);
       assert.equal(readRootTomlString(repointed.patchedToml, "model_catalog_json"), paths.catalogFile);
-      const split = applyModelCatalogToml(productSource, false, paths, paths.catalogFile);
+      const split = applyModelCatalogToml(pluginSource, false, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
       assert.equal(readRootTomlString(split.patchedToml, "model_catalog_json"), undefined);
     }
 
     assert.throws(
-      () => applyModelCatalogToml('model_catalog_json = "/Users/test/my-catalog.json"\n', true, paths, paths.catalogFile),
+      () => applyModelCatalogToml('model_catalog_json = "/Users/test/my-catalog.json"\n', true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths)),
       /Refusing to replace unmanaged model_catalog_json/,
     );
   } finally {
@@ -701,33 +702,25 @@ test("runtime cleanup preserves user files", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-runtime-cleanup-test-"));
   const paths = resolvePaths({ HOME: home });
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
-  for (const file of [
+  // 受管文件全集：网关自有目录文件 + 全部插件产物（含 codebuddy 旧版地域命名残留）。
+  const managedFiles = [
     paths.gatewayConfig,
     paths.stateFile,
     paths.catalogFile,
     path.join(paths.runtimeHome, "newapi-catalog.json"),
-    path.join(paths.runtimeHome, "codebuddy-catalog.json"),
-    path.join(paths.runtimeHome, "workbuddy-catalog.json"),
+    ...installedPluginArtifactFiles(paths),
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
     paths.stdoutLog,
     // 旧安装的独立 stderr 日志也属于受管文件：卸载清理必须把残留一并删掉。
     path.join(paths.runtimeHome, LEGACY_STDERR_LOG),
-  ]) {
-    fs.writeFileSync(file, "test\n");
-  }
+  ];
+  for (const file of managedFiles) fs.writeFileSync(file, "test\n");
   const userFile = path.join(paths.runtimeHome, "notes.txt");
   fs.writeFileSync(userFile, "keep\n");
   try {
     removeManagedRuntimeFiles(paths);
-    assert.equal(fs.existsSync(paths.gatewayConfig), false);
-    assert.equal(fs.existsSync(paths.stateFile), false);
-    assert.equal(fs.existsSync(paths.catalogFile), false);
-    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "newapi-catalog.json")), false);
-    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "codebuddy-catalog.json")), false);
-    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "workbuddy-catalog.json")), false);
-    assert.equal(fs.existsSync(path.join(paths.runtimeHome, "catalog-metadata.json")), false);
-    assert.equal(fs.existsSync(paths.modelMergeFile), false);
+    for (const file of managedFiles) assert.equal(fs.existsSync(file), false, file);
     assert.equal(fs.existsSync(userFile), true);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });

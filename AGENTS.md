@@ -57,6 +57,6 @@
 - 安装、卸载及配置写入逻辑必须保留备份、原子写入和「只修改受管字段」的行为。
 - 修改 `~/.agent-proxy-gateway/config.json` 的字段、默认值、类型或校验规则时，必须同步更新 `apps/gateway/schemas/gateway-config.schema.json`，并补充或调整对应测试。
 - `$schema` 是程序维护的配置字段；每次 install 使用当前程序的规范地址覆盖旧值或用户自定义值，安装失败仍恢复原配置与状态。
-- 默认目录为 `~/.agent-proxy-gateway`；`CODEX_CLIPROXY_HOME`、显式实例与 `serve --config` 仍优先。旧默认安装仅由 install 按受管文件/JSON 字段白名单复制合并，保留旧目录和恢复材料，不改自定义路径，不重命名环境变量或服务身份。
+- 默认目录为 `~/.agent-proxy-gateway`；`CODEX_CLIPROXY_HOME`、显式实例与 `serve --config` 仍优先。
 - 五类 agent 缺失开关按 true 合并，已有显式 false 必须保留；配置仍枚举已知 agent，插件只由业务组合入口显式装配。
 - Web UI 与模型流量结构性隔离（独立端口、独立进程）；`/ui/api/*` 必须校验 ui-token 与 Host/Origin 白名单；改动路由时不得破坏模型端口对 `/ui` 前缀及 mountPath 子树外的本地 404 边界。

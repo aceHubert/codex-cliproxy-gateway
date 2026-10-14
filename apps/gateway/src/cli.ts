@@ -14,7 +14,7 @@ import {
   AGENT_DEFAULTS,
   effectiveAgentConfig,
 } from "./config.ts";
-import { realPathOrResolve, resolvePaths, managedCatalogFiles, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker } from "./paths.ts";
+import { realPathOrResolve, resolvePaths, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker } from "./paths.ts";
 import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
 import { prepareDefaultInstallMigration } from "./default-install-migration.ts";
 import { resolveInstalledCodexPaths, assertCodexHomeAvailable, claimCodexHome, codexOwnerRuntimeHome, releaseCodexHome } from "./codex-ownership.ts";
@@ -38,7 +38,7 @@ import {
   rebuildCatalog,
   upstreamClientVersion,
 } from "./upstream-catalog.ts";
-import { isLoopbackUrl, startGateway } from "./gateway-composition.ts";
+import { isLoopbackUrl, managedRuntimeCatalogFiles, startGateway } from "./gateway-composition.ts";
 import { applyModelCatalogToml, codexCatalogFile, collectAdapterModels, rebuildStaticCatalog, updateCodexModelCatalog, type ModelCatalogDependencies } from "./model-composition.ts";
 import { reloadGatewayModels } from "./model-reload.ts";
 export { applyModelCatalogToml } from "./model-state.ts";
@@ -614,7 +614,7 @@ export function removeManagedRuntimeFiles(
   for (const file of [
     ...(options.preserveGatewayConfig ? [] : [paths.gatewayConfig]),
     ...(options.preserveState ? [] : [paths.stateFile]),
-    ...managedCatalogFiles(paths),
+    ...managedRuntimeCatalogFiles(paths),
     path.join(paths.runtimeHome, "catalog-metadata.json"),
     paths.modelMergeFile,
     paths.stdoutLog,
@@ -933,6 +933,7 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
       upstreamOnly && !isSelectNone(installSelector),
       paths,
       codexCatalogFile(paths),
+      managedRuntimeCatalogFiles(paths),
     );
   }
   // 凭据快照同时用于复用和失败恢复；即便 state 缺失也不能丢掉已有密钥。
@@ -989,6 +990,7 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
       upstreamOnly,
       paths,
       codexCatalogFile(paths),
+      managedRuntimeCatalogFiles(paths),
     );
 
   // 切换模式不动纯净备份；旧密钥/旧 state 先留底，失败时恢复。
@@ -1489,7 +1491,7 @@ async function models(options: CliOptions): Promise<void> {
   // 同步前先拒绝非受管 model_catalog_json，避免后续模型覆盖文件下载产生半更新；
   // 手动模式对 config.toml 只读，守卫与改写一并跳过。
   if (!manualCodexConfig) {
-    applyModelCatalogToml(source, upstreamOnly, paths, codexCatalogFile(paths));
+    applyModelCatalogToml(source, upstreamOnly, paths, codexCatalogFile(paths), managedRuntimeCatalogFiles(paths));
   }
   const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, config, Boolean(modelMergeJson));
   const selectNone = isSelectNone(selector);
@@ -2014,7 +2016,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   const managesCodex = !fs.existsSync(paths.stateFile) || isCodexConfigManaged(loadJson<InstallState>(paths.stateFile));
   if (managesCodex) {
     const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-    applyModelCatalogToml(source, config.upstreamOnly === true, paths, codexCatalogFile(paths));
+    applyModelCatalogToml(source, config.upstreamOnly === true, paths, codexCatalogFile(paths), managedRuntimeCatalogFiles(paths));
   }
   if (zcodeTarget !== undefined) {
     config.zcode = zcodeTarget;

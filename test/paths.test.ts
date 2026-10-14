@@ -10,16 +10,45 @@ import {
   resolvePaths,
   runWithInstancePaths,
 } from "../apps/gateway/src/paths.ts";
+import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
 import { requestLogDir } from "../apps/gateway/src/request-log.ts";
 
-test("受管目录清单包含两个产品缓存，且遵循实例运行目录", () => {
+test("受管目录清单只含网关自有文件，且遵循实例运行目录", () => {
   for (const root of [undefined, path.resolve("/tmp/ccp-catalog-instance")]) {
     const paths = resolvePaths({ HOME: "/home/tester" }, root);
     const files = managedCatalogFiles(paths);
-    assert.ok(files.includes(path.join(paths.runtimeHome, "codebuddy-catalog.json")));
-    assert.ok(files.includes(path.join(paths.runtimeHome, "workbuddy-catalog.json")));
+    assert.deepEqual(files, [
+      path.join(paths.runtimeHome, "cliproxy-catalog.json"),
+      path.join(paths.runtimeHome, "newapi-catalog.json"),
+      path.join(paths.runtimeHome, "codex-catalog.json"),
+    ]);
     assert.ok(files.every((file) => path.dirname(file) === paths.runtimeHome));
-    assert.ok(!files.some((file) => /(?:codebuddy|workbuddy)-(?:cn|intl)-catalog\.json$/.test(file)));
+    // 插件产物文件名不得出现在网关自管清单里：由各插件包声明、组合层聚合。
+    assert.ok(!files.some((file) => /(?:zcode|codebuddy|workbuddy|qoder|agy|opencode-zen)-/.test(file)));
+  }
+});
+
+test("插件产物聚合清单覆盖五家插件与 codebuddy 旧版残留，只落在运行主目录", () => {
+  for (const root of [undefined, path.resolve("/tmp/ccp-plugin-artifact-instance")]) {
+    const paths = resolvePaths({ HOME: "/home/tester" }, root);
+    const artifacts = installedPluginArtifactFiles(paths);
+    assert.deepEqual([...artifacts].sort(), [
+      "zcode-catalog.json",
+      "codebuddy-catalog.json", "workbuddy-catalog.json",
+      "codebuddy-cn-catalog.json", "codebuddy-intl-catalog.json",
+      "workbuddy-cn-catalog.json", "workbuddy-intl-catalog.json",
+      "qoder-cn-catalog.json", "qoder-intl-catalog.json",
+      "agy-catalog.json",
+      "opencode-zen-catalog.json", "opencode-zen-metadata.json",
+    ].map((name) => path.join(paths.runtimeHome, name)).sort());
+    // 删除白名单只允许运行主目录直系文件：无目录、无路径穿越。
+    assert.ok(artifacts.every((file) => path.dirname(file) === paths.runtimeHome));
+    assert.ok(artifacts.every((file) => !file.includes("..")));
+    // 聚合产物与网关自有清单不重叠，合并清单无重复。
+    const owned = new Set(managedCatalogFiles(paths));
+    assert.ok(artifacts.every((file) => !owned.has(file)));
+    const merged = managedRuntimeCatalogFiles(paths);
+    assert.equal(new Set(merged).size, merged.length);
   }
 });
 

@@ -386,6 +386,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
 }
 
 export { isAgyModel, mergeAgyCatalog };
+export { AGY_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
 export function createAgyAdapter<Config extends AgentConfig>(config: Config, dependencies: AgyDependencies = {}) {
   return bindHostMethods(buildAgyAdapter(config, dependencies));

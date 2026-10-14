@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/lerna/schemas/lerna-schema.json",
-  "version": "0.10.0",
+  "version": "0.11.3",
   "npmClient": "bun",
   "command": {
     "version": {
@@ -10,7 +10,7 @@
       "includeMergedTags": true,
       "ignoreChanges": [
         ".gitignore",
-        "*.md",
+        "**/!(README).md",
         "commitlint.config.cjs",
         "docs/**",
         "test/**"

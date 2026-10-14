@@ -371,6 +371,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
 }
 export { getActiveAccount, withInstanceContext } from "./credentials.ts";
 export type { CodebuddyInstanceContext } from "./credentials.ts";
+export { CODEBUDDY_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
 export function createCodebuddyAdapter<Config extends AgentConfig>(config: Config, dependencies: CodebuddyDependencies = {}) {
   return bindHostMethods(buildCodebuddyAdapter(config, dependencies));

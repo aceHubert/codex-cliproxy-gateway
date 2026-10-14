@@ -24,7 +24,7 @@ import {
 } from "./catalog.ts";
 import type { OpencodeZenModelProtocol, OpencodeZenProbeResult } from "./catalog.ts";
 import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
-import { convertOpencodeZenRequest, renderOpencodeZenClientOutput } from "./convert.ts";
+import { convertOpencodeZenRequest, mergeOpencodeZenToolIdentities, renderOpencodeZenClientOutput } from "./convert.ts";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createOpencodeZenUserAgentStore } from "./user-agent.ts";
@@ -449,6 +449,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           // 跨协议：经桥接事件渲染回 chat-completions 客户端（流式 SSE 或聚合 JSON）。
           const rendered = await renderOpencodeZenClientOutput(protocol, "chat-completions", upstream, {
             model: String(input.model ?? upstreamModel), stream: !aggregateForClient, tools: convertedTools,
+            signal: abort.signal, abort: () => { abort.abort(); cleanup(); },
           });
           const headers = new Headers(rendered.headers);
           if (cacheControl && !headers.has("cache-control")) headers.set("cache-control", cacheControl);
@@ -460,7 +461,6 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           }
           const [toClient, toLog] = rendered.body!.tee();
           void new Response(toLog).text().then((text) => log(200, text, headers)).catch(() => {});
-          cleanup();
           return new Response(toClient, { status: rendered.status, headers });
         }
         const stream = upstream.body;
@@ -569,6 +569,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           if (protocol === "chat") {
             // chat 端点门禁要求官方模板在场：转换后仍走注入（带工具时 agent 模板 + 官方工具集）。
             body = injectOpencodeZenFingerprintBody({ ...converted.body, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
+            preparedTools = mergeOpencodeZenToolIdentities(preparedTools, body.tools);
           } else {
             body = { ...converted.body, model: upstreamModel, stream: true };
             if (protocol === "anthropic") extraHeaders = { "anthropic-version": "2023-06-01" };
@@ -606,6 +607,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         }
         const rendered = await renderOpencodeZenClientOutput(protocol, "responses", upstream, {
           model: String(input.model ?? upstreamModel), stream: clientStreams, tools: preparedTools,
+          signal: abort.signal, abort: () => { abort.abort(); cleanup(); },
         });
         if (!clientStreams) {
           const completion = await rendered.text();
@@ -615,7 +617,6 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         }
         const [toClient, toLog] = rendered.body!.tee();
         void new Response(toLog).text().then((text) => log(200, text, rendered.headers)).catch(() => {});
-        cleanup();
         return new Response(toClient, { status: rendered.status, headers: rendered.headers });
       } catch (error) {
         abort.abort();
@@ -705,6 +706,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           let extraHeaders: Record<string, string> = {};
           if (protocol === "chat") {
             body = injectOpencodeZenFingerprintBody({ ...converted.body, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
+            preparedTools = mergeOpencodeZenToolIdentities(preparedTools, body.tools);
           } else {
             body = { ...converted.body, model: upstreamModel, stream: true };
             if (protocol === "responses") extraHeaders = {};
@@ -742,6 +744,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         }
         const rendered = await renderOpencodeZenClientOutput(protocol, "anthropic", upstream, {
           model: String(input.model ?? upstreamModel), stream: clientStreams, tools: preparedTools,
+          signal: abort.signal, abort: () => { abort.abort(); cleanup(); },
         });
         if (!clientStreams) {
           const message = await rendered.text();
@@ -751,7 +754,6 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         }
         const [toClient, toLog] = rendered.body!.tee();
         void new Response(toLog).text().then((text) => log(200, text, rendered.headers)).catch(() => {});
-        cleanup();
         return new Response(toClient, { status: rendered.status, headers: rendered.headers });
       } catch (error) {
         abort.abort();
@@ -777,6 +779,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
 }
 
 export { isOpencodeZenModel, mergeOpencodeZenCatalog };
+export { OPENCODE_ZEN_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
 export function createOpencodeZenAdapter<Config extends AgentConfig>(config: Config, dependencies: OpencodeZenDependencies = {}) {
   return bindHostMethods(buildOpencodeZenAdapter(config, dependencies));

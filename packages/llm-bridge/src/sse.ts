@@ -4,8 +4,6 @@
  * zcode/codebuddy 已验证的读取器语义，作为桥接包的共享基础。
  */
 
-const decoder = new TextDecoder("utf-8", { fatal: true });
-
 export type SseFrame = { event?: string; data: string } | "[DONE]";
 
 /**
@@ -13,6 +11,8 @@ export type SseFrame = { event?: string; data: string } | "[DONE]";
  * 哨兵。流在事件中途结束时抛错（截断流不是成功结束）。
  */
 export async function* readSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<SseFrame> {
+  // 解码器保存跨切片的字节状态，必须由每个流独立持有。
+  const decoder = new TextDecoder("utf-8", { fatal: true });
   const reader = body.getReader();
   let buffer = "";
   let event = "";

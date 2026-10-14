@@ -61,6 +61,25 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<string> {
   return text;
 }
 
+async function readResponsesEvents(response: Response): Promise<Json[]> {
+  const text = await readAll(response.body!);
+  return text.split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.split("\ndata: ")[1]!) as Json);
+}
+
+async function settlesWithin<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("final Promise 未及时完成")), 1_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 test("严格 SSE 解析：多行 data、注释、CRLF 与截断流报错", async () => {
   const frames: Array<{ event?: string; data: string } | "[DONE]"> = [];
   for await (const frame of readSseFrames(sseStream([
@@ -157,8 +176,166 @@ test("Responses 客户端输出：事件序号连续、快照聚合与一次终�
   assert.equal(call.name, "原始名");
   assert.equal(call.namespace, "ns");
   assert.equal(call.input, "txt");
+  assert.equal(events.filter((event) => event.type === "response.custom_tool_call_input.delta").map((event) => event.delta).join(""), call.input);
+  assert.equal(events.find((event) => event.type === "response.custom_tool_call_input.done")?.input, call.input);
   assert.deepEqual(completed.response.usage, { input_tokens: 7, output_tokens: 3, total_tokens: 10 });
   assert.equal((completed.response as { model: string }).model, "display/model");
+});
+
+test("Responses custom 与 function 混合调用：分别缓冲、解包并恢复任意名称与命名空间", async () => {
+  const input = '*** Begin Patch\n*** Add File: 中文.txt\n+一行"引号"与\\路径\n*** End Patch';
+  const wrapped = JSON.stringify({ input });
+  const events: BridgeStreamEvent[] = [
+    { type: "message_start", id: "up", model: "up" },
+    { type: "tool_call_start", tool_call: { id: "custom", name: "wrapped_custom" } },
+    { type: "tool_call_start", tool_call: { id: "function", name: "wrapped_function" } },
+    { type: "tool_call_start", tool_call: { id: "empty", name: "wrapped_empty" } },
+    { type: "tool_call_delta", tool_call: { id: "function", arguments_delta: '{"path":' } },
+    { type: "tool_call_delta", tool_call: { id: "empty", arguments_delta: '{"input":' } },
+    // 按单个字符分片，覆盖中文、换行、引号与反斜杠转义的任意边界。
+    ...Array.from(wrapped, (arguments_delta): BridgeStreamEvent => ({ type: "tool_call_delta", tool_call: { id: "custom", arguments_delta } })),
+    { type: "tool_call_delta", tool_call: { id: "function", arguments_delta: '"目录"}' } },
+    { type: "tool_call_delta", tool_call: { id: "empty", arguments_delta: '""}' } },
+    { type: "tool_call_end", tool_call: { id: "function" } },
+    { type: "tool_call_end", tool_call: { id: "custom" } },
+    { type: "tool_call_end", tool_call: { id: "empty" } },
+    { type: "message_end", stop_reason: "tool_calls" },
+  ];
+  for (const stream of [true, false]) {
+    const result = await createResponsesClientOutput(eventsOf(events), {
+      model: "m", stream,
+      toolIdentities: new Map([
+        ["wrapped_custom", { name: "任意自定义工具", custom: true, namespace: "编辑器" }],
+        ["wrapped_function", { name: "读取文件", custom: false, namespace: "文件" }],
+        ["wrapped_empty", { name: "另一个工具", custom: true }],
+      ]),
+    });
+    const frames = stream ? await readResponsesEvents(result.response) : [];
+    const payload = stream ? await result.final : await result.response.json() as Json;
+    const output = payload!.output as Json[];
+    const custom = output.find((item) => item.call_id === "custom")!;
+    assert.equal(custom.type, "custom_tool_call");
+    assert.equal(custom.name, "任意自定义工具");
+    assert.equal(custom.namespace, "编辑器");
+    assert.equal(custom.input, input);
+    assert.equal(custom.status, "completed");
+    assert.equal("arguments" in custom, false);
+    const fn = output.find((item) => item.call_id === "function")!;
+    assert.equal(fn.type, "function_call");
+    assert.equal(fn.arguments, '{"path":"目录"}');
+    const empty = output.find((item) => item.call_id === "empty")!;
+    assert.equal(empty.type, "custom_tool_call");
+    assert.equal(empty.name, "另一个工具");
+    assert.equal(empty.input, "");
+    assert.equal(empty.status, "completed");
+    assert.equal("namespace" in empty, false);
+    if (stream) {
+      const deltas = frames.filter((event) => event.type === "response.custom_tool_call_input.delta");
+      assert.equal(deltas.length, 1);
+      assert.equal(deltas.map((event) => event.delta).join(""), custom.input);
+      assert.equal(frames.find((event) => event.type === "response.custom_tool_call_input.done")?.input, custom.input);
+      const done = frames.find((event) => event.type === "response.output_item.done" && (event.item as Json).call_id === "custom")!;
+      assert.equal((done.item as Json).input, custom.input);
+      assert.equal(frames.find((event) => event.type === "response.custom_tool_call_input.done" && event.item_id === empty.id)?.input, "");
+      assert.equal(frames.filter((event) => event.type === "response.function_call_arguments.delta").map((event) => event.delta).join(""), fn.arguments);
+    }
+  }
+});
+
+test("ResponsesOutputShell custom 收尾选项不会重复正文，空 input 也正常完成", () => {
+  for (const customToolInputAtClose of [undefined, false, true]) {
+    for (const input of ["正文\n下一行", ""]) {
+      const shell = new ResponsesOutputShell({ model: "m", customToolInputAtClose });
+      shell.start();
+      shell.openToolCall("custom", { id: "call", name: "任意工具", custom: true });
+      const wrapped = JSON.stringify({ input });
+      shell.appendToolArguments("custom", wrapped.slice(0, 5));
+      shell.appendToolArguments("custom", wrapped.slice(5));
+      assert.equal(shell.drain().some((event) => event.type === "response.custom_tool_call_input.delta"), false);
+      shell.closeBlock("custom");
+      shell.terminal("completed");
+      const frames = shell.drain();
+      const deltas = frames.filter((event) => event.type === "response.custom_tool_call_input.delta");
+      assert.equal(deltas.length, input ? 1 : 0);
+      assert.equal(deltas.map((event) => event.delta).join(""), input);
+      assert.equal(frames.find((event) => event.type === "response.custom_tool_call_input.done")?.input, input);
+      assert.equal((shell.finalResponse!.output as Json[])[0]?.input, input);
+    }
+  }
+});
+
+test("Responses custom 无效参数产生 failed，禁止发布包装或可执行正文", async () => {
+  for (const arguments_delta of ['{"input":', '{}', '{"input":1}', '[]', 'null', '"文本"']) {
+    for (const stream of [true, false]) {
+      const result = await createResponsesClientOutput(eventsOf([
+        { type: "message_start", id: "up", model: "up" },
+        { type: "tool_call_start", tool_call: { id: "custom", name: "wrapped" } },
+        { type: "tool_call_delta", tool_call: { id: "custom", arguments_delta } },
+        { type: "tool_call_end", tool_call: { id: "custom" } },
+        { type: "message_end", stop_reason: "tool_calls" },
+      ]), { model: "m", stream, toolIdentities: new Map([["wrapped", { name: "编辑", custom: true }]]) });
+      const frames = stream ? await readResponsesEvents(result.response) : [];
+      const payload = stream ? await result.final : await result.response.json() as Json;
+      assert.equal(payload!.status, "failed", arguments_delta);
+      assert.equal((payload!.error as Json).code, "upstream_protocol_error");
+      assert.equal((payload!.output as Json[])[0]?.status, "incomplete");
+      assert.equal((payload!.output as Json[])[0]?.input, "");
+      assert.equal(frames.some((event) => event.type === "response.custom_tool_call_input.delta" || event.type === "response.custom_tool_call_input.done"), false);
+      if (!stream) assert.equal(result.response.status, 502);
+    }
+  }
+});
+
+test("Responses custom 在 EOF 或缺少工具完成事件时失败，完整参数也不提前发布", async () => {
+  for (const arguments_delta of ['{"input":"完整补丁"}', '{"input":"半截']) {
+    for (const toolEnded of [true, false]) {
+      for (const messageEnded of [true, false]) {
+        if (toolEnded && messageEnded) continue;
+        for (const stream of [true, false]) {
+          const list: BridgeStreamEvent[] = [
+            { type: "message_start", id: "up", model: "up" },
+            { type: "tool_call_start", tool_call: { id: "custom", name: "wrapped" } },
+            { type: "tool_call_delta", tool_call: { id: "custom", arguments_delta } },
+          ];
+          if (toolEnded) list.push({ type: "tool_call_end", tool_call: { id: "custom" } });
+          if (messageEnded) list.push({ type: "message_end", stop_reason: "tool_calls" });
+          const result = await createResponsesClientOutput(eventsOf(list), { model: "m", stream, toolIdentities: new Map([["wrapped", { name: "编辑", custom: true }]]) });
+          const frames = stream ? await readResponsesEvents(result.response) : [];
+          const payload = stream ? await result.final : await result.response.json() as Json;
+          assert.equal(payload!.status, "failed");
+          assert.match(String((payload!.error as Json).message), /提前断开/);
+          assert.equal((payload!.output as Json[])[0]?.input, "");
+          assert.equal(frames.some((event) => event.type === "response.custom_tool_call_input.delta" || event.type === "response.custom_tool_call_input.done"), false);
+        }
+      }
+    }
+  }
+});
+
+test("Responses custom 截断终态保留 incomplete，不解包或发布未确认的工具输入", async () => {
+  for (const stop_reason of ["length", "content_filter"] as const) {
+    for (const arguments_delta of ['{"input":"完整补丁"}', '{"input":"半截']) {
+      for (const toolEnded of [true, false]) {
+        for (const stream of [true, false]) {
+          const list: BridgeStreamEvent[] = [
+            { type: "message_start", id: "up", model: "up" },
+            { type: "tool_call_start", tool_call: { id: "custom", name: "wrapped" } },
+            { type: "tool_call_delta", tool_call: { id: "custom", arguments_delta } },
+          ];
+          if (toolEnded) list.push({ type: "tool_call_end", tool_call: { id: "custom" } });
+          list.push({ type: "message_end", stop_reason });
+          const result = await createResponsesClientOutput(eventsOf(list), { model: "m", stream, toolIdentities: new Map([["wrapped", { name: "编辑", custom: true }]]) });
+          const frames = stream ? await readResponsesEvents(result.response) : [];
+          const payload = stream ? await result.final : await result.response.json() as Json;
+          assert.equal(payload!.status, "incomplete");
+          assert.equal((payload!.incomplete_details as Json).reason, stop_reason === "length" ? "max_output_tokens" : "content_filter");
+          assert.equal((payload!.output as Json[])[0]?.status, "incomplete");
+          assert.equal((payload!.output as Json[])[0]?.input, "");
+          assert.equal(frames.some((event) => event.type === "response.custom_tool_call_input.delta" || event.type === "response.custom_tool_call_input.done"), false);
+        }
+      }
+    }
+  }
 });
 
 test("Responses 非流式聚合 JSON 与同语义流式一致", async () => {
@@ -416,4 +593,88 @@ test("客户端错误外壳：三种协议返回各自标准形状", () => {
   const anthropic = clientErrorResponse("anthropic", "bad", { status: 400 });
   assert.equal(chat.status, 400);
   assert.equal(anthropic.status, 400);
+});
+
+test("Chat 与 Anthropic 流式 final 返回与非流式相同的完整聚合结果", async () => {
+  const list: BridgeStreamEvent[] = [
+    { type: "message_start", id: "up", model: "up" },
+    { type: "content_delta", delta: { thinking: "思考", text: "正文" } },
+    { type: "thinking_signature", signature: "签名" },
+    { type: "tool_call_start", tool_call: { id: "call", name: "编辑" } },
+    { type: "tool_call_delta", tool_call: { id: "call", arguments_delta: '{"input":' } },
+    { type: "tool_call_delta", tool_call: { id: "call", arguments_delta: '"完整内容"}' } },
+    { type: "tool_call_end", tool_call: { id: "call" } },
+    { type: "message_end", stop_reason: "tool_calls", usage: { inputTokens: 3, outputTokens: 2, cachedInputTokens: 1 } },
+  ];
+  for (const create of [createChatCompletionsClientOutput, createAnthropicClientOutput]) {
+    const completed: Json[] = [];
+    const streaming = await create(eventsOf(list), { model: "m", stream: true, onComplete: (payload) => completed.push(payload) });
+    await readAll(streaming.response.body!);
+    const final = await settlesWithin(streaming.final);
+    assert.ok(final);
+    assert.equal(completed.length, 1);
+    assert.deepEqual(completed[0], final);
+    const nonStreaming = await create(eventsOf(list), { model: "m", stream: false });
+    const payload = await nonStreaming.response.json() as Json;
+    assert.deepEqual(await settlesWithin(nonStreaming.final), payload);
+    const { id: _streamId, created: _streamCreated, ...streamFields } = final;
+    const { id: _jsonId, created: _jsonCreated, ...jsonFields } = payload;
+    assert.deepEqual(streamFields, jsonFields);
+  }
+});
+
+test("所有流式输出在首次读取前取消也会完成 final Promise", async () => {
+  for (const create of [createResponsesClientOutput, createChatCompletionsClientOutput, createAnthropicClientOutput]) {
+    const result = await create(eventsOf([]), { model: "m", stream: true });
+    await result.response.body!.cancel();
+    const final = await settlesWithin(result.final);
+    if (create === createResponsesClientOutput) assert.equal(final?.status, "failed");
+    else assert.equal(final, undefined);
+  }
+});
+
+test("Chat 与 Anthropic 上游错误和迭代器异常都会完成 final 并输出错误帧", async () => {
+  for (const create of [createChatCompletionsClientOutput, createAnthropicClientOutput]) {
+    for (const throws of [true, false]) {
+      const source = (async function* (): AsyncGenerator<BridgeStreamEvent> {
+        yield { type: "message_start", id: "up", model: "up" };
+        yield { type: "content_delta", delta: { text: "部分内容" } };
+        if (throws) throw new Error("上游读取异常");
+        yield { type: "error", error: { message: "上游错误" } };
+      })();
+      let completed = false;
+      const result = await create(source, { model: "m", stream: true, onComplete: () => { completed = true; } });
+      const text = await readAll(result.response.body!);
+      assert.match(text, /上游读取异常|上游错误/);
+      assert.equal(await settlesWithin(result.final), undefined);
+      assert.equal(completed, false);
+    }
+  }
+});
+
+test("Chat 与 Anthropic AbortSignal 唤醒挂起源并完成 final，首次读取前中止同样生效", async () => {
+  for (const create of [createChatCompletionsClientOutput, createAnthropicClientOutput]) {
+    for (const beforeRead of [true, false]) {
+      const controller = new AbortController();
+      let wake!: () => void;
+      let waiting!: () => void;
+      const reachedWait = new Promise<void>((resolve) => { waiting = resolve; });
+      const blocked = new Promise<void>((resolve) => { wake = resolve; });
+      const source = (async function* (): AsyncGenerator<BridgeStreamEvent> {
+        yield { type: "message_start", id: "up", model: "up" };
+        waiting();
+        await blocked;
+        throw new Error("上游读取已取消");
+      })();
+      let aborted = false;
+      const result = await create(source, { model: "m", stream: true, signal: controller.signal, abort: () => { aborted = true; wake(); } });
+      const drain = beforeRead ? undefined : readAll(result.response.body!);
+      if (!beforeRead) await settlesWithin(reachedWait);
+      controller.abort();
+      assert.equal(aborted, true);
+      assert.equal(await settlesWithin(result.final), undefined);
+      if (drain) await settlesWithin(drain);
+      else await result.response.body!.cancel();
+    }
+  }
 });

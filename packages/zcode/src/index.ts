@@ -94,7 +94,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       clearModelsCacheEntries(dependencies.codexModelsCacheFile, isZcodeModel);
     }
   };
-  const servedCatalogFile = path.join(cacheDirectory, "zcode-catalog.json");
+  const servedCatalogFile = path.join(cacheDirectory, ZCODE_CATALOG_FILE_NAME);
   /** 当前对外目录（各套餐作用域前缀的并集）。watch 或启动时重建，/v1/models 只读取这里。 */
   let servedCatalog: ModelCatalog = { models: [] };
   /** 已发布目录对应的各套餐快照；仅在身份变化时才重算，避免每次 /v1/models 重新求交集。 */
@@ -613,6 +613,10 @@ export function createZcodeAdapter<Config extends AgentConfig>(config: Config, d
 }
 
 export const ZCODE_MODEL_PATTERNS: readonly string[] = Object.freeze(["zcode/*","zcode-*/*"]);
+
+/** zcode 落在运行主目录的产物清单（目录缓存，与落盘点同源）；卸载清理与受管值守卫经组合层聚合消费。 */
+const ZCODE_CATALOG_FILE_NAME = "zcode-catalog.json";
+export const ZCODE_RUNTIME_ARTIFACTS: readonly string[] = Object.freeze([ZCODE_CATALOG_FILE_NAME]);
 
 /** 插件只负责本代理路由，协议转换沿用原适配器实现。 */
 export function createZcodePlugin(host: HostServices<AgentConfig>, dependencies: ZcodeDependencies = {}): GatewayPlugin {

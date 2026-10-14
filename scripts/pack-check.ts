@@ -107,6 +107,9 @@ try {
     const archivedLicense = Bun.spawnSync(["tar", "-xOf", archive, "package/LICENSE"], { stdout: "pipe", stderr: "inherit" });
     if (archivedLicense.exitCode !== 0) throw new Error(`${pkg.name} 发布包缺少许可证。`);
     assert.equal(new TextDecoder().decode(archivedLicense.stdout), await Bun.file(path.join(root, "LICENSE")).text());
+    const archivedReadme = Bun.spawnSync(["tar", "-xOf", archive, "package/README.md"], { stdout: "pipe", stderr: "inherit" });
+    assert.equal(archivedReadme.exitCode, 0, `${pkg.name} 发布包缺少 README.md`);
+    assert.equal(new TextDecoder().decode(archivedReadme.stdout), await Bun.file(path.join(pkg.location, "README.md")).text(), `${pkg.name} 发布包介绍必须与源码一致`);
     const extracted = Bun.spawnSync(["tar", "-xOf", archive, "package/package.json"], { stdout: "pipe", stderr: "inherit" });
     if (extracted.exitCode !== 0) throw new Error(`${pkg.name} 打包 manifest 无法读取。`);
     const content = new TextDecoder().decode(extracted.stdout);
@@ -139,8 +142,9 @@ try {
     import type { QoderDependencies } from "@agent-proxy/qoder";
     import type { AgyDependencies } from "@agent-proxy/agy";
     import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
-    import type { ProviderType } from "@agent-proxy/llm-bridge";
-    export type PublishedApi = [GatewayPlugin, HostServices, ZcodeDependencies, CodebuddyDependencies, QoderDependencies, AgyDependencies, OpencodeZenDependencies, ProviderType];
+    import { convertRequest, createClientResponse } from "@agent-proxy/llm-bridge";
+    import type { BridgeProtocol, ToolIdentityMap } from "@agent-proxy/llm-bridge";
+    export type PublishedApi = [GatewayPlugin, HostServices, ZcodeDependencies, CodebuddyDependencies, QoderDependencies, AgyDependencies, OpencodeZenDependencies, BridgeProtocol, ToolIdentityMap, ReturnType<typeof convertRequest>, Awaited<ReturnType<typeof createClientResponse>>];
   `);
   await run([process.execPath, path.join(consumer, "node_modules/typescript/bin/tsc"), "--noEmit", "--strict", "--module", "Preserve", "--moduleResolution", "Bundler", "--target", "ES2024", "--types", "bun", "types-smoke.ts"], consumer);
   for (const pkg of packages.filter(pkg => pkg.name !== "@agent-proxy/gateway")) {
@@ -190,7 +194,7 @@ try {
       (await import("@agent-proxy/codebuddy/request")).translateCodebuddyRequest(input, "gpt-5.6-luna").body,
       (await import("@agent-proxy/qoder/request")).translateQoderRequest(input, "qfmodel").body,
       (await import("@agent-proxy/agy/request")).translateAgyRequest(input, "gemini-3.8-flash").wrapper,
-      (await import("@agent-proxy/opencode-zen/convert")).responsesToChatBody(input),
+      (await import("@agent-proxy/opencode-zen/convert")).convertOpencodeZenRequest("responses", "chat", input).body,
     ];
     for (const body of cases) assert.ok(JSON.stringify(body).includes("ping"));
     const upstream = new Response([
@@ -198,7 +202,7 @@ try {
       'data: {"id":"smoke","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
       'data: [DONE]',
     ].join("\\n\\n") + "\\n\\n", { headers: { "content-type": "text/event-stream" } });
-    const response = await (await import("@agent-proxy/codebuddy/response")).createCodebuddyResponse(upstream, { model: "codebuddy/gpt-5.6-luna", tools: new Map(), stream: true });
+    const response = await (await import("@agent-proxy/codebuddy/response")).createCodebuddyResponse("responses", upstream, { model: "codebuddy/gpt-5.6-luna", tools: new Map(), stream: true });
     const stream = await response.text();
     assert.ok(stream.includes("response.completed"));
     assert.ok(stream.includes("pong"));

@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.11.3 (2026-10-14)
+
+#### :bug: Bug Fix
+* `agy`, `codebuddy`, `opencode-zen`, `qoder`, `zcode`
+  * [#16](https://github.com/aceHubert/codex-cliproxy-gateway/pull/16) refactor(gateway): 收口插件产物清单并完善默认目录迁移 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
+## v0.11.2 (2026-10-14)
+
+#### :bug: Bug Fix
+* `opencode-zen`
+  * [#15](https://github.com/aceHubert/codex-cliproxy-gateway/pull/15) fix(opencode-zen): 还原 custom 工具调用的响应协议 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
+## v0.11.0 (2026-10-11)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `models`, `opencode-zen`, `plugin-api`, `qoder`, `zcode`
+  * [#13](https://github.com/aceHubert/codex-cliproxy-gateway/pull/13) feat(gateway): 迁移 monorepo 并独立发布网关与插件 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.10.0 (2026-10-10)
 
 #### :rocket: New Feature

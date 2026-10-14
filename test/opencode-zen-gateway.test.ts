@@ -442,6 +442,9 @@ test("上游 403/429 归一化为带指引的错误；网络故障 502", TIMEOUT
 });
 
 test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标头，SSE 原样）", TIMEOUT, async () => {
+  const nativeStream = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n"
+    + `event: response.output_item.done\ndata: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "custom_tool_call", id: "native_custom", call_id: "native_call", name: "apply_patch", input: "*** Begin Patch\n*** End Patch", status: "completed" } })}\n\n`
+    + "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
   await fixture(async (fixture) => {
     const handler = fixture.create(undefined, {
       fetch: async (url, init) => {
@@ -452,11 +455,7 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
         }
         if (target.endsWith("/zen/v1/responses")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
-          return new Response(
-            "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n"
-            + "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
-            { status: 200, headers: { "content-type": "text/event-stream" } },
-          );
+          return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         throw new Error(`未模拟调用 ${target}`);
       },
@@ -469,15 +468,17 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
       body: JSON.stringify({
         model: "opencode-zen/muse-spark-1.3-contributor-free",
         input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+        tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
         stream: true,
       }),
     }));
     assert.equal(response.status, 200);
     const text = await response.text();
-    assert.match(text, /response\.completed/);
+    assert.equal(text, nativeStream, "原生 Responses 的 custom 调用应原样直通");
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
     assert.equal(up.url, "https://opencode.ai/zen/v1/responses");
     assert.equal(up.body.model, "muse-spark-1.3-contributor-free");
+    assert.deepEqual((up.body.tools as Json[]).find((tool) => tool.name === "apply_patch"), { type: "custom", name: "apply_patch", format: { type: "text" } });
     assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.match(up.headers["x-opencode-session"] ?? "", OPENCODE_SESSION_PATTERN);
     assert.match(up.body.prompt_cache_key ?? "", OPENCODE_SESSION_PATTERN);
@@ -621,6 +622,154 @@ test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，a
     assert.ok(upstreamSeen, "anthropic 协议模型必须直通上游 /messages");
   });
 });
+for (const stream of [true, false]) {
+  test(`Responses 入口：chat 上游的 custom 与 function 调用按客户端声明还原（stream=${stream}）`, TIMEOUT, async () => {
+    const patch = "*** Begin Patch\n*** Update File: 中文.txt\n@@\n-旧内容\n+包含\\路径与\"引号\"的新内容\n*** End Patch";
+    const aliasInput = "第二个自定义工具\n独立输入";
+    const calls = [
+      { id: "call_patch", name: "apply_patch", arguments: JSON.stringify({ input: patch }) },
+      { id: "call_alias", name: "submit_edit", arguments: JSON.stringify({ input: aliasInput }) },
+      { id: "call_lookup", name: "lookup_issue", arguments: JSON.stringify({ issue: 42 }) },
+    ];
+    const frames = [chunkFrame({ role: "assistant" })];
+    calls.forEach((call, index) => {
+      frames.push(chunkFrame({ tool_calls: [{ index, id: call.id, type: "function", function: { name: call.name, arguments: "" } }] }));
+      // 按字符拆分，确保中文、换行与转义跨上游分片仍能完整还原。
+      for (const character of call.arguments) {
+        frames.push(chunkFrame({ tool_calls: [{ index, function: { arguments: character } }] }));
+      }
+    });
+    frames.push(chunkFrame({}, "tool_calls"));
+    await fixture(async (fixture) => {
+      const handler = fixture.create();
+      const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: MODEL, input: "修改文件并查询问题", stream,
+          tools: [
+            { type: "custom", name: "apply_patch", format: { type: "text" } },
+            { type: "custom", name: "submit_edit", format: { type: "text" } },
+            { type: "function", name: "lookup_issue", parameters: { type: "object", properties: { issue: { type: "number" } } } },
+          ],
+        }),
+      }));
+      assert.equal(response.status, 200);
+      let output: Json[];
+      if (stream) {
+        assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        output = events.filter((event) => event.type === "response.output_item.done").map((event) => event.item as Json);
+        for (const [name, input] of [["apply_patch", patch], ["submit_edit", aliasInput]]) {
+          const item = output.find((entry) => entry.name === name);
+          assert.ok(item, `必须返回 ${name} 调用`);
+          const deltas = events.filter((event) => event.type === "response.custom_tool_call_input.delta" && event.item_id === item.id);
+          assert.equal(deltas.map((event) => event.delta).join(""), input);
+          assert.ok(events.some((event) => event.type === "response.custom_tool_call_input.done" && event.item_id === item.id && event.input === input));
+          assert.ok(events.some((event) => event.type === "response.output_item.added" && event.item?.id === item.id && event.item.type === "custom_tool_call"));
+          assert.ok(!events.some((event) => event.type.startsWith("response.function_call_arguments.") && event.item_id === item.id));
+        }
+      } else {
+        assert.match(response.headers.get("content-type") ?? "", /application\/json/);
+        const payload = await response.json() as Json;
+        assert.equal(payload.object, "response");
+        assert.equal(payload.status, "completed");
+        output = payload.output as Json[];
+      }
+      assert.equal(output.length, calls.length);
+      for (const [name, callId, input] of [["apply_patch", "call_patch", patch], ["submit_edit", "call_alias", aliasInput]]) {
+        const item = output.find((entry) => entry.name === name);
+        assert.ok(item, `必须按工具名还原 ${name}`);
+        assert.equal(item.type, "custom_tool_call");
+        assert.equal(item.call_id, callId);
+        assert.equal(item.input, input);
+        assert.equal(item.status, "completed");
+        assert.ok(!("arguments" in item));
+      }
+      const lookup = output.find((entry) => entry.name === "lookup_issue");
+      assert.ok(lookup);
+      assert.equal(lookup.type, "function_call");
+      assert.equal(lookup.call_id, "call_lookup");
+      assert.equal(lookup.arguments, JSON.stringify({ issue: 42 }));
+      assert.ok(!("input" in lookup));
+      const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      const tools = upstream.body.tools as Json[];
+      for (const name of ["apply_patch", "submit_edit"]) {
+        const tool = tools.find((entry) => entry.function.name === name);
+        assert.equal(tool?.type, "function");
+        assert.deepEqual(tool?.function.parameters.required, ["input"]);
+      }
+      assert.ok(tools.some((tool) => tool.function.name === "read") && tools.some((tool) => tool.function.name === "shell"), "保留 OpenCode 门禁所需工具指纹");
+      assert.equal(upstream.body.stream, true);
+    }, () => sse(frames));
+  });
+}
+
+for (const stream of [true, false]) {
+  test(`Responses 入口：实际注入的 OpenCode 官方工具保持 function 调用（stream=${stream}）`, TIMEOUT, async () => {
+    const arguments_ = JSON.stringify({ command: "pwd", description: "查询工作目录" });
+    await fixture(async (fixture) => {
+      const handler = fixture.create();
+      const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, input: "查询工作目录", stream,
+          tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
+        }),
+      }));
+      assert.equal(response.status, 200);
+      let output: Json[];
+      if (stream) {
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "response.completed"));
+        output = events.filter((event) => event.type === "response.output_item.done").map((event) => event.item as Json);
+      } else {
+        const result = await response.json() as Json;
+        assert.equal(result.status, "completed");
+        output = result.output as Json[];
+      }
+      const shell = output.find((item) => item.name === "shell");
+      assert.ok(shell);
+      assert.equal(shell.type, "function_call");
+      assert.equal(shell.call_id, "call_official_shell");
+      assert.equal(shell.arguments, arguments_);
+      assert.ok(!("input" in shell));
+      const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      assert.ok((upstream.body.tools as Json[]).some((tool) => tool.function.name === "shell"));
+    }, () => sse([
+      chunkFrame({ tool_calls: [{ index: 0, id: "call_official_shell", type: "function", function: { name: "shell", arguments: arguments_ } }] }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+
+  test(`Responses 入口：不在客户端或已注入官方工具中的名称仍然失败（stream=${stream}）`, TIMEOUT, async () => {
+    await fixture(async ({ create }) => {
+      const response = await create()(new Request("http://127.0.0.1:8327/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, input: "测试", stream,
+          tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
+        }),
+      }));
+      if (stream) {
+        assert.equal(response.status, 200);
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "response.failed"));
+        assert.equal(events.some((event) => event.type === "response.completed"), false);
+      } else {
+        assert.equal(response.status, 502);
+        const result = await response.json() as Json;
+        assert.equal(result.status, "failed");
+      }
+    }, () => sse([
+      chunkFrame({ tool_calls: [{ index: 0, id: "call_unknown", type: "function", function: { name: "not_an_injected_tool", arguments: "{}" } }] }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+}
 
 test("Responses 入口：zen 模型的 compact 子树保持拒绝", TIMEOUT, async () => {
   await fixture(async ({ create }) => {

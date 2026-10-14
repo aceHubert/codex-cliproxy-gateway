@@ -2,11 +2,9 @@
  * 上游流式解析：chat-completions / responses / anthropic / gemini 的 SSE 或整包
  * JSON → 统一 BridgeStreamEvent。npm 库的 parseOpenAIStream 等会静默丢帧、忽略
  * reasoning_content / refusal / usage 明细（实测），这里以严格 SSE 读取器为基础
- * 自行归一化；gemini 解析复用库事件再补 usage 与 finishReason 映射。
+ * 自行归一化，正常终态必须有上游协议结束信号，不能由物理 EOF 推断。
  */
 
-import { parseGoogleStream } from "llm-bridge";
-import type { UniversalStreamEvent } from "llm-bridge";
 import { readSseFrames } from "./sse.ts";
 import type { BridgeProtocol, BridgeStopReason, BridgeStreamEvent, BridgeUsage } from "./types.ts";
 
@@ -125,6 +123,7 @@ async function* parseChatStream(body: ReadableStream<Uint8Array>, model: string)
   };
   for await (const frame of readSseFrames(body)) {
     if (frame === "[DONE]") {
+      if (!started) throw new Error("Chat 上游流在消息开始前结束");
       yield* emitEnd();
       return;
     }
@@ -198,7 +197,9 @@ async function* parseChatStream(body: ReadableStream<Uint8Array>, model: string)
       }
     }
   }
-  if (started) yield* emitEnd();
+  // finish_reason 已确认完成；随后可能还有独立 usage 帧，因此等 EOF 才收尾。
+  if (started && lastStopReason !== undefined) yield* emitEnd();
+  else throw new Error("Chat 上游流在结束信号前意外 EOF");
 }
 
 async function* parseAnthropicStream(body: ReadableStream<Uint8Array>, model: string): AsyncGenerator<BridgeStreamEvent> {
@@ -219,6 +220,7 @@ async function* parseAnthropicStream(body: ReadableStream<Uint8Array>, model: st
   };
   for await (const frame of readSseFrames(body)) {
     if (frame === "[DONE]") {
+      if (!started || !stopReason || blocks.size > 0) throw new Error("Anthropic 上游流在消息完成前收到 [DONE]");
       yield* emitEnd();
       return;
     }
@@ -265,13 +267,15 @@ async function* parseAnthropicStream(body: ReadableStream<Uint8Array>, model: st
         break;
       }
       case "content_block_stop": {
-        const block = blocks.get(typeof data.index === "number" ? data.index : -1);
+        const index = typeof data.index === "number" ? data.index : -1;
+        const block = blocks.get(index);
         if (block?.toolId) yield { type: "tool_call_end", tool_call: { id: block.toolId } };
+        blocks.delete(index);
         break;
       }
       case "message_delta": {
         const delta = isRecord(data.delta) ? data.delta : {};
-        if (typeof delta.stop_reason === "string") stopReason = delta.stop_reason;
+        if (typeof delta.stop_reason === "string" && delta.stop_reason) stopReason = delta.stop_reason;
         if (isRecord(data.usage)) {
           if (typeof data.usage.output_tokens === "number") usage.outputTokens = data.usage.output_tokens;
           if (typeof data.usage.input_tokens === "number") usage.inputTokens = data.usage.input_tokens;
@@ -279,6 +283,7 @@ async function* parseAnthropicStream(body: ReadableStream<Uint8Array>, model: st
         break;
       }
       case "message_stop": {
+        if (!started || !stopReason || blocks.size > 0) throw new Error("Anthropic 上游 message_stop 缺少完整消息结束信息");
         yield* emitEnd();
         return;
       }
@@ -297,7 +302,7 @@ async function* parseAnthropicStream(body: ReadableStream<Uint8Array>, model: st
         break;
     }
   }
-  if (started) yield* emitEnd();
+  throw new Error("Anthropic 上游流在 message_stop 前意外 EOF");
 }
 
 function geminiUsageToBridge(value: unknown): BridgeUsage | undefined {
@@ -320,51 +325,50 @@ function geminiUsageToBridge(value: unknown): BridgeUsage | undefined {
 }
 
 async function* parseGeminiStream(body: ReadableStream<Uint8Array>, model: string): AsyncGenerator<BridgeStreamEvent> {
-  // 单次消费库解析器；usage/finishReason 借助桥接映射补齐，错误帧转 error 事件。
+  // 库解析器会在 EOF 合成 end_turn；直接读帧才能验证 finishReason 与末尾 usage。
   let started = false;
-  let ended = false;
-  let pendingError: { message: string; code?: string } | undefined;
-  try {
-    for await (const event of parseGoogleStream(body)) {
-      if (event.type === "error") {
-        pendingError = { message: event.error.message, code: event.error.code };
-        break;
-      }
-      if (event.type === "message_start") started = true;
-      if (event.type === "message_end") ended = true;
-      const mapped = mapUniversalEvent(event, model);
-      if (mapped) yield mapped;
+  let finishReason: string | undefined;
+  let usage: BridgeUsage | undefined;
+  let toolCallCounter = 0;
+  for await (const frame of readSseFrames(body)) {
+    if (frame === "[DONE]") break;
+    const chunk = JSON.parse(frame.data) as Json;
+    if (isRecord(chunk.error)) {
+      yield { type: "error", error: {
+        message: typeof chunk.error.message === "string" ? chunk.error.message : "上游返回错误",
+        code: typeof chunk.error.code === "number" || typeof chunk.error.code === "string" ? String(chunk.error.code) : undefined,
+      } };
+      return;
     }
-  } catch (error) {
-    pendingError = { message: error instanceof Error ? error.message : String(error) };
+    if (!started) {
+      started = true;
+      yield { type: "message_start", id: `gemini-${Date.now()}`, model: typeof chunk.modelVersion === "string" ? chunk.modelVersion : model };
+    }
+    const chunkUsage = geminiUsageToBridge(chunk.usageMetadata);
+    if (chunkUsage) usage = { ...usage, ...chunkUsage };
+    const candidate = Array.isArray(chunk.candidates) && isRecord(chunk.candidates[0]) ? chunk.candidates[0] : {};
+    const content = isRecord(candidate.content) ? candidate.content : {};
+    if (Array.isArray(content.parts)) {
+      for (const part of content.parts) {
+        if (!isRecord(part)) continue;
+        if (isRecord(part.functionCall)) {
+          const id = `call_${toolCallCounter++}`;
+          yield { type: "tool_call_start", tool_call: { id, name: typeof part.functionCall.name === "string" ? part.functionCall.name : "" } };
+          yield { type: "tool_call_delta", tool_call: { id, arguments_delta: JSON.stringify(part.functionCall.args ?? {}) } };
+          yield { type: "tool_call_end", tool_call: { id } };
+        } else if (typeof part.text === "string" && part.text) {
+          yield { type: "content_delta", delta: part.thought === true ? { thinking: part.text } : { text: part.text } };
+        }
+      }
+    }
+    if (typeof candidate.finishReason === "string" && candidate.finishReason) finishReason = candidate.finishReason;
+    if (isRecord(chunk.promptFeedback) && typeof chunk.promptFeedback.blockReason === "string" && chunk.promptFeedback.blockReason) {
+      yield { type: "message_end", stop_reason: "content_filter", raw_stop_reason: chunk.promptFeedback.blockReason, usage };
+      return;
+    }
   }
-  if (pendingError) {
-    yield { type: "error", error: pendingError };
-    return;
-  }
-  if (started && !ended) yield { type: "message_end", stop_reason: "other" };
-}
-
-/** 库 UniversalStreamEvent → 桥接事件（gemini 上游复用）。 */
-function mapUniversalEvent(event: UniversalStreamEvent, model: string): BridgeStreamEvent | undefined {
-  switch (event.type) {
-    case "message_start":
-      return { type: "message_start", id: event.id, model: event.model || model };
-    case "content_delta":
-      return { type: "content_delta", delta: { ...event.delta } };
-    case "tool_call_start":
-      return { type: "tool_call_start", tool_call: { ...event.tool_call } };
-    case "tool_call_delta":
-      return { type: "tool_call_delta", tool_call: { ...event.tool_call } };
-    case "tool_call_end":
-      return { type: "tool_call_end", tool_call: { ...event.tool_call } };
-    case "message_end":
-      return { type: "message_end", stop_reason: toBridgeStopReason(event.stop_reason), raw_stop_reason: event.stop_reason, ...(event.usage ? { usage: { inputTokens: event.usage.input_tokens, outputTokens: event.usage.output_tokens } } : {}) };
-    case "error":
-      return { type: "error", error: { message: event.error.message, code: event.error.code } };
-    default:
-      return undefined;
-  }
+  if (!started || !finishReason) throw new Error("Gemini 上游流在 finishReason 前意外 EOF");
+  yield { type: "message_end", stop_reason: toBridgeStopReason(finishReason), raw_stop_reason: finishReason, usage };
 }
 
 function responsesUsageToBridge(value: unknown): BridgeUsage | undefined {
@@ -380,11 +384,39 @@ function responsesUsageToBridge(value: unknown): BridgeUsage | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
+function responsesStopReason(status: string, reason: string | undefined): BridgeStopReason {
+  // incomplete 的原因缺失或未知时仍保留未完成，不能降为正常 stop。
+  if (status === "incomplete") return reason === "content_filter" ? "content_filter" : "length";
+  return "stop";
+}
+
 async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: string): AsyncGenerator<BridgeStreamEvent> {
   let started = false;
   let ended = false;
   let sawToolCall = false;
-  const openCalls = new Map<string, string>();
+  type ResponseCall = { id: string; custom: boolean; input: string; ended: boolean };
+  const calls = new Map<string, ResponseCall>();
+  const itemIds = new Map<string, string>();
+  const outputIndices = new Map<number, string>();
+  const openCalls = new Map<string, ResponseCall>();
+  const findCall = (data: Json, item?: Json): ResponseCall | undefined => {
+    const itemId = typeof data.item_id === "string" ? data.item_id : typeof item?.id === "string" ? item.id : undefined;
+    const id = itemId !== undefined ? itemIds.get(itemId) : undefined;
+    return calls.get(id ?? (typeof data.output_index === "number" ? outputIndices.get(data.output_index) : undefined)
+      ?? (typeof item?.call_id === "string" ? item.call_id : ""));
+  };
+  const closeCall = function* (call: ResponseCall, input?: unknown, inputProvided = false): Generator<BridgeStreamEvent> {
+    if (call.custom && inputProvided && typeof input !== "string") throw new Error("Responses custom 完成输入必须是字符串");
+    if (call.ended) return;
+    if (call.custom) {
+      if (typeof input === "string") call.input = input;
+      // 原生 Responses 的 custom 增量是自由文本，Bridge 参数则必须是可逆 JSON。
+      yield { type: "tool_call_delta", tool_call: { id: call.id, arguments_delta: JSON.stringify({ input: call.input }) } };
+    }
+    call.ended = true;
+    openCalls.delete(call.id);
+    yield { type: "tool_call_end", tool_call: { id: call.id } };
+  };
   const emitEnd = (stop: BridgeStopReason, raw: string | undefined, usage: BridgeUsage | undefined): BridgeStreamEvent => ({
     type: "message_end",
     stop_reason: sawToolCall && stop === "stop" ? "tool_calls" : stop,
@@ -392,7 +424,11 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
     usage,
   });
   for await (const frame of readSseFrames(body)) {
-    if (frame === "[DONE]") return;
+    if (frame === "[DONE]") {
+      if (!ended) throw new Error("Responses 上游流在终态前收到 [DONE]");
+      return;
+    }
+    if (ended) throw new Error("Responses 上游流在终态后返回额外数据帧");
     const data = JSON.parse(frame.data) as Json;
     const type = frame.event ?? (typeof data.type === "string" ? data.type : "");
     switch (type) {
@@ -420,28 +456,48 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
       case "response.output_item.added": {
         const item = isRecord(data.item) ? data.item : {};
         if (item.type === "function_call" || item.type === "custom_tool_call") {
+          if (!started) {
+            started = true;
+            yield { type: "message_start", id: "", model };
+          }
           sawToolCall = true;
           const id = typeof item.call_id === "string" && item.call_id ? item.call_id : String(item.id ?? "");
-          openCalls.set(String(item.id ?? id), id);
+          const call: ResponseCall = { id, custom: item.type === "custom_tool_call", input: typeof item.input === "string" ? item.input : "", ended: false };
+          calls.set(id, call);
+          openCalls.set(id, call);
+          itemIds.set(String(item.id ?? id), id);
+          if (typeof data.output_index === "number") outputIndices.set(data.output_index, id);
           yield { type: "tool_call_start", tool_call: { id, name: typeof item.name === "string" ? item.name : "" } };
         }
         break;
       }
-      case "response.function_call_arguments.delta":
-      case "response.custom_tool_call_input.delta": {
+      case "response.function_call_arguments.delta": {
         if (typeof data.delta === "string" && data.delta) {
-          const callId = typeof data.item_id === "string" ? (openCalls.get(data.item_id) ?? data.item_id) : "";
-          yield { type: "tool_call_delta", tool_call: { id: callId, arguments_delta: data.delta } };
+          const call = findCall(data);
+          if (!call || call.custom || call.ended) throw new Error("Responses 工具参数增量引用了无效调用");
+          yield { type: "tool_call_delta", tool_call: { id: call.id, arguments_delta: data.delta } };
         }
+        break;
+      }
+      case "response.custom_tool_call_input.delta": {
+        const call = findCall(data);
+        if (!call || !call.custom || call.ended) throw new Error("Responses custom input 增量引用了无效调用");
+        if (typeof data.delta !== "string") throw new Error("Responses custom input 增量必须是字符串");
+        call.input += data.delta;
+        break;
+      }
+      case "response.custom_tool_call_input.done": {
+        const call = findCall(data);
+        if (!call || !call.custom) throw new Error("Responses custom input 完成事件引用了无效调用");
+        yield* closeCall(call, data.input, "input" in data);
         break;
       }
       case "response.output_item.done": {
         const item = isRecord(data.item) ? data.item : {};
         if (item.type === "function_call" || item.type === "custom_tool_call") {
-          const key = String(item.id ?? "");
-          const callId = openCalls.get(key) ?? (typeof item.call_id === "string" ? item.call_id : key);
-          openCalls.delete(key);
-          yield { type: "tool_call_end", tool_call: { id: callId } };
+          const call = findCall(data, item);
+          if (!call) throw new Error("Responses 工具条目完成事件引用了无效调用");
+          yield* closeCall(call, item.input, "input" in item);
         }
         break;
       }
@@ -452,8 +508,9 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
           ended = true;
           const response = isRecord(data.response) ? data.response : {};
           const status = typeof response.status === "string" ? response.status : type.replace("response.", "");
-          if (status === "failed" && isRecord(response.error)) {
-            const error = response.error;
+          if (status !== type.replace("response.", "")) throw new Error("Responses 上游终态事件与响应状态不一致");
+          if (status === "failed") {
+            const error = isRecord(response.error) ? response.error : {};
             yield {
               type: "error",
               error: {
@@ -464,10 +521,17 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
             };
             return;
           }
+          if (status === "completed" ? !started || openCalls.size > 0 : [...openCalls.values()].some((call) => !call.custom)) {
+            throw new Error("Responses 上游终态缺少完整消息结束信息");
+          }
+          if (!started) {
+            started = true;
+            yield { type: "message_start", id: typeof response.id === "string" ? response.id : "", model };
+          }
           const reason = isRecord(response.incomplete_details) && typeof response.incomplete_details.reason === "string"
             ? response.incomplete_details.reason
             : undefined;
-          const stop: BridgeStopReason = status === "failed" ? "other" : reason === "max_output_tokens" ? "length" : reason ? "content_filter" : "stop";
+          const stop = responsesStopReason(status, reason);
           if (started) yield emitEnd(stop, status, responsesUsageToBridge(response.usage));
         }
         break;
@@ -487,7 +551,7 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
         break;
     }
   }
-  if (started && !ended) yield emitEnd("other", undefined, undefined);
+  if (!ended) throw new Error("Responses 上游流在终态前意外 EOF");
 }
 
 /** 上游响应 → 桥接事件流：SSE 严格解析；整包 JSON 先重放为事件序列。 */
@@ -551,6 +615,17 @@ export async function* parseUpstreamEvents(protocol: BridgeProtocol, upstream: R
       return;
     }
     if (protocol === "responses") {
+      const status = typeof payload.status === "string" ? payload.status : "completed";
+      if (status === "failed") {
+        const error = isRecord(payload.error) ? payload.error : {};
+        yield { type: "error", error: {
+          message: typeof error.message === "string" ? error.message : "上游响应失败",
+          code: typeof error.code === "string" || typeof error.code === "number" ? String(error.code) : undefined,
+          type: typeof error.type === "string" ? error.type : undefined,
+        } };
+        return;
+      }
+      if (status !== "completed" && status !== "incomplete") throw new Error("Responses 上游 JSON 缺少有效终态");
       if (Array.isArray(payload.output)) {
         for (const item of payload.output) {
           if (!isRecord(item)) continue;
@@ -567,6 +642,9 @@ export async function* parseUpstreamEvents(protocol: BridgeProtocol, upstream: R
               }
             }
           } else if (item.type === "function_call" || item.type === "custom_tool_call") {
+            if (item.type === "custom_tool_call" && status === "completed" && typeof item.input !== "string") {
+              throw new Error("Responses completed custom 输入必须是字符串");
+            }
             const id = typeof item.call_id === "string" && item.call_id ? item.call_id : String(item.id ?? "");
             yield { type: "tool_call_start", tool_call: { id, name: typeof item.name === "string" ? item.name : "" } };
             const argumentsText = item.type === "custom_tool_call"
@@ -577,9 +655,8 @@ export async function* parseUpstreamEvents(protocol: BridgeProtocol, upstream: R
           }
         }
       }
-      const status = typeof payload.status === "string" ? payload.status : "completed";
       const reason = isRecord(payload.incomplete_details) && typeof payload.incomplete_details.reason === "string" ? payload.incomplete_details.reason : undefined;
-      const stop: BridgeStopReason = status === "failed" ? "other" : reason === "max_output_tokens" ? "length" : reason ? "content_filter" : "stop";
+      const stop = responsesStopReason(status, reason);
       yield { type: "message_start", id: typeof payload.id === "string" ? payload.id : "", model: typeof payload.model === "string" ? payload.model : model };
       yield { type: "message_end", stop_reason: stop, raw_stop_reason: status, usage: responsesUsageToBridge(isRecord(payload.usage) ? payload.usage : undefined) };
       return;

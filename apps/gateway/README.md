@@ -1,5 +1,8 @@
 # Agent Proxy 网关使用手册
 
+[![Deploy 状态](https://github.com/aceHubert/codex-cliproxy-gateway/actions/workflows/deploy.yml/badge.svg?branch=main)](https://github.com/aceHubert/codex-cliproxy-gateway/actions/workflows/deploy.yml)
+[![npm 版本](https://img.shields.io/npm/v/@agent-proxy/gateway)](https://www.npmjs.com/package/@agent-proxy/gateway)
+
 基于 Bun 的跨平台本地网关，为 Codex Desktop 和 Codex CLI 提供官方模型、CLIProxyAPI/new-api 上游与本机 agent 模型。
 
 官方模型保留 Codex 的 ChatGPT 登录；`cliproxy/` 模型使用独立上游 API Key。
@@ -23,8 +26,7 @@ agent-proxy install
 ```
 
 默认连接本机上游 `http://127.0.0.1:8317/v1`，网关端口为 `8320`。
-默认运行目录是 `~/.agent-proxy-gateway`。首次从旧默认目录安装时，
-`install` 会合并用户设置并复制受管文件，保留旧目录；自定义实例目录不自动迁移。
+默认运行目录是 `~/.agent-proxy-gateway`。
 按提示输入 API Key 并选择要在 Codex 中显示的模型：
 
 - `↑` / `↓` 移动，空格勾选，回车确认。
