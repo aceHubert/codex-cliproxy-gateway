@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import {
   convertOpencodeZenRequest,
+  mergeOpencodeZenToolIdentities,
   renderOpencodeZenClientOutput,
 } from "@agent-proxy/opencode-zen/convert";
 import type { OpencodeZenModelProtocol } from "@agent-proxy/opencode-zen/catalog";
+import { padOpencodeZenGateTools } from "@agent-proxy/opencode-zen/fingerprint";
 
 const encoder = new TextEncoder();
 function streamOf(text: string): ReadableStream<Uint8Array> {
@@ -60,6 +62,70 @@ function renderResponses(
     new Response(upstream, { headers: { "content-type": "text/event-stream" } }),
     { model: "m", stream, tools: prepared.tools });
 }
+
+test("门禁工具身份只采纳实际 read/bash 占位，未知工具和未注入 shell 不获放行", () => {
+  const prepared = convertOpencodeZenRequest("responses", "chat", { input: "测试" });
+  const result = mergeOpencodeZenToolIdentities(prepared.tools, padOpencodeZenGateTools([]));
+  assert.deepEqual([...result.entries()], [
+    ["read", { name: "read", custom: false }],
+    ["bash", { name: "bash", custom: false }],
+  ]);
+  const untrusted = mergeOpencodeZenToolIdentities(prepared.tools, [
+    { type: "function", function: { name: "read" } },
+    { type: "function", function: { name: "shell" } },
+    { type: "function", function: { name: "unknown_tool" } },
+  ]);
+  assert.deepEqual([...untrusted.keys()], ["read"]);
+  assert.equal(prepared.tools.size, 0, "合并不修改客户端原始身份表");
+});
+
+test("门禁占位不覆盖客户端真实 function/custom/namespace 工具声明与响应类型", async () => {
+  const declarations = [
+    { name: "bash", custom: false, namespace: undefined, tools: [{
+      type: "function", name: "bash", description: "真实命令工具",
+      parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+    }] },
+    { name: "shell", custom: false, namespace: undefined, tools: [{
+      type: "function", name: "shell", parameters: { type: "object", properties: { command: { type: "string" } } },
+    }] },
+    { name: "read", custom: true, namespace: undefined, tools: [{ type: "custom", name: "read", description: "真实文本工具" }] },
+    { name: "read", custom: true, namespace: "client", tools: [{
+      type: "namespace", name: "client", tools: [{ type: "custom", name: "read", description: "命名空间工具" }],
+    }] },
+  ];
+  for (const declaration of declarations) {
+    const prepared = convertOpencodeZenRequest("responses", "chat", { input: "测试", tools: declaration.tools });
+    const originalTools = prepared.body.tools as Array<Record<string, unknown>>;
+    const upstreamTools = padOpencodeZenGateTools(originalTools);
+    for (const tool of originalTools) assert.ok(upstreamTools.includes(tool), "客户端定义原样保留");
+    if (declaration.name === "shell") {
+      assert.equal(upstreamTools.some((tool) => (tool as { function: { name: string } }).function.name === "bash"), false,
+        "客户端已有 shell 满足门禁，不再垫 bash");
+    }
+    const merged = mergeOpencodeZenToolIdentities(prepared.tools, upstreamTools);
+    for (const [name, identity] of prepared.tools) assert.deepEqual(merged.get(name), identity);
+    const [mappedName, originalIdentity] = [...prepared.tools.entries()][0]!;
+    assert.equal(originalIdentity.name, declaration.name);
+    assert.equal(originalIdentity.custom, declaration.custom);
+    const input = "中文正文\\路径\n第二行";
+    const arguments_ = JSON.stringify(declaration.custom ? { input } : { command: "pwd" });
+    const rendered = await renderOpencodeZenClientOutput("chat", "responses",
+      new Response(chatToolStream([{ id: "call_real_tool", name: mappedName, fragments: Array.from(arguments_) }]),
+        { headers: { "content-type": "text/event-stream" } }),
+      { model: "m", stream: true, tools: merged });
+    const events = readSseEvents(await rendered.text());
+    assert.ok(events.some((event) => event.type === "response.completed"));
+    const item = events.find((event) => event.type === "response.output_item.done")!.item as Record<string, unknown>;
+    assert.equal(item.name, declaration.name);
+    assert.equal(item.namespace, declaration.namespace);
+    assert.equal(item.type, declaration.custom ? "custom_tool_call" : "function_call");
+    if (declaration.custom) {
+      assert.equal(item.input, input);
+      assert.equal(events.filter((event) => event.type === "response.custom_tool_call_input.delta")
+        .map((event) => event.delta).join(""), input);
+    } else assert.equal(item.arguments, arguments_);
+  }
+});
 
 test("responses → chat 转换：instructions、工具历史、custom 工具与并行开关", () => {
   const { body } = convertOpencodeZenRequest("responses", "chat", {

@@ -8,7 +8,7 @@ import {
 import type { BridgeProtocol, ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { OpencodeZenModelProtocol } from "./catalog.ts";
-import { OPENCODE_ZEN_CLIENT_TOOLS } from "./fingerprint.ts";
+import { padOpencodeZenGateTools } from "./fingerprint.ts";
 
 /**
  * OpenCode Zen 多协议转换层。
@@ -58,7 +58,7 @@ export interface OpencodeZenClientRenderOptions {
   abort?: () => void;
 }
 
-/** 仅补齐实际注入的官方指纹工具身份，客户端已有的 custom/namespace 映射优先。 */
+/** 仅补齐实际垫补的门禁占位身份，客户端已有的 custom/namespace 映射优先。 */
 export function mergeOpencodeZenToolIdentities(identities: ToolIdentityMap, upstreamTools: unknown): ToolIdentityMap {
   const toolName = (tool: unknown): string | undefined => {
     if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return undefined;
@@ -67,11 +67,11 @@ export function mergeOpencodeZenToolIdentities(identities: ToolIdentityMap, upst
     const name = (fn as Record<string, unknown>).name;
     return typeof name === "string" ? name : undefined;
   };
-  const officialNames = new Set(OPENCODE_ZEN_CLIENT_TOOLS.map(toolName));
+  const gateNames = new Set(padOpencodeZenGateTools([]).map(toolName));
   const result = new Map(identities);
   for (const tool of Array.isArray(upstreamTools) ? upstreamTools : []) {
     const name = toolName(tool);
-    if (name && officialNames.has(name) && !result.has(name)) result.set(name, { name, custom: false });
+    if (name && gateNames.has(name) && !result.has(name)) result.set(name, { name, custom: false });
   }
   return result;
 }

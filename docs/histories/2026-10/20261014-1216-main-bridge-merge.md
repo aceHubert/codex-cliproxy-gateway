@@ -106,3 +106,43 @@
 ### 📁 Files Modified
 - 逐文件清单见上述 Change Stats。
 - 本记录：`docs/histories/2026-10/20261014-1216-main-bridge-merge.md`。
+
+
+### 第二次合入 main（2026-10-14 14:40）
+
+- 用户要求再次合入 Zen 指纹更新，并直接合并、不新建任务；按随后明确要求删除合并计划文件，保留代码和此历史记录。
+- 合并来源：main `c26afba`（v0.11.4）；合并前 bridge：`1ed62ce`。唯一文本冲突位于 Zen index，保留 bridge 单跳转换、身份表和取消传播，采用 main 新指纹和错误处理。
+- 生产请求不再注入 OpenCode 官方提示词/完整工具集；目录恢复 Codex 原提示词。响应身份表从实际门禁垫补逻辑派生，read/bash 占位按 function 回传，客户端原有 custom/namespace 映射优先，任意未知工具仍拒绝。
+- 上游错误 message 原文在 Responses、Chat Completions、Messages 入口保持一致；补无客户端工具时的占位回传和客户端同名定义优先回归。
+- 验证：`bun run check` 通过，78 个文件的 1094 项测试成功；`bun run pack:check` 八包独立安装、类型、CLI/default、目录与 Responses 冒烟成功；`git diff --check` 和独立复核通过。
+- 未调用真实门禁探针、修改凭据或更新本机服务；未发现合并遗留阻塞。
+
+本轮统计来自相对 `1ed62ce` 的 `git diff --cached HEAD --shortstat` 与 `--numstat`，包含 main 引入内容、身份适配和用户要求的计划删除，排除本记录新增段自身。
+
+- **Files changed:** 21
+- **Insertions:** +822
+- **Deletions:** -319
+
+| File | +Added | -Removed |
+| --- | ---: | ---: |
+| `CHANGELOG.md` | +9 | -0 |
+| `apps/gateway/package.json` | +1 | -1 |
+| `bun.lock` | +2 | -2 |
+| `docs/exec-plans/completed/main-into-llm-bridge-conversion.md` | +0 | -50 |
+| `docs/exec-plans/completed/zen-gate-fingerprint-reduction.md` | +76 | -0 |
+| `docs/exec-plans/tech-debt-tracker.md` | +2 | -2 |
+| `docs/fingerprint-data.md` | +22 | -7 |
+| `docs/histories/2026-10/20261014-1215-zen-gate-reprobe-fingerprint-reduction-plan.md` | +55 | -0 |
+| `docs/histories/2026-10/20261014-1339-zen-error-message-passthrough.md` | +61 | -0 |
+| `docs/opencode2-zen-free-models-gateway-research.md` | +14 | -1 |
+| `lerna.json` | +1 | -1 |
+| `packages/opencode-zen/package.json` | +1 | -1 |
+| `packages/opencode-zen/src/catalog.ts` | +10 | -7 |
+| `packages/opencode-zen/src/convert.ts` | +4 | -4 |
+| `packages/opencode-zen/src/fingerprint.ts` | +46 | -81 |
+| `packages/opencode-zen/src/index.ts` | +84 | -54 |
+| `scripts/zen-gate-probe.ts` | +194 | -0 |
+| `test/opencode-zen-catalog.test.ts` | +8 | -3 |
+| `test/opencode-zen-convert.test.ts` | +66 | -0 |
+| `test/opencode-zen-fingerprint.test.ts` | +33 | -70 |
+| `test/opencode-zen-gateway.test.ts` | +133 | -35 |

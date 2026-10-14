@@ -8,8 +8,8 @@ import {
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
-  mergeOpencodeZenTools,
   normalizeOpencodeZenEffort,
+  padOpencodeZenGateTools,
 } from "@agent-proxy/opencode-zen/fingerprint";
 import { OPENCODE_SESSION_PATTERN, createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
 
@@ -34,7 +34,7 @@ test("UA 与标头集：官方四段式 UA、会话三回填、稳定项目 id �
   assert.equal(headers.accept, "text/event-stream");
 });
 
-test("注入无工具请求：强制流式、标题模板在前、中性行为覆盖在后", () => {
+test("注入无工具请求：消息原样透传、垫补 read/bash 占位、强制流式", () => {
   const input = {
     model: "exo-free",
     messages: [{ role: "user", content: "hi" }],
@@ -46,69 +46,54 @@ test("注入无工具请求：强制流式、标题模板在前、中性行为�
   assert.deepEqual(body.stream_options, { include_usage: true });
   assert.equal(body.prompt_cache_key, SESSION);
   const messages = body.messages as Array<{ role: string; content: string }>;
-  assert.equal(messages.length, 2);
-  assert.equal(messages[0].role, "system");
-  assert.ok(messages[0].content.startsWith(OPENCODE_ZEN_TITLE_SYSTEM_PROMPT), "标题模板必须完整在最前");
-  assert.match(messages[0].content, /title generation duty above[\s\S]*is void/);
-  assert.equal(messages[1].content, "hi");
+  assert.equal(messages.length, 1, "system 内容不检查，不注入任何模板");
+  assert.equal(messages[0].role, "user");
+  assert.equal(messages[0].content, "hi");
+  const tools = body.tools as Array<{ function: { name: string } }>;
+  assert.deepEqual(tools.map((tool) => tool.function.name), ["read", "bash"], "名单闸不分有无工具，空列表也要垫补");
   // 输入对象不被改写。
   assert.equal(input.stream, false);
   assert.equal(input.messages.length, 1);
 });
 
-test("注入带客户端 system 的无工具请求：模板在前、客户端指令在后", () => {
-  const { body } = injectOpencodeZenFingerprintBody({
-    messages: [{ role: "system", content: "You are Claude Code." }, { role: "user", content: "hi" }],
-    stream: true,
-  }, SESSION);
-  const system = (body.messages as Array<{ role: string; content: string }>)[0].content;
-  assert.ok(system.startsWith(OPENCODE_ZEN_TITLE_SYSTEM_PROMPT));
-  assert.ok(system.endsWith("You are Claude Code."), "客户端原始 system 必须保留在末尾（靠后指令主导行为）");
-});
-
-test("注入带工具请求：agent 模板 + 官方工具并入且客户端同名定义优先", () => {
-  const clientTool = { type: "function", function: { name: "read", description: "client read", parameters: { type: "object", properties: {} } } };
+test("注入带客户端 system 与工具的请求：system 不动、客户端同名定义优先", () => {
+  const clientRead = { type: "function", function: { name: "read", description: "client read", parameters: { type: "object", properties: {} } } };
+  const clientShell = { type: "function", function: { name: "shell", description: "client shell", parameters: { type: "object", properties: {} } } };
   const lookup = { type: "function", function: { name: "lookup_issue", description: "issue lookup", parameters: { type: "object", properties: {} } } };
   const { body } = injectOpencodeZenFingerprintBody({
     messages: [{ role: "system", content: "You are a coding agent." }, { role: "user", content: "hi" }],
-    tools: [clientTool, lookup],
+    tools: [clientRead, clientShell, lookup],
     stream: true,
   }, SESSION);
-  const system = (body.messages as Array<{ role: string; content: string }>)[0].content;
-  assert.ok(system.startsWith(OPENCODE_ZEN_AGENT_SYSTEM_PROMPT), "带工具流量必须用 agent 模板");
-  assert.ok(system.endsWith("You are a coding agent."));
-  const tools = body.tools as Array<{ function: { name: string } }>;
+  const messages = body.messages as Array<{ role: string; content: string }>;
+  assert.equal(messages[0].content, "You are a coding agent.", "客户端 system 原样保留（门禁不检查内容）");
+  const tools = body.tools as Array<{ function: { name: string; description?: string } }>;
   const names = tools.map((tool) => tool.function.name);
-  assert.equal(names[0], "read");
-  assert.equal(names[1], "lookup_issue");
-  assert.equal(names.filter((name) => name === "read").length, 1, "客户端同名定义优先，官方同名定义不重复注入");
+  assert.deepEqual(names, ["read", "shell", "lookup_issue"], "read 与 shell（bash 替代名）已在场时不重复垫补");
+  assert.equal(tools[0].function.description, "client read", "客户端同名定义优先，占位不覆盖");
   for (const official of OPENCODE_ZEN_CLIENT_TOOLS as Array<{ function: { name: string } }>) {
-    assert.ok(names.includes(official.function.name), `官方工具 ${official.function.name} 必须在场`);
+    if (official.function.name !== "read" && official.function.name !== "shell") {
+      assert.ok(!names.includes(official.function.name), `官方工具 ${official.function.name} 不再并入`);
+    }
   }
 });
 
-test("developer 角色首条消息同样可合并；非对象首条消息前插新 system", () => {
-  const merged = injectOpencodeZenFingerprintBody({
-    messages: [{ role: "developer", content: "dev instructions" }, { role: "user", content: "hi" }],
-    stream: true,
-  }, SESSION);
-  assert.equal((merged.body.messages as Array<{ role: string }>)[0].role, "developer");
-  const inserted = injectOpencodeZenFingerprintBody({
-    messages: [{ role: "user", content: "hi" }],
-    stream: true,
-  }, SESSION);
-  const messages = inserted.body.messages as Array<{ role: string }>;
-  assert.equal(messages[0].role, "system");
-  assert.equal(messages[1].role, "user");
+test("垫补规则：缺 read 垫 read；bash 与 shell 都缺才垫 bash；畸形输入按空列表垫补", () => {
+  const name = (tools: unknown[]) => (tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
+  const bashOnly = [{ type: "function", function: { name: "bash", parameters: {} } }];
+  const shellOnly = [{ type: "function", function: { name: "shell", parameters: {} } }];
+  const readPlusCustom = [{ type: "function", function: { name: "read", parameters: {} } }, { type: "function", function: { name: "exec_command", parameters: {} } }];
+  assert.deepEqual(name(padOpencodeZenGateTools(bashOnly)), ["bash", "read"], "有 bash 缺 read：只垫 read");
+  assert.deepEqual(name(padOpencodeZenGateTools(shellOnly)), ["shell", "read"], "shell 可替代 bash");
+  assert.deepEqual(name(padOpencodeZenGateTools(readPlusCustom)), ["read", "exec_command", "bash"], "有 read 缺 bash：垫 bash 且不改动客户端顺序");
+  assert.deepEqual(name(padOpencodeZenGateTools(undefined)), ["read", "bash"], "undefined 按空列表垫补");
+  assert.deepEqual(name(padOpencodeZenGateTools("nope")), ["read", "bash"], "非数组输入按空列表垫补");
+  const placeholder = padOpencodeZenGateTools([])[0] as { function: { parameters: Record<string, unknown>; description: string } };
+  assert.deepEqual(placeholder.function.parameters, { type: "object", properties: {}, required: [], additionalProperties: false }, "占位 schema 为空对象（模型带不出参数）");
+  assert.match(placeholder.function.description, /cannot execute it/, "占位描述声明不可执行");
 });
 
-test("mergeOpencodeZenTools：空与畸形输入不注入官方工具", () => {
-  assert.deepEqual(mergeOpencodeZenTools([]), []);
-  assert.deepEqual(mergeOpencodeZenTools(undefined), []);
-  assert.deepEqual(mergeOpencodeZenTools("nope"), []);
-});
-
-test("模板与会话格式自检：指纹数据完整且会话 id 合规", () => {
+test("回退材料自检：官方模板与工具定义完整、会话 id 合规", () => {
   assert.ok(OPENCODE_ZEN_AGENT_SYSTEM_PROMPT.startsWith("You are an AI agent running in OpenCode"), "agent 模板应为 GA 官方提示词");
   assert.ok(OPENCODE_ZEN_AGENT_SYSTEM_PROMPT.includes("Prefer dedicated tools over shell commands"), "带工具模板应已渲染工具指引");
   assert.ok(!OPENCODE_ZEN_AGENT_SYSTEM_PROMPT.includes("${OPENCODE_TOOL_GUIDANCE}"), "模板占位符必须已替换");
@@ -178,26 +163,4 @@ test("注入请求体：reasoning_effort 按调用方传入的实时档位裁决
     reasoning_effort: "high",
   }, SESSION);
   assert.equal(noLevels.body.reasoning_effort, "high");
-});
-
-test("首条 system 已含官方模板（base_instructions 下发）时不重复注入", () => {
-  // 无工具：标题模板已在首位 → 原样保留，不追加优先级注记
-  const plain = injectOpencodeZenFingerprintBody({
-    model: "exo-free",
-    messages: [{ role: "system", content: `${OPENCODE_ZEN_TITLE_SYSTEM_PROMPT}\n\nYou are Codex.` }, { role: "user", content: "hi" }],
-    stream: true,
-  }, SESSION, []);
-  const system = (plain.body.messages as Array<{ role: string; content: string }>)[0].content;
-  assert.equal(system, `${OPENCODE_ZEN_TITLE_SYSTEM_PROMPT}\n\nYou are Codex.`, "已含模板时原样保留");
-  assert.equal(system.split(OPENCODE_ZEN_TITLE_SYSTEM_PROMPT).length - 1, 1, "模板只出现一次");
-
-  // 带工具：agent 模板已在首位 → 不重复注入，但工具仍按门禁并集
-  const tooled = injectOpencodeZenFingerprintBody({
-    messages: [{ role: "system", content: `${OPENCODE_ZEN_AGENT_SYSTEM_PROMPT}\n\nYou are Codex.` }, { role: "user", content: "hi" }],
-    tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: {} } } }],
-    stream: true,
-  }, SESSION, []);
-  const tooledSystem = (tooled.body.messages as Array<{ role: string; content: string }>)[0].content;
-  assert.equal(tooledSystem.split(OPENCODE_ZEN_AGENT_SYSTEM_PROMPT).length - 1, 1, "agent 模板只出现一次");
-  assert.ok(((tooled.body.tools ?? []) as unknown[]).length > 1, "工具仍并入官方定义");
 });

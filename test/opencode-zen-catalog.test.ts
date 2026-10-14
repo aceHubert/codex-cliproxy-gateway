@@ -21,6 +21,7 @@ import {
 } from "@agent-proxy/opencode-zen/catalog";
 import type { OpencodeZenModelMetadata } from "@agent-proxy/opencode-zen/catalog";
 import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "@agent-proxy/opencode-zen/fingerprint";
+import { getCodexModelSnapshot } from "@agent-proxy/models";
 import type { ModelCatalog } from "../apps/gateway/src/types.ts";
 
 /** 零计费元数据条目（免费模型的默认形状）。 */
@@ -386,10 +387,14 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
     assert.equal(metadata.models, undefined, "metadata.json 不再内嵌成品条目");
     const catalog = JSON.parse(fs.readFileSync(path.join(directory, "opencode-zen-catalog.json"), "utf8"));
     assert.ok(Array.isArray(catalog.models) && catalog.models.length === 2, "catalog.json 是成品目录");
-    // 成品即终态：提示词与模板在生成时已替换，serve 不再加工。
+    // 成品即终态：提示词保留 gpt-5.5 基底的官方 Codex 提示词（2026-10-14 门禁复测后
+    // 不再替换），serve 不再加工。
+    const base = getCodexModelSnapshot().models.find((entry) => entry.slug === "gpt-5.5");
+    assert.ok(base, "Codex 模型快照缺少 gpt-5.5 基底条目");
     for (const entry of catalog.models) {
-      assert.equal(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
-      assert.equal((entry.model_messages as { instructions_template?: string }).instructions_template, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
+      assert.equal(entry.base_instructions, base.base_instructions, "不再替换为 OpenCode 官方提示词");
+      assert.notEqual(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT);
+      assert.equal((entry.model_messages as { instructions_template?: string }).instructions_template, (base.model_messages as { instructions_template?: string }).instructions_template);
     }
     // 转发 endpoint 由元数据确认（provider.api）。
     assert.equal(store.endpoint("exo-free"), "https://opencode.ai/zen/v1");

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.4 (2026-10-14)
+
+#### :bug: Bug Fix
+* `opencode-zen`
+  * [#17](https://github.com/aceHubert/codex-cliproxy-gateway/pull/17) refactor(opencode-zen): 收敛门禁伪装面并透传上游错误 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.11.3 (2026-10-14)
 
 #### :bug: Bug Fix

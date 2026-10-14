@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/opencode-zen",
-  "version": "0.11.3",
+  "version": "0.11.4",
   "description": "Agent Proxy opencode-zen 插件；保留基线转换行为。",
   "type": "module",
   "exports": {

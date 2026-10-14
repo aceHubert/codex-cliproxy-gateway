@@ -9,6 +9,7 @@ import {
   OPENCODE_ZEN_CLIENT_USER_AGENT,
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
 } from "@agent-proxy/opencode-zen/fingerprint";
+import { getCodexModelSnapshot } from "@agent-proxy/models";
 import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
 import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "@agent-proxy/opencode-zen";
 import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
@@ -209,34 +210,57 @@ test("zen 配置校验：类型、环回监听与前缀保留", () => {
   assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true }), /环回/);
 });
 
-test("上游错误归一化：FreeTierError/限流/模型失效给出明确指引", () => {
+test("上游错误归一化：分类为 zen_* 并原样透传上游描述", () => {
   const free403 = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
   assert.equal(free403.status, 403);
   assert.equal(free403.type, "zen_free_tier_error");
-  assert.match(free403.message, /指纹数据/);
+  assert.equal(free403.message, "OpenCode's free tier can only be used from within OpenCode");
   const limited = normalizeOpencodeZenUpstreamError(429, JSON.stringify({ error: { type: "FreeUsageLimitError", message: "rate limited" } }));
   assert.equal(limited.status, 429);
   assert.equal(limited.type, "zen_rate_limited");
-  assert.match(limited.message, /限频/);
+  assert.equal(limited.message, "rate limited");
   const gone = normalizeOpencodeZenUpstreamError(404, JSON.stringify({ error: { message: "model nemotron-not-exist not found" } }));
   assert.equal(gone.status, 404);
   assert.equal(gone.type, "zen_model_unavailable");
-  assert.match(gone.message, /动态轮换/);
+  assert.equal(gone.message, "model nemotron-not-exist not found");
   const generic = normalizeOpencodeZenUpstreamError(500, "internal");
   assert.equal(generic.status, 500);
   assert.equal(generic.type, "zen_upstream_error");
+  // 上游没给 message 时才是中性兜底：只述事实，不含修复指引。
+  assert.equal(generic.message, "internal");
+  const emptyBody = normalizeOpencodeZenUpstreamError(429, "");
+  assert.equal(emptyBody.type, "zen_rate_limited");
+  assert.match(emptyBody.message, /限流/);
+  assert.ok(!/指纹数据|fingerprint-data/.test(emptyBody.message), "兜底文案不得写死修复指引");
+  // JSON 结构合法但没有描述：不透裸 JSON，走分类对应的中性兜底。
+  const silentJson = normalizeOpencodeZenUpstreamError(503, JSON.stringify({ error: { type: "server_error" } }));
+  assert.equal(silentJson.status, 503);
+  assert.equal(silentJson.type, "zen_upstream_error");
+  assert.ok(!silentJson.message.includes("{"), "不得把裸 JSON 当描述透给客户端");
+  // `null` 等标量报文不得抛错。
+  assert.equal(normalizeOpencodeZenUpstreamError(502, "null").type, "zen_upstream_error");
 });
 
-test("上游错误归一化：403 区域限制与门禁失效分开归类", () => {
-  // 区域限制：同为 403，但详情是地区不可用——不能误报成指纹失效（探针分类同样视为被服务）。
+test("上游错误归一化：403 按上游 error.type 分归类，不再一律算门禁失效", () => {
+  // 区域限制：同为 403，但详情是地区不可用——不能误报成指纹失效。
   const region = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "RegionError", message: "This model is not available in your country" } }));
   assert.equal(region.status, 403);
   assert.equal(region.type, "zen_region_error");
-  assert.match(region.message, /地区/);
-  assert.ok(!region.message.includes("指纹数据"), "区域错误不得引导用户升级指纹");
+  assert.equal(region.message, "This model is not available in your country");
   // 门禁失效仍是 FreeTierError 归类。
   const gate = normalizeOpencodeZenUpstreamError(403, JSON.stringify({ type: "error", error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }));
   assert.equal(gate.type, "zen_free_tier_error");
+});
+
+test("上游错误归一化：403 server_error（模型端点失效）不归为门禁失效", () => {
+  // 2026-10-14 实证：cat-jam-free 上游端点已下线，返回 403 server_error；
+  // 旧实现按「任何 403 都是门禁」把它归成 zen_free_tier_error 并引导用户升级指纹。
+  const body = JSON.stringify({ error: { type: "server_error", message: "Upstream request failed: Endpoint is unavailable." } });
+  const result = normalizeOpencodeZenUpstreamError(403, body);
+  assert.equal(result.status, 403);
+  assert.equal(result.type, "zen_model_unavailable");
+  assert.equal(result.message, "Upstream request failed: Endpoint is unavailable.");
+  assert.ok(!/指纹|fingerprint/i.test(result.message), "不得把上游故障引导成升级指纹");
 });
 
 test("zen 动态目录合并进 OpenAI 与 Codex 模型列表，前缀格式统一", TIMEOUT, async () => {
@@ -259,7 +283,7 @@ test("zen 动态目录合并进 OpenAI 与 Codex 模型列表，前缀格式统�
   });
 });
 
-test("chat/completions 转发：指纹标头注入、前缀剥除、模板与强制流式注入", TIMEOUT, async () => {
+test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补与强制流式注入", TIMEOUT, async () => {
   await fixture(async (fixture) => {
     const handler = fixture.create();
     const response = await handler(chatRequest(MODEL, { stream: true }));
@@ -277,11 +301,16 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、模板与强
     assert.match(session, OPENCODE_SESSION_PATTERN);
     assert.equal(up.headers["x-session-affinity"], session);
     assert.equal(up.headers["x-session-id"], session);
-    // 请求体：剥前缀、强制流式、无工具走标题模板、缓存键对齐会话。
+    // 请求体：剥前缀、强制流式、消息原样透传（无工具也垫占位）、缓存键对齐会话。
     assert.equal(up.body.model, "nemotron-3.5-lightning-free");
     assert.equal(up.body.stream, true);
     assert.equal(up.body.prompt_cache_key, session);
-    assert.ok(String(up.body.messages[0].content).startsWith("You are a title generator"));
+    assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "不注入模板，客户端消息原样在最前");
+    assert.deepEqual(
+      (up.body.tools as Json[]).map((tool) => tool.function.name),
+      ["read", "bash"],
+      "无工具流量同样垫补名单闸占位",
+    );
   });
 });
 
@@ -400,8 +429,9 @@ test("工具调用：客户端工具与官方工具集合并转发，SSE 聚合�
     const tools = up.body.tools as Json[];
     const names = tools.map((tool) => tool.function.name);
     assert.ok(names.includes("lookup_issue"));
-    assert.ok(names.includes("read") && names.includes("shell"), "官方工具集必须并入");
-    assert.ok(String(up.body.messages[0].content).startsWith(AGENT_PROMPT_HEAD));
+    assert.ok(names.includes("read") && names.includes("bash"), "名单闸占位（read+bash）必须垫补");
+    assert.equal(names.length, 3, "只垫占位，不并入官方工具定义");
+    assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "system 内容不注入模板（首条就是客户端消息）");
   });
 });
 
@@ -417,7 +447,7 @@ test("上游 403/429 归一化为带指引的错误；网络故障 502", TIMEOUT
     assert.equal(denied.status, 403);
     const payload = await denied.json() as Json;
     assert.equal(payload.error.type, "zen_free_tier_error");
-    assert.match(payload.error.message, /指纹数据/);
+    assert.equal(payload.error.message, "OpenCode's free tier can only be used from within OpenCode");
 
     const limited = create(undefined, {
       fetch: async (url) => {
@@ -525,7 +555,7 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
     assert.equal(up.url, "https://opencode.ai/zen/v1/chat/completions");
     const messages = up.body.messages as Json[];
-    assert.ok(String(messages[0]!.content).startsWith(AGENT_PROMPT_HEAD), "chat 门禁模板注入");
+    assert.ok(String(messages[0]!.content).startsWith("SYS-INSTR"), "客户端 instructions 原样成为首条 system（不注入模板）");
     assert.ok(messages.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls[0].id === "call_1"));
     assert.ok(messages.some((message) => message.role === "tool" && message.tool_call_id === "call_1"));
     assert.equal(up.body.stream, true);
@@ -700,22 +730,20 @@ for (const stream of [true, false]) {
         assert.equal(tool?.type, "function");
         assert.deepEqual(tool?.function.parameters.required, ["input"]);
       }
-      assert.ok(tools.some((tool) => tool.function.name === "read") && tools.some((tool) => tool.function.name === "shell"), "保留 OpenCode 门禁所需工具指纹");
+      assert.ok(tools.some((tool) => tool.function.name === "read") && tools.some((tool) => tool.function.name === "bash"), "垫补名单闸要求的 read+bash 占位");
       assert.equal(upstream.body.stream, true);
     }, () => sse(frames));
   });
 }
 
 for (const stream of [true, false]) {
-  test(`Responses 入口：实际注入的 OpenCode 官方工具保持 function 调用（stream=${stream}）`, TIMEOUT, async () => {
-    const arguments_ = JSON.stringify({ command: "pwd", description: "查询工作目录" });
+  test(`Responses 入口：无原 tools 时 read/bash 占位保持 function 调用（stream=${stream}）`, TIMEOUT, async () => {
+    const arguments_ = "{}";
     await fixture(async (fixture) => {
       const handler = fixture.create();
       const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
         method: "POST", headers: { "content-type": "application/json" },
-        body: JSON.stringify({ model: MODEL, input: "查询工作目录", stream,
-          tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
-        }),
+        body: JSON.stringify({ model: MODEL, input: "查询工作目录", stream }),
       }));
       assert.equal(response.status, 200);
       let output: Json[];
@@ -730,21 +758,28 @@ for (const stream of [true, false]) {
         assert.equal(result.status, "completed");
         output = result.output as Json[];
       }
-      const shell = output.find((item) => item.name === "shell");
-      assert.ok(shell);
-      assert.equal(shell.type, "function_call");
-      assert.equal(shell.call_id, "call_official_shell");
-      assert.equal(shell.arguments, arguments_);
-      assert.ok(!("input" in shell));
+      assert.equal(output.length, 2);
+      for (const name of ["read", "bash"]) {
+        const call = output.find((item) => item.name === name);
+        assert.ok(call);
+        assert.equal(call.type, "function_call");
+        assert.equal(call.call_id, `call_placeholder_${name}`);
+        assert.equal(call.arguments, arguments_);
+        assert.ok(!("input" in call));
+      }
       const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
-      assert.ok((upstream.body.tools as Json[]).some((tool) => tool.function.name === "shell"));
+      const tools = upstream.body.tools as Json[];
+      assert.deepEqual(tools.map((tool) => tool.function.name), ["read", "bash"]);
+      for (const tool of tools) {
+        assert.deepEqual(tool.function.parameters, { type: "object", properties: {}, required: [], additionalProperties: false });
+      }
     }, () => sse([
-      chunkFrame({ tool_calls: [{ index: 0, id: "call_official_shell", type: "function", function: { name: "shell", arguments: arguments_ } }] }),
+      chunkFrame({ tool_calls: ["read", "bash"].map((name, index) => ({ index, id: `call_placeholder_${name}`, type: "function", function: { name, arguments: arguments_ } })) }),
       chunkFrame({}, "tool_calls"),
     ]));
   });
 
-  test(`Responses 入口：不在客户端或已注入官方工具中的名称仍然失败（stream=${stream}）`, TIMEOUT, async () => {
+  test(`Responses 入口：不在客户端或门禁占位中的名称仍然失败（stream=${stream}）`, TIMEOUT, async () => {
     await fixture(async ({ create }) => {
       const response = await create()(new Request("http://127.0.0.1:8327/v1/responses", {
         method: "POST", headers: { "content-type": "application/json" },
@@ -768,6 +803,68 @@ for (const stream of [true, false]) {
       chunkFrame({ tool_calls: [{ index: 0, id: "call_unknown", type: "function", function: { name: "not_an_injected_tool", arguments: "{}" } }] }),
       chunkFrame({}, "tool_calls"),
     ]));
+  });
+}
+
+for (const stream of [true, false]) {
+  test(`Messages 入口：chat 上游 read/bash 占位调用返回 Anthropic 工具条目（stream=${stream}）`, TIMEOUT, async () => {
+    await fixture(async (fixture) => {
+      const response = await fixture.create()(new Request("http://127.0.0.1:8327/v1/messages", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, system: "客户端系统指令", max_tokens: 512,
+          messages: [{ role: "user", content: "测试占位调用" }], stream,
+        }),
+      }));
+      assert.equal(response.status, 200);
+      let content: Json[];
+      if (stream) {
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "message_stop"));
+        content = events.filter((event) => event.type === "content_block_start").map((event) => event.content_block as Json);
+        assert.ok(events.some((event) => event.type === "message_delta" && event.delta.stop_reason === "tool_use"));
+      } else {
+        const message = await response.json() as Json;
+        assert.equal(message.stop_reason, "tool_use");
+        content = message.content as Json[];
+      }
+      for (const name of ["read", "bash"]) {
+        const call = content.find((item) => item.type === "tool_use" && item.name === name);
+        assert.ok(call);
+        assert.equal(call.id, `call_message_${name}`);
+        assert.deepEqual(call.input, {});
+      }
+      const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      assert.deepEqual((upstream.body.tools as Json[]).map((tool) => tool.function.name), ["read", "bash"]);
+      assert.equal(upstream.body.messages[0].content, "客户端系统指令", "不注入 OpenCode 模板");
+      assert.equal(upstream.body.stream, true);
+    }, () => sse([
+      chunkFrame({ tool_calls: ["read", "bash"].map((name, index) => ({
+        index, id: `call_message_${name}`, type: "function", function: { name, arguments: "{}" },
+      })) }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+
+  test(`Messages 入口：上游门禁错误保留原始描述（stream=${stream}）`, TIMEOUT, async () => {
+    const message = "OpenCode's free tier can only be used from within OpenCode";
+    await fixture(async ({ create }) => {
+      const handler = create(undefined, {
+        fetch: async (url) => {
+          if (String(url).endsWith("/zen/v1/models")) return Response.json({ data: [] });
+          return Response.json({ error: { type: "FreeTierError", message } }, { status: 403 });
+        },
+      });
+      const response = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, max_tokens: 512, messages: [{ role: "user", content: "测试" }], stream }),
+      }));
+      assert.equal(response.status, 403);
+      const payload = await response.json() as Json;
+      assert.equal(payload.error.type, "zen_free_tier_error");
+      assert.equal(payload.error.message, message);
+    });
   });
 }
 
@@ -856,8 +953,6 @@ test("zen 目录过滤：下线/非 chat 协议/探针剔除的模型不暴露",
   });
 });
 
-const AGENT_PROMPT_HEAD = OPENCODE_ZEN_AGENT_SYSTEM_PROMPT.slice(0, 60);
-
 test("Zen WebSocket 握手本地拒绝，令客户端降级 HTTPS/SSE", TIMEOUT, async () => {
   await fixture(async ({ create, config }) => {
     const handler = create();
@@ -912,7 +1007,7 @@ test("UA 接线：转发标头使用版本存储的当前 UA", TIMEOUT, async ()
   });
 });
 
-test("目录条目 base_instructions 为官方 agent 提示词（与其它适配器一致）", TIMEOUT, async () => {
+test("目录条目提示词回落：保留官方 Codex 提示词，不再替换为 OpenCode 模板", TIMEOUT, async () => {
   await fixture(async (fixture) => {
     const handler = fixture.create();
     const response = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.50.0"));
@@ -920,10 +1015,13 @@ test("目录条目 base_instructions 为官方 agent 提示词（与其它适配
     const raw = await response.json() as Json;
     const zen = (raw.models as Json[]).filter((entry) => String(entry.slug).startsWith("opencode-zen/"));
     assert.ok(zen.length > 0, "Codex 形状目录应含 zen 条目");
+    const base = getCodexModelSnapshot().models.find((entry) => entry.slug === "gpt-5.5");
+    assert.ok(base, "Codex 模型快照缺少 gpt-5.5 基底条目");
     for (const entry of zen) {
-      assert.equal(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 应下发官方提示词`);
+      assert.equal(entry.base_instructions, base.base_instructions, `${entry.slug} 保留快照基底官方提示词`);
+      assert.notEqual(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 不再下发 OpenCode 提示词`);
       const messages = entry.model_messages as { instructions_template?: string } | undefined;
-      assert.equal(messages?.instructions_template, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 的 instructions_template 必须替换，否则客户端仍发官方提示词`);
+      assert.equal(messages?.instructions_template, (base.model_messages as { instructions_template?: string }).instructions_template, `${entry.slug} 的 instructions_template 同步回落（只改 base_instructions 无效）`);
     }
   });
 });

@@ -15,10 +15,23 @@
 > 提示词模板**（逐字符匹配；无工具流量可用标题生成器模板，带工具流量必须 agent 模板
 > + 官方工具定义在场）；③ 传输层**仅接受 `stream: true`**，非流式一律 403。会话生成
 > 算法实测为 `r = ts*0x1000 + counter`（counter 为同毫秒自增序号，从 1 起），降序 Hex
-> 取 `~r` 的高 48 位（即 `0xffffffffffff - (r & 0xffffffffffff)`）——本报告 §3.2 公式
+> 取 `~r` 高 48 位（即 `0xffffffffffff - (r & 0xffffffffffff)`）——本报告 §3.2 公式
 > 漏了 counter。完整实证与落地实现见
 > [执行计划决策记录 #3](exec-plans/completed/opencode-zen-free-models-proxy-integration.md)
 > 与 `src/opencode-zen/fingerprint.ts` 头注释。
+
+> **⚠️ 2026-10-14 门禁复测修正（当前有效画像）**：上段三层门禁画像再次漂移——经
+> `scripts/zen-gate-probe.ts` 8 项隔离探针实测（space-bunny-free）：① **请求体层的
+> system 模板匹配已不再执行**（无任何官方模板 + 官方工具全量 200；无模板 + 仅
+> read/bash 空 schema 占位亦 200）；② 工具检查现为**名单制**：tools 必须同时含
+> `read` 与 `bash`/`shell` 之一的名字，schema 不做任何检查（空对象占位可过），
+> 未知名工具不干扰——仅含客户端自有工具（如 exec_command/apply_patch）则 403；③ 标头层
+> 放宽：两段式 UA `opencode/<semver>`（1.19.0 实测）重新放行，四段式 GA UA 继续可用。
+> 会话 id 格式与 `stream: true` 未重测，以 10-08 结论为准。对照探针（现行注入形态：
+> 模板 + 官方工具合并）仍 200，现有转发实现不受影响。基于本画像的最小伪装面收敛
+> （read+bash 占位垫补替代模板与官方工具注入、目录停发提示词替换）见
+> [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)；探针结论已同步
+> [指纹数据文档](fingerprint-data.md) 的 opencode-zen notes 与更新记录。
 
 ---
 
