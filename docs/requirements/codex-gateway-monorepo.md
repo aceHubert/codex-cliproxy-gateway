@@ -11,7 +11,7 @@
 
 按“bridge 封装 → 网关插件方法 → agent 接入与差异适配”的目标分层，将现有单包改成 Bun workspace monorepo。所有 agent 兼容能力通过插件注入网关；规范协议转换由基于外部 llm-bridge 的封装完成，AGY 的 CloudCodeAssist 转换在自身包内独立实现。实施先完成 monorepo 迁移及验收，再按独立转换计划推进。
 
-实施分为两个计划：[monorepo、插件化与安装配置迁移](../exec-plans/completed/codex-gateway-monorepo.md)负责包结构、注册/装配、生命周期与安装配置；[llm-bridge 封装与兼容](../exec-plans/active/llm-bridge-conversion-compatibility.md)负责转换层、agent 转换调用适配和 Chat Completions 兼容/测试。Chat Completions 要求直接纳入转换封装，不另保留独立 Chat Completions 端点计划。
+实施分为两个计划：[monorepo、插件化与安装配置迁移](../exec-plans/completed/codex-gateway-monorepo.md)负责包结构、注册/装配、生命周期与安装配置；[llm-bridge 封装与兼容](../exec-plans/completed/llm-bridge-conversion-compatibility.md)负责转换层、agent 转换调用适配和 Chat Completions 兼容/测试。Chat Completions 要求直接纳入转换封装，不另保留独立 Chat Completions 端点计划。
 
 原独立协议抽离计划同样弃用并撤下：通用请求/响应、解析、工具身份、usage、流式事件/输出外壳及回归要求统一在 llm-bridge 封装中重构；原插件与网关生命周期要求由 monorepo 计划承接，不再维护第三份独立计划。
 
@@ -302,7 +302,7 @@ const detected = {
 - packages 的库版本固定或独立、旧 npm 包名迁移公告与发布顺序；apps/gateway 的 CLI/应用交付方式独立确定，本轮不发布。
 - 转换结果的工具身份/损失字段、流式/解析公开 API 及外部库不可表达能力的报错规则。
 
-执行阶段与分工见 [monorepo 与插件计划](../exec-plans/completed/codex-gateway-monorepo.md)和 [llm-bridge 封装与兼容计划](../exec-plans/active/llm-bridge-conversion-compatibility.md)。
+执行阶段与分工见 [monorepo 与插件计划](../exec-plans/completed/codex-gateway-monorepo.md)和 [llm-bridge 封装与兼容计划](../exec-plans/completed/llm-bridge-conversion-compatibility.md)。
 
 ## 9. 后续备注：配置与 Web UI 插件化
 

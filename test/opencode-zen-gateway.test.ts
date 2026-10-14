@@ -531,6 +531,97 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
   });
 });
 
+test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，anthropic 协议模型直通", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
+        }
+        if (target.endsWith("/zen/v1/chat/completions")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return sse([
+            chunkFrame({ role: "assistant", content: "chat 源回答" }),
+            chunkFrame({}, "stop"),
+          ]);
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    // /v1/messages：chat 协议模型 → 单跳转换 + Anthropic 事件渲染。
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/nemotron-3.5-lightning-free",
+        system: "SYS-INSTR",
+        max_tokens: 512,
+        messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+        stream: true,
+      }),
+    }));
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+    const body = await response.text();
+    assert.match(body, /message_start/);
+    assert.match(body, /chat 源回答/);
+    assert.match(body, /message_stop/);
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    assert.equal(up.url, "https://opencode.ai/zen/v1/chat/completions");
+    const messages = up.body.messages as Json[];
+    assert.ok(messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("你好")));
+  });
+
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据 provider.npm 决定模型端点协议（@ai-sdk/anthropic → /messages 直通）；
+          // 元数据存在的模型不进入探针，协议由 npm 映射而来。
+          return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": { provider: { npm: "@ai-sdk/anthropic" } } } } });
+        }
+        if (target.endsWith("/zen/v1/messages")) {
+          upstreamSeen = true;
+          return new Response(anthropicSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    let upstreamSeen = false;
+    // anthropic 协议模型直通：原协议请求体替换模型 id 后原样返回；handler 消费
+    // dependencies.fetch，直通 mock 与目录 mock 走同一注入点。
+    const anthropicSse = [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"up\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"直通回答\"}}",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+    ].join("\n\n") + "\n\n";
+    // protocol() 同步读目录缓存：先用 /v1/models 预热（内部等待目录刷新完成），
+    // 探针裁决为 anthropic 后转发才走直通分支。
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    const passthrough = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/nemotron-3.5-lightning-free",
+        max_tokens: 64,
+        messages: [{ role: "user", content: [{ type: "text", text: "直通" }] }],
+        stream: true,
+      }),
+    }));
+    assert.equal(passthrough.status, 200);
+    const text = await passthrough.text();
+    assert.match(text, /直通回答/);
+    assert.match(text, /message_stop/);
+    assert.ok(upstreamSeen, "anthropic 协议模型必须直通上游 /messages");
+  });
+});
+
 test("Responses 入口：zen 模型的 compact 子树保持拒绝", TIMEOUT, async () => {
   await fixture(async ({ create }) => {
     const handler = create();

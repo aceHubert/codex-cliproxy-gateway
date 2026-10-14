@@ -18,7 +18,7 @@ function plugin(id: string, modelPatterns: string[], overrides: Partial<GatewayP
   };
 }
 
-function httpContext(model: string, from: "chat" | "responses" = "responses", operation: "generate" | "compact" = "generate"): Omit<HttpRequestContext, "matchedPattern" | "matchedPrefix"> {
+function httpContext(model: string, from: "chat-completions" | "responses" | "anthropic" = "responses", operation: "generate" | "compact" = "generate"): Omit<HttpRequestContext, "matchedPattern" | "matchedPrefix"> {
   const request = new Request("http://localhost/v1/responses", { method: "POST", body: JSON.stringify({ model }) });
   return { request, url: new URL(request.url), model, from, operation, signal: request.signal, body: new LazyRequestBody(request) };
 }
@@ -105,13 +105,14 @@ test("JSON 解析失败不会消耗第二次正文且原始字节仍然可用", 
   assert.equal(new TextDecoder().decode(await body.bytes()), "{broken");
 });
 
-test("客户端入口识别覆盖 Chat、Responses、compact 与本地路由边界", () => {
-  assert.deepEqual(identifyClientEndpoint("/v1/chat/completions"), { from: "chat", operation: "generate" });
+test("客户端入口识别覆盖 Chat Completions、Responses、Messages、compact 与本地路由边界", () => {
+  assert.deepEqual(identifyClientEndpoint("/v1/chat/completions"), { from: "chat-completions", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/v1/messages"), { from: "anthropic", operation: "generate" });
   assert.deepEqual(identifyClientEndpoint("/v1/responses"), { from: "responses", operation: "generate" });
   assert.deepEqual(identifyClientEndpoint("/v1/responses/compact"), { from: "responses", operation: "compact" });
   assert.deepEqual(identifyClientEndpoint("/proxy/responses", "/proxy/"), { from: "responses", operation: "generate" });
   assert.deepEqual(identifyClientEndpoint("/responses", "/"), { from: "responses", operation: "generate" });
-  for (const path of ["/ui", "/v1/ui/api/config", "/v1/realtime", "/responses", "/v10/responses", "/v1/responses/extra", "/v1/responses/"]) {
+  for (const path of ["/ui", "/v1/ui/api/config", "/v1/realtime", "/responses", "/v10/responses", "/v1/responses/extra", "/v1/responses/", "/v1/messages/count_tokens", "/v1/messages/"]) {
     assert.equal(identifyClientEndpoint(path), undefined);
   }
 });
@@ -121,10 +122,10 @@ test("HTTP handler 接收所有协议与操作上下文且返回 SSE 或普通�
   const registry = new PluginRegistry([plugin("zcode", ["zcode-*/*"], {
     handleHttp(context) {
       captured.push(context);
-      return new Response(context.from === "chat" ? "data: done\n\n" : "{}", { headers: { "content-type": context.from === "chat" ? "text/event-stream" : "application/json" } });
+      return new Response(context.from === "responses" ? "{}" : "data: done\n\n", { headers: { "content-type": context.from === "responses" ? "application/json" : "text/event-stream" } });
     },
   })]);
-  for (const [from, operation] of [["chat", "generate"], ["responses", "generate"], ["responses", "compact"]] as const) {
+  for (const [from, operation] of [["chat-completions", "generate"], ["responses", "generate"], ["responses", "compact"], ["anthropic", "generate"]] as const) {
     const context = httpContext("zcode-team/a", from, operation);
     const response = await registry.dispatchHttp(context, () => { throw new Error("意外进入 default"); });
     const actual = captured.at(-1)!;
@@ -135,7 +136,7 @@ test("HTTP handler 接收所有协议与操作上下文且返回 SSE 或普通�
     assert.equal(actual.operation, operation);
     assert.equal(actual.matchedPrefix, "zcode-team/");
     assert.equal(actual.matchedPattern, "zcode-*/*");
-    assert.equal(response.headers.get("content-type"), from === "chat" ? "text/event-stream" : "application/json");
+    assert.equal(response.headers.get("content-type"), from === "responses" ? "application/json" : "text/event-stream");
   }
 });
 

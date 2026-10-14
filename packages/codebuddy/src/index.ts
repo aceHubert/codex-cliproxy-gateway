@@ -186,7 +186,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
       if (!catalogStore || closed) return { models: [] };
       return updateCatalogMeta(await catalogStore.reload());
     },
-    async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -289,7 +289,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           cleanup();
           return fail(404, "此模型不在 CodeBuddy/WorkBuddy 当前账号的可服务目录内");
         }
-        const translated = translateCodebuddyRequest(input, model);
+        const translated = translateCodebuddyRequest(input, model, from);
         upstreamUrl = `${credential.endpoint}/v2/chat/completions`;
         // 从当前凭据重建身份头与会话归因，不采信入站客户端的身份或授权头。
         const context = contexts.resolve(request, credential);
@@ -319,8 +319,9 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           return fail(upstream.status, guidance, "upstream_error");
         }
         let chunks = "";
+        // anthropic 源默认非流式；responses/chat 源仅在客户端声明 stream 时流式返回。
         const stream = !mapResult && input.stream === true;
-        const response = await createCodebuddyResponse(upstream, {
+        const response = await createCodebuddyResponse(from, upstream, {
           model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
           sanitizeError: (error) => ({
             code: typeof error.code === "string" ? redact(error.code) : "upstream_error",
@@ -388,8 +389,7 @@ export function createCodebuddyPlugin(host: HostServices<AgentConfig>, dependenc
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        if (context.from !== "responses") return Response.json({ error: { type: "invalid_request_error", message: "Codebuddy 模型仅支持 Responses API" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
       },
       getCatalog: () => adapter.catalog().then(dedupeCodebuddyCatalog),
       refreshCatalog: () => adapter.refreshCatalog(),

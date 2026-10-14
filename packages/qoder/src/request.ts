@@ -1,47 +1,124 @@
-import { CodebuddyRequestError, translateCodebuddyRequest, type CodebuddyToolMap } from "@agent-proxy/codebuddy/request";
+import { BridgeConversionError, convertRequest } from "@agent-proxy/llm-bridge";
+import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+
+/**
+ * Qoder 请求准备：标准转换统一走 @agent-proxy/llm-bridge（三种客户端来源 →
+ * Chat Completions 风格内层），本模块只负责 Qoder 私有 infer 信封的消息/参数布局
+ * 与推理档位校验。不再依赖 CodeBuddy 适配器；codebuddy-reasoning-v1 旧信封按
+ * 只读兼容处理。
+ */
 
 export class QoderRequestError extends Error {
-  constructor(message: string) { super(message); this.name = "QoderRequestError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "QoderRequestError";
+  }
 }
 
 export interface QoderTranslatedRequest {
   /** 推理封套的消息字段；业务标识和模型配置由传输层添加。 */
   body: Record<string, unknown>;
-  tools: CodebuddyToolMap;
+  tools: ToolIdentityMap;
   dropped: string[];
 }
 
-/** 复用已经验证的 Responses → OpenAI 消息转换，只在此处处理 Qoder 参数布局。 */
-export function translateQoderRequest(input: Record<string, unknown>, modelKey: string, allowedEfforts?: string[]): QoderTranslatedRequest {
+type Json = Record<string, unknown>;
+
+const CODEBUDDY_REASONING_PREFIX = "codebuddy-reasoning-v1:";
+
+function isRecord(value: unknown): value is Json {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 旧 codebuddy-reasoning-v1 信封只读解码；跨模型或损坏载荷返回 undefined。 */
+function decodeLegacyReasoning(value: unknown, model: string): string | undefined {
+  if (typeof value !== "string" || !value.startsWith(CODEBUDDY_REASONING_PREFIX)) return undefined;
+  try {
+    const data: unknown = JSON.parse(Buffer.from(value.slice(CODEBUDDY_REASONING_PREFIX.length), "base64").toString("utf8"));
+    if (!isRecord(data) || data.model !== model || typeof data.reasoningContent !== "string") return undefined;
+    return data.reasoningContent;
+  } catch {
+    return undefined;
+  }
+}
+
+function legacySummaryText(item: Json): string | undefined {
+  if (item.encrypted_content !== undefined && item.encrypted_content !== null) return undefined;
+  if (!Array.isArray(item.summary)) return undefined;
+  const parts: string[] = [];
+  for (const raw of item.summary) {
+    if (!isRecord(raw) || raw.type !== "summary_text" || typeof raw.text !== "string") return undefined;
+    parts.push(raw.text);
+  }
+  return parts.length ? parts.join("") : undefined;
+}
+
+export function translateQoderRequest(
+  input: Json,
+  modelKey: string,
+  allowedEfforts?: string[],
+  from: ClientProtocol = "responses",
+): QoderTranslatedRequest {
   const reasoning = input.reasoning;
-  if (allowedEfforts && reasoning !== null && typeof reasoning === "object" && !Array.isArray(reasoning)) {
-    const effort = (reasoning as Record<string, unknown>).effort;
+  if (allowedEfforts && isRecord(reasoning)) {
+    const effort = reasoning.effort;
     if (typeof effort === "string" && !allowedEfforts.includes(effort)) {
       throw new QoderRequestError(`Qoder 当前模型不支持推理档位 ${effort}，请从模型目录的可用档位选择`);
     }
   }
-  let translated;
+  const replay = /deepseek/i.test(modelKey);
+  let converted;
   try {
-    translated = translateCodebuddyRequest(input, modelKey);
+    converted = convertRequest(from, "chat-completions", input, { model: modelKey });
   } catch (error) {
-    if (error instanceof CodebuddyRequestError) throw new QoderRequestError(error.message.replaceAll("CodeBuddy", "Qoder"));
+    if (error instanceof BridgeConversionError) throw new QoderRequestError(error.message);
     throw error;
   }
-  const messages = translated.body.messages as Array<Record<string, unknown>>;
-  // 通用转换在仅有 instructions 时不生成 system；Qoder 必须在消息内保留系统提示。
-  if (messages[0]?.role !== "system") messages.unshift({ role: "system", content: input.instructions ?? "" });
-  const parameters: Record<string, unknown> = {};
+
+  const messages = converted.body.messages as Json[];
+  // Qoder 服务要求首条消息为 system 且与顶层 system 一致；通用转换已把 instructions/
+  // developer 合并为首条 system（C1 修复），无系统内容时补空。
+  if (!Array.isArray(messages) || messages[0]?.role !== "system") {
+    messages.unshift({ role: "system", content: "" });
+  }
+  // 旧 codebuddy-reasoning-v1 信封按只读兼容回放到其后首条 assistant 消息。
+  if (replay && from === "responses" && Array.isArray(input.input)) {
+    const clientModel = typeof input.model === "string" && input.model ? input.model : modelKey;
+    const queue: string[] = [];
+    for (const item of input.input) {
+      if (!isRecord(item) || item.type !== "reasoning") continue;
+      const decoded = decodeLegacyReasoning(item.encrypted_content, clientModel) ?? legacySummaryText(item);
+      if (decoded !== undefined) queue.push(decoded);
+    }
+    let pending = queue.shift();
+    for (const message of messages) {
+      if (message.role !== "assistant" || pending === undefined) continue;
+      if (message.reasoning_content === undefined) {
+        message.reasoning_content = pending;
+        pending = queue.shift();
+      }
+    }
+  }
+  const parameters: Json = {};
   for (const field of ["max_tokens", "temperature", "top_p", "reasoning_effort", "tool_choice", "parallel_tool_calls"]) {
-    if (translated.body[field] !== undefined) parameters[field] = translated.body[field];
+    if (converted.body[field] !== undefined) parameters[field] = converted.body[field];
+  }
+  const dropped = converted.notes
+    .filter((note) => note.startsWith("已剥离内置工具声明") || note.startsWith("已剥离工具声明"))
+    .map((note) => note.replace(/^已剥离(?:内置工具声明|工具声明)?\s*/, "").split("（")[0]!.trim())
+    .filter((entry) => entry.length > 0 && entry !== "unknown");
+  if (dropped.length > 0 && typeof messages[0]!.content === "string") {
+    messages[0]!.content = `${messages[0]!.content}\n\n本通道无法执行以下服务器内置工具，已从本请求移除：${dropped.join("、")}。请勿声称已使用这些工具。`.replace(/^\n\n/, "");
   }
   return {
     body: {
       system: messages[0]!.content,
       messages,
-      tools: translated.body.tools ?? [],
+      tools: converted.body.tools ?? [],
       parameters,
     },
-    tools: translated.tools,
-    dropped: translated.dropped,
+    tools: converted.tools,
+    dropped,
   };
 }

@@ -205,7 +205,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
       await startup?.catch(() => {});
       return { models: (await Promise.all(regions.map((runtime) => runtime.store.reload()))).flatMap((catalog) => catalog.models) };
     },
-    async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       if (!regions.length || closed) return qoderError(404, "Qoder 适配器未启用");
       const model = typeof input.model === "string" ? input.model : "";
       const slug = qoderModelSlug(model);
@@ -261,7 +261,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
         signal.throwIfAborted();
         const levels = Array.isArray(entry.supported_reasoning_levels)
           ? entry.supported_reasoning_levels as Array<{ effort: string }> : [];
-        const translated = translateQoderRequest(input, modelKey, levels.map((level) => level.effort));
+        const translated = translateQoderRequest(input, modelKey, levels.map((level) => level.effort), from);
         // 完整上下文档位通过独立参数选择，不能用默认输入限制代替。
         if (typeof entry.context_window === "number") {
           (translated.body.parameters as Record<string, unknown>).context_length = entry.context_window;
@@ -281,7 +281,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
         const observed = upstream.body ? new Response(upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, output) { armTimeout(); output.enqueue(chunk); },
         })), { status: upstream.status, headers: upstream.headers }) : upstream;
-        const response = await translateQoderResponse(observed, {
+        const response = await translateQoderResponse(from, observed, {
           model, tools: translated.tools, stream: !mapResult && input.stream === true,
           signal,
           abort: () => { controller.abort(); },
@@ -338,8 +338,7 @@ export function createQoderPlugin(host: HostServices<AgentConfig>, dependencies:
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        if (context.from !== "responses") return Response.json({ error: { type: "invalid_request_error", message: "Qoder 模型仅支持 Responses API" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

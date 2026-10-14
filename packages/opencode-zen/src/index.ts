@@ -13,7 +13,7 @@ import {
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
 } from "./fingerprint.ts";
-import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
+
 import {
   OPENCODE_ZEN_PREFIX,
   classifyOpencodeZenProbeSignal,
@@ -23,7 +23,10 @@ import {
   opencodeZenUpstreamModel,
 } from "./catalog.ts";
 import type { OpencodeZenModelProtocol, OpencodeZenProbeResult } from "./catalog.ts";
-import { aggregateOpencodeZenResponsesStream, convertOpencodeZenRequest, translateOpencodeZenStream } from "./convert.ts";
+import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
+import { convertOpencodeZenRequest, renderOpencodeZenClientOutput } from "./convert.ts";
+import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createOpencodeZenUserAgentStore } from "./user-agent.ts";
 import type { OpencodeZenUserAgentStore } from "./user-agent.ts";
 
@@ -394,6 +397,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         const modelBaseUrl = (store?.endpoint(upstreamModel) ?? endpoint).replace(/\/+$/, "");
         const aggregateForClient = input.stream !== true;
         let upstream: Response;
+        let convertedTools: ToolIdentityMap = new Map();
         if (protocol === "chat") {
           const { body } = injectOpencodeZenFingerprintBody({ ...input, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []);
           abort.signal.throwIfAborted();
@@ -404,10 +408,11 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
             signal: abort.signal,
           });
         } else {
-          // 非 chat 协议模型：请求转成模型协议（chat 为规范中间层），上游流反向转回 chat。
-          const converted = convertOpencodeZenRequest("chat", protocol, input);
+          // 非 chat 协议模型：请求按客户端协议单跳转换为模型协议，上游流由桥接渲染回客户端协议。
+          const converted = convertOpencodeZenRequest("chat-completions", protocol, input);
+          convertedTools = converted.tools;
           const body: Record<string, unknown> = {
-            ...converted,
+            ...converted.body,
             model: upstreamModel,
             stream: true,
             ...(protocol === "responses" ? { prompt_cache_key: session } : {}),
@@ -433,14 +438,6 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           cleanup();
           return fail(safe.status, safe.message, safe.type);
         }
-        const stream = protocol === "chat" ? upstream.body : translateOpencodeZenStream(upstream.body, protocol, "chat");
-        if (aggregateForClient) {
-          const completion = await aggregateOpencodeZenStreamToCompletion(stream);
-          const response = Response.json(completion);
-          log(200, JSON.stringify(completion), response.headers);
-          cleanup();
-          return response;
-        }
         const responseHeaders = new Headers({
           "content-type": protocol === "chat"
             ? upstream.headers.get("content-type") ?? "text/event-stream"
@@ -448,6 +445,32 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         });
         const cacheControl = upstream.headers.get("cache-control");
         if (cacheControl) responseHeaders.set("cache-control", cacheControl);
+        if (protocol !== "chat") {
+          // 跨协议：经桥接事件渲染回 chat-completions 客户端（流式 SSE 或聚合 JSON）。
+          const rendered = await renderOpencodeZenClientOutput(protocol, "chat-completions", upstream, {
+            model: String(input.model ?? upstreamModel), stream: !aggregateForClient, tools: convertedTools,
+          });
+          const headers = new Headers(rendered.headers);
+          if (cacheControl && !headers.has("cache-control")) headers.set("cache-control", cacheControl);
+          if (aggregateForClient) {
+            const completion = await rendered.text();
+            log(200, completion, headers);
+            cleanup();
+            return new Response(completion, { status: rendered.status, headers });
+          }
+          const [toClient, toLog] = rendered.body!.tee();
+          void new Response(toLog).text().then((text) => log(200, text, headers)).catch(() => {});
+          cleanup();
+          return new Response(toClient, { status: rendered.status, headers });
+        }
+        const stream = upstream.body;
+        if (aggregateForClient) {
+          const completion = await aggregateOpencodeZenStreamToCompletion(stream);
+          const response = Response.json(completion);
+          log(200, JSON.stringify(completion), response.headers);
+          cleanup();
+          return response;
+        }
         // 流式透传：用 tee 副本留痕请求日志，避免读完流令客户端拿不到增量。
         const [toClient, toLog] = stream.tee();
         void new Response(toLog).text().then((text) => log(200, text, responseHeaders)).catch(() => {});
@@ -527,6 +550,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         const modelBaseUrl = (store?.endpoint(upstreamModel) ?? endpoint).replace(/\/+$/, "");
         const clientStreams = input.stream === true;
         let upstream: Response;
+        let preparedTools: ToolIdentityMap = new Map();
         if (protocol === "responses") {
           // responses 协议模型直通：仅替换模型 id 并补齐会话缓存键。
           const body = {
@@ -539,13 +563,14 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           });
         } else {
           const converted = convertOpencodeZenRequest("responses", protocol, input);
+          preparedTools = converted.tools;
           let body: Record<string, unknown>;
           let extraHeaders: Record<string, string> = {};
           if (protocol === "chat") {
             // chat 端点门禁要求官方模板在场：转换后仍走注入（带工具时 agent 模板 + 官方工具集）。
-            body = injectOpencodeZenFingerprintBody({ ...converted, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
+            body = injectOpencodeZenFingerprintBody({ ...converted.body, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
           } else {
-            body = { ...converted, model: upstreamModel, stream: true };
+            body = { ...converted.body, model: upstreamModel, stream: true };
             if (protocol === "anthropic") extraHeaders = { "anthropic-version": "2023-06-01" };
           }
           upstream = await fetchImpl(opencodeZenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
@@ -579,19 +604,19 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           cleanup();
           return new Response(toClient, { status: 200, headers: responseHeaders });
         }
-        const translated = translateOpencodeZenStream(upstream.body, protocol, "responses");
+        const rendered = await renderOpencodeZenClientOutput(protocol, "responses", upstream, {
+          model: String(input.model ?? upstreamModel), stream: clientStreams, tools: preparedTools,
+        });
         if (!clientStreams) {
-          const completion = await aggregateOpencodeZenResponsesStream(translated);
-          const response = Response.json(completion);
-          log(200, JSON.stringify(completion), response.headers);
+          const completion = await rendered.text();
+          log(200, completion, rendered.headers);
           cleanup();
-          return response;
+          return new Response(completion, { status: rendered.status, headers: rendered.headers });
         }
-        const responseHeaders = new Headers({ "content-type": "text/event-stream" });
-        const [toClient, toLog] = translated.tee();
-        void new Response(toLog).text().then((text) => log(200, text, responseHeaders)).catch(() => {});
+        const [toClient, toLog] = rendered.body!.tee();
+        void new Response(toLog).text().then((text) => log(200, text, rendered.headers)).catch(() => {});
         cleanup();
-        return new Response(toClient, { status: 200, headers: responseHeaders });
+        return new Response(toClient, { status: rendered.status, headers: rendered.headers });
       } catch (error) {
         abort.abort();
         cleanup();
@@ -599,6 +624,142 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
         logGatewayError(sink?.processLog, {
           requestTime, method: request.method, url: incoming.pathname, status: 502,
           message: `zen responses forward failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
+          durationMs: Date.now() - start,
+        });
+        return fail(502, "OpenCode Zen 上游请求失败", "upstream_error");
+      }
+    },
+    /**
+     * /v1/messages 拦截入口：anthropic 协议模型直通上游；chat / responses / google
+     * 协议模型单跳转换后由桥接渲染回 Anthropic Messages 事件或完整 Message JSON。
+     */
+    async forwardMessages(request: Request, input: Record<string, unknown>): Promise<Response> {
+      const start = Date.now();
+      const requestTime = localTime();
+      const incoming = new URL(request.url);
+      const group = logGroupFromPath(incoming.pathname);
+      let logged = false;
+      const log = (status: number, resBody: string, headers = new Headers()) => {
+        if (logged) return;
+        logged = true;
+        const durationMs = Date.now() - start;
+        logExchange(sink, group, {
+          requestTime, method: request.method, url: incoming.pathname,
+          // 请求日志只记录模型与流式标记，不落提示词、工具内容或任何凭据。
+          reqHeaders: new Headers(), reqBody: { model: input.model, stream: input.stream === true },
+          status, resHeaders: headers, resBody, durationMs,
+        }, "opencode-zen");
+        if (status >= 400) {
+          logGatewayError(sink?.processLog, { requestTime, method: request.method, url: incoming.pathname, status, message: resBody.slice(0, 500), durationMs });
+        } else {
+          logRequestSummary(sink?.processLog, { requestTime, method: request.method, url: incoming.pathname, status, durationMs });
+        }
+      };
+      const fail = (status: number, message: string, type?: string) => {
+        const response = opencodeZenError(status, message, type);
+        log(status, JSON.stringify({ error: { type, message } }), response.headers);
+        return response;
+      };
+      if (!enabled || closed) return fail(503, "OpenCode Zen 入口未启用或网关已关闭", "configuration_error");
+      const rawModel = typeof input.model === "string" ? input.model : "";
+      const normalized = isOpencodeZenModel(rawModel)
+        ? rawModel.slice(0, OPENCODE_ZEN_PREFIX.length).toLowerCase() + rawModel.slice(OPENCODE_ZEN_PREFIX.length)
+        : rawModel;
+      const upstreamModel = opencodeZenUpstreamModel(normalized);
+      if (!upstreamModel) return fail(400, `OpenCode Zen 模型必须使用 ${OPENCODE_ZEN_PREFIX} 前缀`);
+      const abort = new AbortController();
+      const onAbort = () => abort.abort(request.signal.reason);
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        request.signal.removeEventListener("abort", onAbort);
+        activeRequests.delete(abort);
+      };
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      activeRequests.add(abort);
+      try {
+        if (request.signal.aborted) onAbort();
+        abort.signal.throwIfAborted();
+        const session = sessionResolver.resolve(request.headers);
+        const headers = opencodeZenHeaders(session);
+        const protocol = store?.protocol(upstreamModel) ?? "chat";
+        const modelBaseUrl = (store?.endpoint(upstreamModel) ?? endpoint).replace(/\/+$/, "");
+        const clientStreams = input.stream === true;
+        let upstream: Response;
+        let preparedTools: ToolIdentityMap = new Map();
+        if (protocol === "anthropic") {
+          // anthropic 协议模型直通：仅替换模型 id；上限为 anthropic 必填字段，缺省补服务默认。
+          const body = {
+            ...input,
+            model: upstreamModel,
+            ...(input.max_tokens === undefined ? { max_tokens: 8192 } : {}),
+          };
+          upstream = await fetchImpl(`${modelBaseUrl}/messages`, {
+            method: "POST", headers: { ...headers, "anthropic-version": "2023-06-01" }, body: JSON.stringify(body), signal: abort.signal,
+          });
+        } else {
+          const converted = convertOpencodeZenRequest("anthropic", protocol, input);
+          preparedTools = converted.tools;
+          let body: Record<string, unknown>;
+          let extraHeaders: Record<string, string> = {};
+          if (protocol === "chat") {
+            body = injectOpencodeZenFingerprintBody({ ...converted.body, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
+          } else {
+            body = { ...converted.body, model: upstreamModel, stream: true };
+            if (protocol === "responses") extraHeaders = {};
+          }
+          upstream = await fetchImpl(opencodeZenProtocolUrl(modelBaseUrl, protocol, upstreamModel), {
+            method: "POST", headers: { ...headers, ...extraHeaders }, body: JSON.stringify(body), signal: abort.signal,
+          });
+        }
+        if (!upstream.ok || !upstream.body) {
+          const errorBody = await upstream.text().catch(() => "");
+          const safe = normalizeOpencodeZenUpstreamError(upstream.status, errorBody);
+          logGatewayError(sink?.processLog, {
+            requestTime, method: request.method, url: incoming.pathname,
+            status: safe.status,
+            message: `zen upstream ${upstream.status}: ${errorBody.slice(0, 1_024)}`,
+            durationMs: Date.now() - start,
+          });
+          cleanup();
+          return fail(safe.status, safe.message, safe.type);
+        }
+        if (protocol === "anthropic") {
+          // 直通：流式原样透传；非流式原样返回上游 JSON。
+          if (!clientStreams) {
+            const text = await upstream.text();
+            const responseHeaders = new Headers({ "content-type": upstream.headers.get("content-type") ?? "application/json" });
+            log(200, text, responseHeaders);
+            cleanup();
+            return new Response(text, { status: 200, headers: responseHeaders });
+          }
+          const responseHeaders = new Headers({ "content-type": upstream.headers.get("content-type") ?? "text/event-stream" });
+          const [toClient, toLog] = upstream.body.tee();
+          void new Response(toLog).text().then((text) => log(200, text, responseHeaders)).catch(() => {});
+          cleanup();
+          return new Response(toClient, { status: 200, headers: responseHeaders });
+        }
+        const rendered = await renderOpencodeZenClientOutput(protocol, "anthropic", upstream, {
+          model: String(input.model ?? upstreamModel), stream: clientStreams, tools: preparedTools,
+        });
+        if (!clientStreams) {
+          const message = await rendered.text();
+          log(200, message, rendered.headers);
+          cleanup();
+          return new Response(message, { status: rendered.status, headers: rendered.headers });
+        }
+        const [toClient, toLog] = rendered.body!.tee();
+        void new Response(toLog).text().then((text) => log(200, text, rendered.headers)).catch(() => {});
+        cleanup();
+        return new Response(toClient, { status: rendered.status, headers: rendered.headers });
+      } catch (error) {
+        abort.abort();
+        cleanup();
+        if (request.signal.aborted) return fail(499, "OpenCode Zen 请求已取消", "request_cancelled");
+        logGatewayError(sink?.processLog, {
+          requestTime, method: request.method, url: incoming.pathname, status: 502,
+          message: `zen messages forward failed: ${error instanceof Error ? `${error.name}: ${error.message}` : String(error)}`,
           durationMs: Date.now() - start,
         });
         return fail(502, "OpenCode Zen 上游请求失败", "upstream_error");
@@ -635,7 +796,9 @@ export function createOpencodeZenPlugin(host: HostServices<AgentConfig>, depende
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
         if (context.operation === "compact") return Response.json({ error: { type: "invalid_request_error", message: "OpenCode Zen 不支持上下文压缩" } }, { status: 400 });
-        return context.from === "responses" ? adapter.forwardResponses(context.request, input as Record<string, unknown>) : adapter.forward(context.request, input as Record<string, unknown>);
+        if (context.from === "responses") return adapter.forwardResponses(context.request, input as Record<string, unknown>);
+        if (context.from === "anthropic") return adapter.forwardMessages(context.request, input as Record<string, unknown>);
+        return adapter.forward(context.request, input as Record<string, unknown>);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

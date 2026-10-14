@@ -268,7 +268,7 @@ test("developer 消息含图片时仍显式拒绝", () => {
         { type: "input_image", image_url: "data:image/png;base64,AAA" },
       ],
     }],
-  }, "gpt-5.6-luna"), /developer 消息不支持图片/);
+  }, "gpt-5.6-luna"), /developer 消息不支持/);
 });
 
 test("工具输出里的图片提升到 user 消息，tool 消息保持纯文本", () => {

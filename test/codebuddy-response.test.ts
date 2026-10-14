@@ -41,7 +41,7 @@ test("文本流：message 条目生命周期与 usage 汇总", async () => {
     chunk({ content: "好" }),
     chunk({}, "stop", { prompt_tokens: 7, completion_tokens: 2, total_tokens: 9, prompt_tokens_details: { cached_tokens: 3 } }),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/gpt-5.6-luna", tools: toolsMap(), stream: true });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "codebuddy-intl/gpt-5.6-luna", tools: toolsMap(), stream: true });
   const result = await completed(response);
   assert.equal(result.status, "completed");
   assert.equal(result.model, "codebuddy-intl/gpt-5.6-luna");
@@ -59,7 +59,7 @@ test("非流式客户端：SSE 聚合为完整 Responses JSON", async () => {
     chunk({ content: "答案" }),
     chunk({}, "stop", { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9, completion_tokens_details: { reasoning_tokens: 2 } }),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/deepseek-m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "codebuddy-intl/deepseek-m", tools: toolsMap(), stream: false });
   assert.ok(response.headers.get("content-type")?.includes("application/json"));
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");
@@ -77,7 +77,7 @@ test("reasoning_content 映射为 reasoning 摘要条目与增量事件", async 
     chunk({ content: "答" }),
     chunk({}, "stop"),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "deepseek-m", tools: toolsMap(), stream: true });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "deepseek-m", tools: toolsMap(), stream: true });
   const text = await response.text();
   assert.match(text, /event: response.reasoning_summary_text.delta/);
   assert.match(text, /event: response.reasoning_summary_part.done/);
@@ -95,7 +95,7 @@ test("空 reasoning_content 仍保留可回放的字段存在性", async () => {
     chunk({ tool_calls: [{ index: 0, id: "call_a", type: "function", function: { name: "read_file", arguments: "{}" } }] }),
     chunk({}, "tool_calls"),
   ]);
-  const response = await createCodebuddyResponse(upstream, {
+  const response = await createCodebuddyResponse("responses", upstream, {
     model: "codebuddy-intl/deepseek-v4.1-flash",
     tools: toolsMap([["read_file", { name: "read_file", custom: false }]]),
     stream: false,
@@ -118,7 +118,7 @@ test("tool_calls：参数增量聚合，custom 工具还原为 custom_tool_call"
     chunk({ tool_calls: [{ index: 1, id: "call_b", type: "function", function: { name: "apply_patch", arguments: "{\"input\":\"*** patch\"}" } }] }),
     chunk({}, "tool_calls"),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "m", tools, stream: false });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "m", tools, stream: false });
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");
   const call = result.output[0];
@@ -140,7 +140,7 @@ test("refusal 映射为 refusal 内容分部", async () => {
     chunk({ refusal: "帮忙" }),
     chunk({}, "stop"),
   ]);
-  const response = await createCodebuddyResponse(upstream, { model: "m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "m", tools: toolsMap(), stream: false });
   const result = await response.json() as Json;
   const message = result.output[0];
   assert.equal(message.type, "message");
@@ -151,7 +151,7 @@ test("refusal 映射为 refusal 内容分部", async () => {
 test("finish_reason length/content_filter 映射为 incomplete", async () => {
   for (const [reason, expected] of [["length", "max_output_tokens"], ["content_filter", "content_filter"]] as const) {
     const upstream = sse([chunk({ content: "部分" }, reason)]);
-    const response = await createCodebuddyResponse(upstream, { model: "m", tools: toolsMap(), stream: false });
+    const response = await createCodebuddyResponse("responses", upstream, { model: "m", tools: toolsMap(), stream: false });
     const result = await response.json() as Json;
     assert.equal(result.status, "incomplete");
     assert.deepEqual(result.incomplete_details, { reason: expected });
@@ -160,7 +160,7 @@ test("finish_reason length/content_filter 映射为 incomplete", async () => {
 
 test("上游 error 帧转 failed，未声明的工具报错", async () => {
   const errorFrame = `data: ${JSON.stringify({ error: { message: "quota exceeded", code: 429 } })}\n\n`;
-  const failed = await createCodebuddyResponse(new Response(errorFrame, { headers: { "content-type": "text/event-stream" } }), {
+  const failed = await createCodebuddyResponse("responses", new Response(errorFrame, { headers: { "content-type": "text/event-stream" } }), {
     model: "m", tools: toolsMap(), stream: false,
   });
   const result = await failed.json() as Json;
@@ -168,7 +168,7 @@ test("上游 error 帧转 failed，未声明的工具报错", async () => {
   assert.equal(result.error.message, "quota exceeded");
 
   const undeclared = sse([chunk({ tool_calls: [{ index: 0, id: "c", type: "function", function: { name: "ghost", arguments: "{}" } }] }), chunk({}, "tool_calls")]);
-  const response = await createCodebuddyResponse(undeclared, { model: "m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse("responses", undeclared, { model: "m", tools: toolsMap(), stream: false });
   const rejected = await response.json() as Json;
   assert.equal(rejected.status, "failed");
   assert.match(rejected.error.message, /未声明的工具/);
@@ -187,7 +187,7 @@ test("整包 JSON 上游重放为同一事件序列", async () => {
     }],
     usage: { prompt_tokens: 3, completion_tokens: 3, total_tokens: 6 },
   });
-  const response = await createCodebuddyResponse(upstream, { model: "codebuddy-intl/m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse("responses", upstream, { model: "codebuddy-intl/m", tools: toolsMap(), stream: false });
   const result = await response.json() as Json;
   assert.equal(result.status, "completed");
   assert.equal(result.output[0].type, "reasoning");
@@ -217,7 +217,7 @@ test("整包 JSON 保留空 reasoning_content 并为并行工具补 index", asyn
     ["read_a", { name: "read_a", custom: false }],
     ["read_b", { name: "read_b", custom: false }],
   ]);
-  const response = await createCodebuddyResponse(upstream, {
+  const response = await createCodebuddyResponse("responses", upstream, {
     model: "codebuddy-intl/deepseek-v4.1-flash", tools, stream: false,
   });
   const result = await response.json() as Json;
@@ -231,12 +231,12 @@ test("整包 JSON 保留空 reasoning_content 并为并行工具补 index", asyn
 
 test("无效 SSE JSON 与不支持的 finish_reason 报协议错误", async () => {
   const bad = new Response("data: {oops\n\ndata: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
-  const response = await createCodebuddyResponse(bad, { model: "m", tools: toolsMap(), stream: false });
+  const response = await createCodebuddyResponse("responses", bad, { model: "m", tools: toolsMap(), stream: false });
   assert.equal(response.status, 502);
   const result = await response.json() as Json;
   assert.equal(result.status, "failed");
 
   const weird = sse([chunk({ content: "x" }, "function_call")]);
-  const response2 = await createCodebuddyResponse(weird, { model: "m", tools: toolsMap(), stream: false });
+  const response2 = await createCodebuddyResponse("responses", weird, { model: "m", tools: toolsMap(), stream: false });
   assert.equal(response2.status, 502);
 });

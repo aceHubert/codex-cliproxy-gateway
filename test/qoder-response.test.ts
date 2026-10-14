@@ -32,7 +32,7 @@ test("Qoder 信封 SSE 聚合中文、推理和 usage，保留 billable=false �
     + envelope({ choices: [], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13, prompt_tokens_details: { cached_tokens: 2 }, credits: 0.001, original_credits: 0.002, billable: false } })
     + envelope("[DONE]") + finish;
   let observed: Json | undefined;
-  const response = await translateQoderResponse(upstream(text, 1), { ...options, onComplete: (value) => { observed = value; } });
+  const response = await translateQoderResponse("responses", upstream(text, 1), { ...options, onComplete: (value) => { observed = value; } });
   const result = await response.json() as Json;
   assert.equal(response.status, 200);
   assert.equal(result.status, "completed");
@@ -46,7 +46,7 @@ test("Qoder 信封 SSE 聚合中文、推理和 usage，保留 billable=false �
 test("Qoder 流式 Responses 序号连续且完成事件包含计费字段", async () => {
   const input = envelope(delta({ content: "完成" }, "stop"))
     + envelope({ usage: { prompt_tokens: 2, completion_tokens: 1, billable: false } }) + finish;
-  const response = await translateQoderResponse(upstream(input), { ...options, stream: true });
+  const response = await translateQoderResponse("responses", upstream(input), { ...options, stream: true });
   const events = (await response.text()).split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.split("\ndata: ")[1]!) as Json);
   assert.deepEqual(events.map((event) => event.sequence_number), events.map((_, index) => index));
   assert.ok(events.some((event) => event.type === "response.output_text.delta" && event.delta === "完成"));
@@ -57,7 +57,7 @@ test("Qoder 流式 Responses 序号连续且完成事件包含计费字段", asy
 
 test("Qoder 内层 DONE 后继续读取 usage，并拒绝缺失 finish 的断流", async () => {
   for (const input of [envelope(delta({ content: "部分回答" }, "stop")), envelope("[DONE]")]) {
-    const response = await translateQoderResponse(upstream(input), options);
+    const response = await translateQoderResponse("responses", upstream(input), options);
     const result = await response.json() as Json;
     assert.equal(response.status, 502);
     assert.equal(result.status, "failed");
@@ -71,7 +71,7 @@ test("Qoder 重编号 index=0 的并行工具调用且能返回工具结果继�
   const input = envelope(delta({ tool_calls: [{ index: 0, id: "call_read", type: "function", function: { name: "read", arguments: "{\"path\":" } }] }))
     + envelope(delta({ tool_calls: [{ index: 0, function: { arguments: "\"a\"}" } }] }))
     + envelope(delta({ tool_calls: [{ index: 0, id: "call_list", type: "function", function: { name: "list", arguments: "{}" } }] }, "tool_calls")) + finish;
-  const response = await translateQoderResponse(upstream(input), { ...options, tools: initial.tools });
+  const response = await translateQoderResponse("responses", upstream(input), { ...options, tools: initial.tools });
   const result = await response.json() as Json;
   const calls = result.output as Json[];
   assert.deepEqual(calls.map((call) => call.call_id), ["call_read", "call_list"]);
@@ -87,7 +87,7 @@ test("Qoder 重编号 index=0 的并行工具调用且能返回工具结果继�
 test("Qoder custom 工具响应还原 input，命名空间保持稳定", async () => {
   const translated = translateQoderRequest({ input: "修改", tools: [{ type: "namespace", name: "fs", tools: [{ type: "custom", name: "patch" }] }] }, "qfmodel");
   const name = [...translated.tools.keys()][0]!;
-  const response = await translateQoderResponse(upstream(envelope(delta({ tool_calls: [{ id: "call_patch", index: 0, type: "function", function: { name, arguments: "{\"input\":\"补丁\"}" } }] }, "tool_calls")) + finish), { ...options, tools: translated.tools });
+  const response = await translateQoderResponse("responses", upstream(envelope(delta({ tool_calls: [{ id: "call_patch", index: 0, type: "function", function: { name, arguments: "{\"input\":\"补丁\"}" } }] }, "tool_calls")) + finish), { ...options, tools: translated.tools });
   const item = ((await response.json() as Json).output as Json[])[0]!;
   assert.equal(item.type, "custom_tool_call");
   assert.equal(item.input, "补丁");
@@ -96,7 +96,7 @@ test("Qoder custom 工具响应还原 input，命名空间保持稳定", async (
 });
 
 test("Qoder 长度截断标记 incomplete 而不是 failed", async () => {
-  const response = await translateQoderResponse(upstream(envelope(delta({ content: "未完" }, "length")) + finish), options);
+  const response = await translateQoderResponse("responses", upstream(envelope(delta({ content: "未完" }, "length")) + finish), options);
   const result = await response.json() as Json;
   assert.equal(response.status, 200);
   assert.equal(result.status, "incomplete");
@@ -104,7 +104,7 @@ test("Qoder 长度截断标记 incomplete 而不是 failed", async () => {
 });
 
 test("Qoder 非 200 信封返回 failed 并经过错误脱敏回调", async () => {
-  const response = await translateQoderResponse(upstream(envelope({ code: "unauthorized", message: "敏感上游信息" }, 401)), {
+  const response = await translateQoderResponse("responses", upstream(envelope({ code: "unauthorized", message: "敏感上游信息" }, 401)), {
     ...options, sanitizeError: (error) => ({ ...error, message: "请重新登录 Qoder CLI" }),
   });
   const result = await response.json() as Json;
@@ -114,7 +114,7 @@ test("Qoder 非 200 信封返回 failed 并经过错误脱敏回调", async () =
 
 test("Qoder 错误信封保留状态和数字代码，兼容 msg 字段供安全分类", async () => {
   let original: Json | undefined;
-  const response = await translateQoderResponse(upstream(envelope({ code: 403, msg: "token expired" }, 401)), {
+  const response = await translateQoderResponse("responses", upstream(envelope({ code: 403, msg: "token expired" }, 401)), {
     ...options, sanitizeError: (error) => {
       original = error.upstream_error as Json;
       return { code: "safe_auth_error", message: "请更新登录" };
@@ -129,14 +129,14 @@ test("Qoder 错误信封保留状态和数字代码，兼容 msg 字段供安全
 
 test("Qoder 拒绝畸形信封、无效 UTF-8 和残缺 SSE", async () => {
   for (const text of ["data: {broken}\n\n", "data: {}", envelope({ choices: [] }).replace(/\n\n$/, ""), "data: [DONE]\n\n"]) {
-    const response = await translateQoderResponse(upstream(text), options);
+    const response = await translateQoderResponse("responses", upstream(text), options);
     const result = await response.json() as Json;
     assert.equal(response.status, 502);
     assert.equal(result.status, "failed");
     assert.doesNotMatch(String((result.error as Json).message), /CodeBuddy/);
   }
   const bad = new Response(new Uint8Array([0xff]), { headers: { "content-type": "text/event-stream" } });
-  assert.equal((await translateQoderResponse(bad, options)).status, 502);
+  assert.equal((await translateQoderResponse("responses", bad, options)).status, 502);
 });
 
 test("Qoder finish 后释放上游读取并执行中止回调", async () => {
@@ -146,7 +146,7 @@ test("Qoder finish 后释放上游读取并执行中止回调", async () => {
     start(controller) { controller.enqueue(encoder.encode(envelope(delta({ content: "完成" }, "stop")) + finish)); },
     cancel() { canceled = true; },
   }));
-  const response = await translateQoderResponse(source, { ...options, abort: () => { aborted = true; } });
+  const response = await translateQoderResponse("responses", source, { ...options, abort: () => { aborted = true; } });
   assert.equal(response.status, 200);
   assert.equal(canceled, true);
   assert.equal(aborted, true);
@@ -159,7 +159,7 @@ test("Qoder 客户端取消会释放没有 finish 的上游连接", { timeout: 1
     cancel() { canceled = true; },
   }));
   const controller = new AbortController();
-  const response = await translateQoderResponse(source, { ...options, stream: true, signal: controller.signal });
+  const response = await translateQoderResponse("responses", source, { ...options, stream: true, signal: controller.signal });
   const reader = response.body!.getReader();
   while (true) {
     const frame = new TextDecoder().decode((await reader.read()).value);

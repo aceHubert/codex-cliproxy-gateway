@@ -17,7 +17,7 @@ import {
   zcodeUpstreamModel,
 } from "./catalog.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
-import { createZcodeResponse, type ZcodeGatewayToolsHook } from "./response.ts";
+import { createZcodeClientResponse, type ZcodeGatewayToolsHook } from "./response.ts";
 import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
@@ -323,7 +323,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       if (refreshPromise) await refreshPromise;
       return readCatalog("reload");
     },
-    async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -433,7 +433,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         abort.signal.throwIfAborted();
         const model = zcodeUpstreamModel(requested, snapshot);
         if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
-        const translated = translateZcodeRequest(input, model);
+        const translated = translateZcodeRequest(input, model, from);
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
         const routedUrl = endpointRouting
           // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中转）；resolve 内部 fail-open，失败保持原 URL。
@@ -558,7 +558,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         }
         let chunks = "";
         const stream = !mapResult && input.stream === true;
-        const response = await createZcodeResponse(upstream, {
+        const response = await createZcodeClientResponse(from, upstream, {
           model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
           gatewayTools,
           sanitizeError: (error) => ({
@@ -625,8 +625,7 @@ export function createZcodePlugin(host: HostServices<AgentConfig>, dependencies:
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        if (context.from !== "responses") return Response.json({ error: { type: "invalid_request_error", message: "Zcode 模型仅支持 Responses API" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

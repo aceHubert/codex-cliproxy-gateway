@@ -1,6 +1,6 @@
 # llm-bridge 封装、Responses / Chat Completions / Anthropic 端点兼容与 agent 适配
 
-状态：已建立独立计划，转换与 agent 调用适配尚未实施。
+状态：已完成并归档（2026-10-12 用户验收）。B0–B4 已实施，通过全量 check（1038 项）与三协议兼容验收（逐家 fake-fetch 矩阵、zen Messages 端到端与 gemini 方向回归）。
 创建日期：2026-10-10。
 协议分析基线：main a20587d（v0.10.0）；外部 npm 依赖 llm-bridge@2.0.1。
 实施基线：完成并验收后的 monorepo 重构结果；开始实施时记录其实际提交，不从 main 另建一套目录重构。
@@ -353,11 +353,11 @@ Chat Completions ↔ Responses 的标准字段和响应转换属于本计划的�
 - [x] 合入原协议抽离的通用能力与回归要求，撤下旧独立协议抽离计划；业务插件部分由 monorepo 计划承接。
 - [x] 以 main 核对五家转换链路，复现 L1–L6、C1/C2，补充逐家前后处理与测试要求；确认 Responses/Chat Completions/Anthropic 三类入口目标。
 - [x] 按最新决策将 AGY 改为包内独立请求/响应转换；llm-bridge 只处理规范协议，规范 Gemini 能力为 Zen 保留。
-- [ ] B0 库能力、公开 API、标准字段与错误合同收敛。
-- [ ] B1 请求封装与通用 fix。
-- [ ] B2 响应/流式/聚合/错误/取消。
-- [ ] B3 各 agent 调用适配与 fake-fetch 测试。
-- [ ] B4 联合验证、说明、历史记录与归档。
+- [x] B0 库能力、公开 API、标准字段与错误合同收敛（2026-10-11：L1–L6、C1/C2 以 2.0.1 实测探针固化；公开 API 收敛为 convertRequest / parseUpstreamEvents / ResponsesOutputShell / create*ClientOutput / clientErrorResponse）。
+- [x] B1 请求封装与通用 fix（packages/llm-bridge/src/request.ts：三来源单跳转换、同协议直通、custom/namespace 身份表、strict/stop/parallel/token 映射；test/llm-bridge-convert.test.ts 23 项含全部失败反例）。
+- [x] B2 响应/流式/聚合/错误/取消（src/events.ts 四协议严格解析 + src/output.ts 三客户端渲染与 Responses 外壳；空 reasoning/未知结束原因/取消唤醒/计费透传有合同；test/llm-bridge-response.test.ts 14 项）。
+- [x] B3 各 agent 调用适配与 fake-fetch 测试（zcode/codebuddy/qoder/zen 请求层统一 convertRequest；qoder 解除 codebuddy 依赖；zen 删除 responsesToChatBody 中间层并新增 /messages 入口；agy 三来源归一化 + 自产 Responses SSE 独立渲染 chat/anthropic，零桥接依赖；test/llm-bridge-boundaries.test.ts 静态边界检查）。
+- [x] B4 联合验证、说明、历史记录与归档（plugin-api ClientProtocol 统一 chat-completions/responses/anthropic 并新增 /messages 端点识别；gateway-composition 压缩包装仅作用于 Responses；bun run check 全绿 1038 tests；三协议顺序验收为主题分组冒烟（Responses 200 / Chat Completions 119 / Anthropic 68 项），逐家三协议 fake-fetch 由 test/agent-protocol-matrix.test.ts、test/agy-protocol.test.ts 与 zen Messages 端到端补齐）。
 
 ## 决策记录
 
@@ -372,3 +372,6 @@ Chat Completions ↔ Responses 的标准字段和响应转换属于本计划的�
 - 2026-10-11：用户确认 AGY 不接入 llm-bridge，在 @agent-proxy/agy 内独立封装 CloudCodeAssist 请求与响应转换；llm-bridge 仅封装规范协议。此决策覆盖此前“所有 agent 必须 convertRequest”及“AGY 经 Gemini bridge”的要求；其他四类 agent 的统一转换要求不变，规范 Gemini 桥接仍用于 Zen。包依赖与源码调整在 monorepo 验收后按 B3 实施，当前只更新文档。
 - 2026-10-11：用户要求协议标识明确为 `chat-completions`，不使用含混短名；名称使用 Chat Completions，HTTP `/chat/completions` 和响应 `chat.completion`/`chat.completion.chunk` 保留标准形状。源码命名统一随转换计划实施，不要求当前 monorepo 迁移会话改变协议逻辑。
 - 2026-10-11：用户再次确认个性化特性不能封装到 bridge 内部。ZCode server tool/vision/多腿与 Qoder 排队/等待/重发全部归插件，禁止通过 hooks/options/回调变相注入 bridge；标准工具数据转换与工具执行分别验收，公共取消能力不承担实际请求调度。
+- 2026-10-11（实施）：实施基线为已验收 monorepo 提交 fafd357（worktree llm-bridge-conversion）。公开协议名落为 chat-completions/responses/anthropic/gemini；anthropic 目标 max_tokens 缺省 1024 占位并在 notes 记录，effort → thinking 预算归插件；Responses 私有 history 项（reasoning/服务器调用）由 zcode/agy 插件切段处理，桥接只转换标准段；取消/超时终态经 shell.terminal + drain 保序输出（Qoder 超时 504 合同保持）。
+- 2026-10-11（验收评审修复）：gemini STOP/MAX_TOKENS 结束原因映射补齐（阻断级：正常完成被误判 other 而 502）；responses 目标调用历史统一映射名（L4 三处一致，chat/anthropic 源在源规范化阶段改写）；chat 工具 id/name/arguments 分帧改为待定调用缓存 + 按序补发（不再静默丢弃）；anthropic 源 thinking/signature/cache_control 跨协议丢弃补显式 notes；ZCode 非 Responses 源 token 上限推导修复（max_tokens 参与预算压缩与 anthropic thinking 校验）；AGY anthropic 源 system 并入 systemInstruction、非流式客户端改为内部恒 SSE + 渲染层聚合。逐家三协议 fake-fetch 矩阵补齐（test/agent-protocol-matrix.test.ts、test/agy-protocol.test.ts、zen Messages 入口端到端）。
+- 2026-10-12：用户验收通过并要求归档（不提交）。验收复核确认三项遗留已修正——测试调试语句清除、llm-bridge 包描述更新、计划与历史记录测试数字对齐实际（1038 项 / 30 tracked + 12 untracked / +1656 / -1461）；`bun run check` 全绿 1038 pass / 0 fail（77 文件）。本计划移至 `completed/`，并同步更新 monorepo、upstream-only、model-config、requirements 与 monorepo-migration 的交叉引用。

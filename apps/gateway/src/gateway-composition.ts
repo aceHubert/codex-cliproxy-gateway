@@ -81,7 +81,9 @@ function bodyWithJson(context: HttpRequestContext, json: Record<string, unknown>
 function withCodexCompaction(plugin: GatewayPlugin): GatewayPlugin {
   const handleHttp = plugin.handleHttp.bind(plugin);
   return { ...plugin, async handleHttp(context) {
-    if (context.from === "chat") return handleHttp(context);
+    // Responses 压缩触发器只对 Responses 请求有意义；chat-completions / anthropic
+    // 请求不经过 Codex 压缩包装，直接交给插件。
+    if (context.from !== "responses") return handleHttp(context);
     const payload = await context.body.json();
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       return Response.json({ error: { message: "Responses 请求必须是 JSON 对象" } }, { status: 400 });

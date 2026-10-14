@@ -17,7 +17,7 @@ import {
 } from "./catalog.ts";
 import type { AgyModelFamily } from "./catalog.ts";
 import { translateAgyRequest, AgyRequestError } from "./request.ts";
-import { createAgyResponse } from "./response.ts";
+import { createAgyClientResponse } from "./response.ts";
 import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
 import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
@@ -190,7 +190,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
       if (!store || closed) return { models: [] };
       return updateCatalogMeta(await store.reload());
     },
-    async forward(request: Request, input: Record<string, unknown>, mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -293,10 +293,10 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
             }
           }
         }
-        const translated = translateAgyRequest(input, resolvedModel);
+        const translated = translateAgyRequest(input, resolvedModel, from);
         abort.signal.throwIfAborted();
         const upstream = await transport.streamInfer(credential, translated.wrapper, abort.signal);
-        const response = await createAgyResponse(upstream, {
+        const response = await createAgyClientResponse(from, upstream, {
           model, tools: translated.tools, stream, signal: abort.signal,
           sanitizeError: (error) => {
             // 上游流内错误的原始对象只进本机网关日志（截断），供排查；客户端只见预定义分类。
@@ -404,8 +404,7 @@ export function createAgyPlugin(host: HostServices<AgentConfig>, dependencies: A
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        if (context.from !== "responses") return Response.json({ error: { type: "invalid_request_error", message: "Agy 模型仅支持 Responses API" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

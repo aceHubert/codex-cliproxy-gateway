@@ -1,3 +1,4 @@
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
 import { AGY_DEFAULT_PROJECT } from "./transport.ts";
 
@@ -267,8 +268,135 @@ function translateTools(value: unknown): { tools: Array<Record<string, unknown>>
   return { tools, map, dropped };
 }
 
-export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string): AgyTranslatedRequest {
+/**
+ * Chat Completions / Anthropic 源归一化为 Responses 形状的 history 项与参数，
+ * 复用既有 Responses → CloudCodeAssist 构建路径；三种来源共用同一工具身份表。
+ */
+function normalizeSourceItems(body: Record<string, unknown>, from: ClientProtocol): Record<string, unknown> {
+  if (from === "responses") return body;
+  if (from === "chat-completions") {
+    if (!Array.isArray(body.messages)) fail("messages 必须是数组");
+    const items: unknown[] = [];
+    for (const raw of body.messages) {
+      if (!record(raw)) fail("messages 包含非对象项");
+      if (raw.role === "system" || raw.role === "developer") {
+        items.push({ type: "message", role: raw.role, content: raw.content });
+        continue;
+      }
+      if (raw.role === "tool") {
+        items.push({ type: "function_call_output", call_id: raw.tool_call_id ?? "", output: raw.content });
+        continue;
+      }
+      if (raw.role === "assistant" && Array.isArray(raw.tool_calls)) {
+        if (typeof raw.content === "string" && raw.content) items.push({ type: "message", role: "assistant", content: raw.content });
+        for (const call of raw.tool_calls) {
+          if (!record(call) || !record(call.function)) fail("assistant.tool_calls 包含无效调用");
+          items.push({ type: "function_call", call_id: typeof call.id === "string" ? call.id : "", name: call.function.name ?? "", arguments: typeof call.function.arguments === "string" ? call.function.arguments : JSON.stringify(call.function.arguments ?? {}) });
+        }
+        continue;
+      }
+      if (raw.role === "user" || raw.role === "assistant") {
+        items.push({ type: "message", role: raw.role, content: raw.content });
+        continue;
+      }
+      fail(`不支持的消息 role ${String(raw.role)}`);
+    }
+    const normalized: Record<string, unknown> = {
+      ...body,
+      input: items,
+      ...(typeof body.max_tokens === "number" ? { max_output_tokens: body.max_tokens } : typeof body.max_completion_tokens === "number" ? { max_output_tokens: body.max_completion_tokens } : {}),
+    };
+    delete normalized.messages;
+    delete normalized.max_tokens;
+    delete normalized.max_completion_tokens;
+    if (typeof body.reasoning_effort === "string" && body.reasoning === undefined) {
+      normalized.reasoning = { effort: body.reasoning_effort };
+      delete normalized.reasoning_effort;
+    }
+    if (record(body.tool_choice) && body.tool_choice.type === "function" && record(body.tool_choice.function)) {
+      normalized.tool_choice = { type: "function", name: body.tool_choice.function.name };
+    }
+    if (Array.isArray(body.tools)) {
+      normalized.tools = body.tools.map((raw) => {
+        if (record(raw) && raw.type === "function" && record(raw.function)) {
+          return { type: "function", name: raw.function.name, ...(typeof raw.function.description === "string" ? { description: raw.function.description } : {}), parameters: record(raw.function.parameters) ? raw.function.parameters : { type: "object" } };
+        }
+        return raw;
+      });
+    }
+    return normalized;
+  }
+  // anthropic 源
+  if (!Array.isArray(body.messages)) fail("messages 必须是数组");
+  const items: unknown[] = [];
+  for (const raw of body.messages) {
+    if (!record(raw) || !Array.isArray(raw.content)) fail("messages 必须是 user/assistant 与内容块数组");
+    const calls: unknown[] = [];
+    const results: unknown[] = [];
+    const parts: unknown[] = [];
+    for (const block of raw.content) {
+      if (!record(block)) fail("messages 包含无效内容块");
+      if (block.type === "tool_use") {
+        calls.push({ type: "function_call", call_id: typeof block.id === "string" ? block.id : "", name: typeof block.name === "string" ? block.name : "", arguments: JSON.stringify(block.input ?? {}) });
+      } else if (block.type === "tool_result") {
+        results.push({ type: "function_call_output", call_id: typeof block.tool_use_id === "string" ? block.tool_use_id : "", output: block.content });
+      } else if (block.type === "text" || block.type === "image" || block.type === "thinking") {
+        if (block.type === "text") {
+          parts.push({ type: "input_text", text: typeof block.text === "string" ? block.text : "" });
+        } else if (block.type === "image") {
+          const source = record(block.source) ? block.source as Record<string, unknown> : undefined;
+          const url = source && source.type === "url" && typeof source.url === "string"
+            ? source.url
+            : `data:${String(source?.media_type ?? "image/png")};base64,${String(source?.data ?? "")}`;
+          parts.push({ type: "input_image", image_url: url });
+        } else {
+          parts.push({ type: "input_text", text: `[thinking] ${typeof block.thinking === "string" ? block.thinking : ""}` });
+        }
+      }
+    }
+    if (results.length > 0) items.push(...results);
+    else if (parts.length > 0) items.push({ type: "message", role: raw.role, content: parts });
+    if (calls.length > 0) items.push(...calls);
+  }
+  // Anthropic 的 system（字符串或块数组）语义等同 Responses instructions。
+  let systemInstruction: string | undefined;
+  if (typeof body.system === "string") systemInstruction = body.system;
+  else if (Array.isArray(body.system)) {
+    const texts: string[] = [];
+    for (const part of body.system) {
+      if (record(part) && typeof part.text === "string") texts.push(part.text);
+    }
+    if (texts.length > 0) systemInstruction = texts.join("\n\n");
+  }
+  const normalized: Record<string, unknown> = {
+    ...body,
+    input: items,
+    ...(systemInstruction !== undefined ? { instructions: systemInstruction } : {}),
+    ...(typeof body.max_tokens === "number" ? { max_output_tokens: body.max_tokens } : {}),
+  };
+  delete normalized.messages;
+  delete normalized.max_tokens;
+  delete normalized.system;
+  if (record(body.tool_choice)) {
+    const choice = body.tool_choice;
+    if (choice.type === "tool" && typeof choice.name === "string") normalized.tool_choice = { type: "function", name: choice.name };
+    else if (choice.type === "any") normalized.tool_choice = "required";
+    else if (choice.type === "auto" || choice.type === "none") normalized.tool_choice = choice.type;
+  }
+  if (Array.isArray(body.tools)) {
+    normalized.tools = body.tools.map((raw) => {
+      if (record(raw) && typeof raw.name === "string") {
+        return { type: "function", name: raw.name, ...(typeof raw.description === "string" ? { description: raw.description } : {}), parameters: record(raw.input_schema) ? raw.input_schema : { type: "object" } };
+      }
+      return raw;
+    });
+  }
+  return normalized;
+}
+
+export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string, from: ClientProtocol = "responses"): AgyTranslatedRequest {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
+  body = normalizeSourceItems(body, from);
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("Antigravity 不支持 previous_response_id；请提供完整 input 历史");
   }

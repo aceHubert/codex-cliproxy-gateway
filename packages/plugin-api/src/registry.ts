@@ -18,9 +18,10 @@ export interface ClientEndpoint {
 /** 严格匹配受管入口；UI、Realtime 和 mountPath 外的路径由宿主独立处理。 */
 export function identifyClientEndpoint(pathname: string, mountPath = "/v1"): ClientEndpoint | undefined {
   const mount = mountPath === "/" ? "" : mountPath.replace(/\/$/, "");
-  if (pathname === `${mount}/chat/completions`) return { from: "chat", operation: "generate" };
+  if (pathname === `${mount}/chat/completions`) return { from: "chat-completions", operation: "generate" };
   if (pathname === `${mount}/responses`) return { from: "responses", operation: "generate" };
   if (pathname === `${mount}/responses/compact`) return { from: "responses", operation: "compact" };
+  if (pathname === `${mount}/messages`) return { from: "anthropic", operation: "generate" };
   return undefined;
 }
 

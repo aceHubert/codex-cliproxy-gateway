@@ -73,6 +73,7 @@
       "name": "@agent-proxy/codebuddy",
       "version": "0.10.0",
       "dependencies": {
+        "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
       },
       "devDependencies": {
@@ -115,7 +116,7 @@
       "name": "@agent-proxy/qoder",
       "version": "0.10.0",
       "dependencies": {
-        "@agent-proxy/codebuddy": "workspace:*",
+        "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
       },
       "devDependencies": {

@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import {
-  aggregateOpencodeZenResponsesStream,
   convertOpencodeZenRequest,
-  responsesToChatBody,
-  translateOpencodeZenStream,
+  renderOpencodeZenClientOutput,
 } from "@agent-proxy/opencode-zen/convert";
 
 const encoder = new TextEncoder();
@@ -17,8 +15,8 @@ function streamOf(text: string): ReadableStream<Uint8Array> {
   });
 }
 
-test("responses → chat 严格转换：instructions、工具历史、custom 工具与并行开关", () => {
-  const body = responsesToChatBody({
+test("responses → chat 转换：instructions、工具历史、custom 工具与并行开关", () => {
+  const { body } = convertOpencodeZenRequest("responses", "chat", {
     instructions: "SYS-INSTR",
     input: [
       { type: "message", role: "user", content: [{ type: "input_text", text: "look up 42" }] },
@@ -39,7 +37,8 @@ test("responses → chat 严格转换：instructions、工具历史、custom 工
   });
   const messages = body.messages as Array<Record<string, unknown>>;
   assert.deepEqual(messages[0], { role: "system", content: "SYS-INSTR" });
-  assert.deepEqual(messages[1], { role: "user", content: "look up 42" });
+  // 源消息为内容块数组时保持数组形状（字段保形）。
+  assert.deepEqual(messages[1], { role: "user", content: [{ type: "text", text: "look up 42" }] });
   // 相邻 function_call 合并进同一条 assistant 消息，tool 输出按序跟进。
   const assistant = messages[2] as { role: string; tool_calls: Array<{ id: string }> };
   assert.equal(assistant.role, "assistant");
@@ -66,41 +65,48 @@ test("convertOpencodeZenRequest：同协议浅拷贝、chat → anthropic max_to
     stream: false,
     max_tokens: 512,
   };
-  const same = convertOpencodeZenRequest("chat", "chat", input);
+  const same = convertOpencodeZenRequest("chat-completions", "chat", input);
   assert.notEqual(same, input);
-  assert.equal(same.max_tokens, 512);
-  const anthropic = convertOpencodeZenRequest("chat", "anthropic", input);
-  assert.equal(anthropic.max_tokens, 512, "llm-bridge 默认 1024 需被客户端值覆盖");
-  assert.equal(anthropic.system, "sys");
-  assert.ok(Array.isArray(anthropic.messages));
-  const responses = convertOpencodeZenRequest("chat", "responses", input);
-  assert.ok(Array.isArray(responses.input));
+  assert.equal(same.body.max_tokens, 512);
+  const anthropic = convertOpencodeZenRequest("chat-completions", "anthropic", input);
+  assert.equal(anthropic.body.max_tokens, 512, "llm-bridge 默认 1024 需被客户端值覆盖");
+  assert.equal(anthropic.body.system, "sys");
+  assert.ok(Array.isArray(anthropic.body.messages));
+  const responses = convertOpencodeZenRequest("chat-completions", "responses", input);
+  assert.ok(Array.isArray(responses.body.input));
 });
 
-test("translateOpencodeZenStream：chat ↔ responses 工具事件双向完整", async () => {
+test("renderOpencodeZenClientOutput：chat ↔ responses 工具事件双向完整", async () => {
   const chatSse = [
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_issue\",\"arguments\":\"\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"issue\\\":42}\"}}]},\"finish_reason\":null}]}\n\n",
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
     "data: [DONE]\n\n",
   ].join("");
-  const toResponses = await new Response(translateOpencodeZenStream(streamOf(chatSse), "chat", "responses")).text();
-  assert.match(toResponses, /response\.function_call_arguments\.delta/);
-  assert.match(toResponses, /lookup_issue/);
-  assert.match(toResponses, /response\.completed/);
+  const toResponses = await renderOpencodeZenClientOutput("chat", "responses",
+    new Response(streamOf(chatSse), { headers: { "content-type": "text/event-stream" } }),
+    { model: "m", stream: true });
+  const responsesText = await toResponses.text();
+  assert.match(responsesText, /response\.function_call_arguments\.delta/);
+  assert.match(responsesText, /lookup_issue/);
+  assert.match(responsesText, /response\.completed/);
+
   const responsesSse = [
     "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\",\"model\":\"m\"}}\n\n",
     "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc1\",\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"lookup_issue\",\"arguments\":\"\"}}\n\n",
     "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":0,\"delta\":\"{\\\"issue\\\":42}\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n",
   ].join("");
-  const toChat = await new Response(translateOpencodeZenStream(streamOf(responsesSse), "responses", "chat")).text();
-  assert.match(toChat, /tool_calls/);
-  assert.match(toChat, /lookup_issue/);
-  assert.match(toChat, /\[DONE\]/);
+  const toChat = await renderOpencodeZenClientOutput("responses", "chat-completions",
+    new Response(streamOf(responsesSse), { headers: { "content-type": "text/event-stream" } }),
+    { model: "m", stream: true });
+  const chatText = await toChat.text();
+  assert.match(chatText, /tool_calls/);
+  assert.match(chatText, /lookup_issue/);
+  assert.match(chatText, /\[DONE\]/);
 });
 
-test("aggregateOpencodeZenResponsesStream：文本、函数调用与 usage 聚合为完整 response", async () => {
+test("renderOpencodeZenClientOutput：responses 上游聚合为完整 response（非流式客户端）", async () => {
   const sse = [
     "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"created_at\":123,\"status\":\"in_progress\",\"model\":\"muse-spark-1.3-contributor-free\"}}\n\n",
     "event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"i1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
@@ -110,7 +116,10 @@ test("aggregateOpencodeZenResponsesStream：文本、函数调用与 usage 聚�
     "event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc1\",\"output_index\":1,\"delta\":\"{\\\"issue\\\":9}\"}\n\n",
     "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"created_at\":123,\"status\":\"completed\",\"model\":\"muse-spark-1.3-contributor-free\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7}}}\n\n",
   ].join("");
-  const result = await aggregateOpencodeZenResponsesStream(streamOf(sse));
+  const response = await renderOpencodeZenClientOutput("responses", "responses",
+    new Response(streamOf(sse), { headers: { "content-type": "text/event-stream" } }),
+    { model: "muse-spark-1.3-contributor-free", stream: false });
+  const result = await response.json() as Record<string, unknown>;
   assert.equal(result.id, "r1");
   assert.equal(result.object, "response");
   assert.equal(result.status, "completed");
@@ -118,9 +127,24 @@ test("aggregateOpencodeZenResponsesStream：文本、函数调用与 usage 聚�
   const output = result.output as Array<Record<string, unknown>>;
   assert.equal(output.length, 2);
   assert.equal(output[0]!.type, "message");
-  assert.deepEqual((output[0]!.content as Array<Record<string, unknown>>)[0], { type: "output_text", text: "hello world" });
+  assert.deepEqual((output[0]!.content as Array<Record<string, unknown>>)[0], { type: "output_text", text: "hello world", annotations: [], logprobs: [] });
   assert.equal(output[1]!.type, "function_call");
   assert.equal(output[1]!.name, "lookup_issue");
   assert.equal(output[1]!.arguments, "{\"issue\":9}");
   assert.deepEqual(result.usage, { input_tokens: 3, output_tokens: 4, total_tokens: 7 });
+});
+
+test("renderOpencodeZenClientOutput：chat 上游 → anthropic 客户端（新入口方向）", async () => {
+  const chatSse = [
+    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"}}]}\n\n",
+    "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+    "data: [DONE]\n\n",
+  ].join("");
+  const response = await renderOpencodeZenClientOutput("chat", "anthropic",
+    new Response(streamOf(chatSse), { headers: { "content-type": "text/event-stream" } }),
+    { model: "m", stream: true });
+  const text = await response.text();
+  assert.match(text, /message_start/);
+  assert.match(text, /text_delta/);
+  assert.match(text, /message_stop/);
 });

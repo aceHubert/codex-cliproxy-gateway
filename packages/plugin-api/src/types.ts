@@ -1,4 +1,5 @@
-export type ClientProtocol = "chat" | "responses";
+/** 客户端入口协议；HTTP 路径分别为 /chat/completions、/responses、/messages。 */
+export type ClientProtocol = "chat-completions" | "responses" | "anthropic";
 export type RequestOperation = "generate" | "compact";
 
 /** 目录字段与现有 Codex 目录兼容，契约包不读取宿主配置。 */
