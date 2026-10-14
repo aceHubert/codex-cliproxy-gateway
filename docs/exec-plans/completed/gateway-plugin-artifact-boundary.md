@@ -14,7 +14,7 @@
   - 测试更新：`test/paths.test.ts` 的受管目录清单断言迁移；`test/gateway.test.ts` 清理测试补齐五家插件产物与 codebuddy 旧版按地域命名残留。
 - 不包含：
   - 插件缓存读写逻辑本身（仍封装在各包内部，读写行为与文件名语义不变）。
-  - `default-install-migration.ts` 的旧目录迁移白名单（只迁移网关自有管理文件；插件缓存可再生，继续不迁移）。
+  - `default-install-migration.ts` 的旧目录迁移白名单：现行实现按文件名模式匹配，白名单同时覆盖插件目录缓存（含 codebuddy 旧版产品×地域命名），实测迁移会把插件缓存与网关自有文件一并复制到新目录；本次不改造该模块，残留的「网关源码持有插件产物名模式」知识记录在 [tech-debt-tracker](../tech-debt-tracker.md)。
   - 模型 ID 前缀命名空间（`zcode/`、`qoder-cn/` 等）与日志 namespace 在网关侧的引用：这些是插件契约层面的命名空间约定（`excludedModels` 是网关配置、namespace 定义于 `plugin-api`），不属于落盘产物知识，维持现状。
   - 插件凭据文件（存放在各产品自身目录，不在 runtimeHome，卸载本就不触碰）。
 
@@ -62,7 +62,7 @@
 - 命令：`bun run check`、`bun run pack:check`。
 - 手工检查：
   - 临时 `HOME` 布置全部 10 个插件产物文件 + codebuddy 4 个 legacy 地域命名残留 + 一个用户自建文件（如 `notes.txt`），触发卸载清理路径，断言插件产物全删、用户文件保留、网关自有目录文件（cliproxy/newapi/codex-catalog.json）同样被清理。
-  - `grep -rn "catalog.json" apps/gateway/src/` 复核：除组合入口的聚合函数与网关自有文件名外，不再出现插件产物文件名。
+  - `grep -rnE '"[a-z0-9_-]*-(catalog|metadata)\.json"' apps/gateway/src/` 复核：除组合入口的聚合函数、网关自有文件名与 `default-install-migration.ts` 迁移白名单的既有模式匹配（本次未改造，见 tech-debt-tracker）外，不再出现插件产物文件名。
 - 观测检查：`test/paths.test.ts` 聚合清单结构断言（dirname === runtimeHome、无 `..`、无 legacy 地域命名混入 codebuddy 现行文件）；`test/gateway.test.ts` 卸载清理断言覆盖五家产物；守卫测试断言历史 `model_catalog_json` 值仍被识别为受管。
 
 ## 进度记录
@@ -84,3 +84,4 @@
   - `applyModelCatalogToml` 的 `managedFiles` 设为必传参数而非可选默认：默认值若是窄清单，未来调用方漏传会让守卫静默拒绝历史插件指向；必传让遗漏成为编译错误。
   - `model-composition.ts` 的 `updateCodexModelCatalog` 转发层统一注入 `managedRuntimeCatalogFiles(paths)`：cli 的 models 命令与 webui 的目录更新共用该转发层，注入一次两边生效；`model-state.ts` 的 `updateCodexModelCatalog` 保留 `managedFiles = managedCatalogFiles(paths)` 兜底默认，叶子测试无需感知组合层。
   - 聚合产出两个公开函数：`installedPluginArtifactFiles`（纯插件产物，测试与边界断言用）与 `managedRuntimeCatalogFiles`（自有 + 插件全集，卸载清理与守卫共用），消费点不自行拼接。
+- 2026-10-12（验收复核）：独立探针（声明↔写盘点一致性、聚合结构、守卫 16 个历史受管值、22 文件卸载清理、五包真实写盘、迁移白名单实测）全部通过，`bun run check` 971 项与 `pack:check` 复现通过；修正「不包含」条目对迁移白名单现状的错误描述（实测插件缓存会随迁移复制，并非「继续不迁移」），残留的插件产物名模式知识补记入 tech-debt-tracker。

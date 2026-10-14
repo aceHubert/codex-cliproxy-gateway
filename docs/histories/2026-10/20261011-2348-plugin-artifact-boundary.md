@@ -55,4 +55,4 @@
 - `bun run check`：构建 + 严格类型检查 + 971 个测试全通过（72 个文件）。
 - `bun run pack:check`：八个公开产物、workspace 版本转换与五家目录/Responses 冒烟通过。
 - 手工卸载演练（临时 HOME）：16 个受管文件（3 网关自有 + 12 插件产物 + catalog-metadata）卸载后仅剩用户自建 `notes.txt`。
-- grep 复核：`apps/gateway/src` 已无任何插件产物文件名字面量（聚合经包导出常量）。
+- grep 复核：除 `default-install-migration.ts` 迁移白名单的既有模式匹配（本次未改造，见 tech-debt-tracker）外，`apps/gateway/src` 已无任何插件产物文件名字面量（聚合经包导出常量）。
