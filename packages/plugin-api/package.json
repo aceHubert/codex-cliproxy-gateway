@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/plugin-api",
-  "version": "0.11.0",
+  "version": "0.11.1",
   "description": "Agent Proxy 插件与主机公共契约。",
   "type": "module",
   "exports": {
@@ -17,7 +17,8 @@
     "./*.json": "./dist/*.json"
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "scripts": {
     "build": "bun ../../scripts/build-library.ts",

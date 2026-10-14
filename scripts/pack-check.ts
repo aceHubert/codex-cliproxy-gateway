@@ -107,6 +107,9 @@ try {
     const archivedLicense = Bun.spawnSync(["tar", "-xOf", archive, "package/LICENSE"], { stdout: "pipe", stderr: "inherit" });
     if (archivedLicense.exitCode !== 0) throw new Error(`${pkg.name} 发布包缺少许可证。`);
     assert.equal(new TextDecoder().decode(archivedLicense.stdout), await Bun.file(path.join(root, "LICENSE")).text());
+    const archivedReadme = Bun.spawnSync(["tar", "-xOf", archive, "package/README.md"], { stdout: "pipe", stderr: "inherit" });
+    assert.equal(archivedReadme.exitCode, 0, `${pkg.name} 发布包缺少 README.md`);
+    assert.equal(new TextDecoder().decode(archivedReadme.stdout), await Bun.file(path.join(pkg.location, "README.md")).text(), `${pkg.name} 发布包介绍必须与源码一致`);
     const extracted = Bun.spawnSync(["tar", "-xOf", archive, "package/package.json"], { stdout: "pipe", stderr: "inherit" });
     if (extracted.exitCode !== 0) throw new Error(`${pkg.name} 打包 manifest 无法读取。`);
     const content = new TextDecoder().decode(extracted.stdout);

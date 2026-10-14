@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.11.2 (2026-10-14)
+
+#### :bug: Bug Fix
+* `opencode-zen`
+  * [#15](https://github.com/aceHubert/codex-cliproxy-gateway/pull/15) fix(opencode-zen): 还原 custom 工具调用的响应协议 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.11.0 (2026-10-11)
 
 #### :rocket: New Feature
