@@ -579,7 +579,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           cleanup();
           return new Response(toClient, { status: 200, headers: responseHeaders });
         }
-        const translated = translateOpencodeZenStream(upstream.body, protocol, "responses");
+        const translated = translateOpencodeZenStream(upstream.body, protocol, "responses", Array.isArray(input.tools) ? input.tools : []);
         if (!clientStreams) {
           const completion = await aggregateOpencodeZenResponsesStream(translated);
           const response = Response.json(completion);
