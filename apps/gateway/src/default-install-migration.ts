@@ -58,6 +58,10 @@ export function prepareDefaultInstallMigration(
   if (env[RUNTIME_HOME_ENV]?.trim()
     || realPathOrResolve(paths.runtimeHome) !== realPathOrResolve(path.join(paths.home, DEFAULT_RUNTIME_DIRECTORY))) return undefined;
   const legacyPaths = resolvePaths({ ...env, HOME: paths.home, CODEX_CLIPROXY_HOME: path.join(paths.home, LEGACY_RUNTIME_DIRECTORY) });
+  // 根目录也属于源链接跳过边界，必须在读取配置和状态之前检查。
+  const legacyRoot = entryStat(legacyPaths.runtimeHome);
+  if (!legacyRoot || legacyRoot.isSymbolicLink()) return undefined;
+  if (!legacyRoot.isDirectory()) throw new Error(`Migration source is not a directory: ${legacyPaths.runtimeHome}; preserve this entry and repair it before retrying install`);
   const legacyConfig = readObject(legacyPaths.gatewayConfig);
   const legacyState = readObject(legacyPaths.stateFile);
   if (!legacyConfig && !legacyState) return undefined;
@@ -163,7 +167,10 @@ export function prepareDefaultInstallMigration(
         if (errors.length) throw new Error(`Default installation restore incomplete: ${errors.join("; ")}`);
       };
       try {
-        const runtimeMode = fs.statSync(legacyPaths.runtimeHome).mode & 0o777;
+        // 准备后源根目录可能被替换，写入目标前再次拒绝链接和非目录。
+        const sourceRoot = entryStat(legacyPaths.runtimeHome);
+        if (!sourceRoot?.isDirectory()) throw new Error(`Migration source is not a directory: ${legacyPaths.runtimeHome}; preserve this entry and repair it before retrying install`);
+        const runtimeMode = sourceRoot.mode & 0o777;
         if (ensureDirectory(paths.runtimeHome, runtimeMode | 0o700)) createdDirectories.set(paths.runtimeHome, runtimeMode);
         for (const name of fs.readdirSync(legacyPaths.runtimeHome)) {
           // 顶层凭据继续交由平台存储接口读写，不作为普通文件复制。

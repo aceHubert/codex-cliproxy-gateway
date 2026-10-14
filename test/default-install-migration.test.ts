@@ -115,6 +115,65 @@ test("环境覆盖包括显式旧默认目录时不触发默认迁移", () => fi
   }
 }));
 
+test("旧默认根目录为外部目录符号链接时跳过，不读取合法或损坏的配置与状态", () => {
+  for (const brokenFile of [undefined, "config.json", "state.json"]) fixture((home, legacy) => {
+    const paths = resolvePaths({ HOME: home });
+    const outside = path.join(home, "external-install");
+    fs.renameSync(legacy, outside);
+    json(path.join(outside, "config.json"), { zcode: false });
+    json(path.join(outside, "state.json"), { installedAt: "external", config: {} });
+    if (brokenFile) fs.writeFileSync(path.join(outside, brokenFile), "invalid-json");
+    fs.writeFileSync(path.join(outside, "external.txt"), "external-private");
+    const before = new Map(fs.readdirSync(outside).map((name) => [name, fs.readFileSync(path.join(outside, name))]));
+    fs.symlinkSync(outside, legacy);
+
+    assert.equal(prepareDefaultInstallMigration(paths, { HOME: home }, "linux"), undefined);
+    assert.equal(fs.existsSync(paths.runtimeHome), false);
+    assert.equal(fs.lstatSync(legacy).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(legacy), outside);
+    assert.deepEqual(fs.readdirSync(outside).sort(), [...before.keys()].sort());
+    for (const [name, content] of before) assert.deepEqual(fs.readFileSync(path.join(outside, name)), content);
+  });
+});
+
+test("旧默认根目录为悬空符号链接时跳过并保留原链接", () => fixture((home, legacy) => {
+  const paths = resolvePaths({ HOME: home });
+  const original = path.join(home, "original-install");
+  const missing = path.join(home, "missing-external-install");
+  fs.renameSync(legacy, original);
+  fs.symlinkSync(missing, legacy);
+
+  assert.equal(prepareDefaultInstallMigration(paths, { HOME: home }, "linux"), undefined);
+  assert.equal(fs.existsSync(paths.runtimeHome), false);
+  assert.equal(fs.existsSync(missing), false);
+  assert.equal(fs.lstatSync(legacy).isSymbolicLink(), true);
+  assert.equal(fs.readlinkSync(legacy), missing);
+  assert.equal(fs.statSync(original).isDirectory(), true);
+}));
+
+test("准备后旧默认根目录被替换为符号链接时，应用迁移在写入前明确拒绝", () => fixture((home, legacy) => {
+  const paths = resolvePaths({ HOME: home });
+  json(path.join(legacy, "config.json"), { qoder: false });
+  fs.writeFileSync(path.join(legacy, "original.txt"), "original-install");
+  const migration = prepareDefaultInstallMigration(paths, { HOME: home }, "linux")!;
+  assert.ok(migration);
+  const original = path.join(home, "preserved-original-install");
+  const outside = path.join(home, "external-install");
+  fs.renameSync(legacy, original);
+  json(path.join(outside, "config.json"), { zcode: false });
+  fs.writeFileSync(path.join(outside, "external.txt"), "external-private");
+  fs.symlinkSync(outside, legacy);
+
+  assert.throws(() => migration.apply(), /Migration source is not a directory/);
+  assert.equal(fs.existsSync(paths.runtimeHome), false);
+  assert.equal(fs.lstatSync(legacy).isSymbolicLink(), true);
+  assert.equal(fs.readlinkSync(legacy), outside);
+  assert.equal(fs.readFileSync(path.join(original, "original.txt"), "utf8"), "original-install");
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(original, "config.json"), "utf8")), { qoder: false });
+  assert.equal(fs.readFileSync(path.join(outside, "external.txt"), "utf8"), "external-private");
+  assert.deepEqual(fs.readdirSync(outside).sort(), ["config.json", "external.txt"]);
+}));
+
 test("迁移失败恢复目标文件和归属，损坏凭据不得静默丢失", () => fixture((home, legacy) => {
   const paths = resolvePaths({ HOME: home });
   json(path.join(legacy, "config.json"), { qoder: false });
