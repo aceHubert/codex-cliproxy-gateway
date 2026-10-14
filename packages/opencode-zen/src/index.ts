@@ -104,68 +104,98 @@ export function opencodeZenError(status: number, message: string, type = "invali
   return Response.json({ error: { type, message } }, { status });
 }
 
-/** 只输出预定义分类 + 上游原始错误文本；Zen 请求不携带用户凭据，错误详情可安全透出。 */
+/**
+ * 上游错误归一化：以透传上游 message 原文为主，网关只补两件事——
+ * 可程序化处理的 `type` 分类，以及上游没给 message 时的一句中性提示。
+ *
+ * 文案里不写修复指引：上游协议、门禁形态与目录轮换都会变，硬编码的建议一旦漂移就
+ * 把用户引向错误的修复方向。2026-10-14 实证：上游对失效模型返回
+ * `server_error: Upstream request failed: Endpoint is unavailable.`，旧文案按「任何
+ * 403 都是门禁失效」归成了「升级网关的 Zen 指纹数据」，实际与指纹无关。排查方向改由
+ * `scripts/zen-gate-probe.ts` 承接（对照组失败才是指纹本体过期）。
+ *
+ * Zen 请求不携带用户凭据（public key / 账号 OPENCODE_API_KEY），上游详情可安全透出。
+ */
 export function normalizeOpencodeZenUpstreamError(status: number, body: string): { status: number; type: string; message: string } {
-  const text = body.toLowerCase();
-  const upstreamMessage = extractUpstreamMessage(body);
-  // 区域限制先于门禁判定：上游对地区不可用的模型同样返回 403，但详情是
-  // "not available in your country" 而非 FreeTierError——误报成指纹失效会把
-  // 用户引向错误的修复方向（探针分类 classifyOpencodeZenProbeSignal 同样把它视为被服务）。
-  if (status === 403 && (text.includes("region") || text.includes("country") || text.includes("not available in your"))) {
-    return {
-      status: 403,
-      type: "zen_region_error",
-      message: "该模型在您当前的网络地区不可用（上游区域限制）：OpenCode Zen 按地区开放免费模型，"
-        + "请更换网络环境或选择其他模型。"
-        + (upstreamMessage ? `上游详情：${upstreamMessage}` : ""),
-    };
-  }
-  if (status === 403 || text.includes("freetier")) {
-    return {
-      status: 403,
-      type: "zen_free_tier_error",
-      message: "OpenCode Zen 免费层校验失败（FreeTierError）：上游只接受 OpenCode 客户端形态的请求。"
-        + "官方门禁策略可能已更新，请升级网关的 Zen 指纹数据（src/opencode/fingerprint-data.json）或改用本地 opencode 客户端。"
-        + (upstreamMessage ? `上游详情：${upstreamMessage}` : ""),
-    };
-  }
-  if (status === 429 || text.includes("freeusagelimit") || text.includes("rate limit")) {
-    return {
-      status: 429,
-      type: "zen_rate_limited",
-      message: "OpenCode Zen 免费额度限流（429）：免费模型按 IP 与会话限频，请降低请求频率或稍后重试。"
-        + (upstreamMessage ? `上游详情：${upstreamMessage}` : ""),
-    };
-  }
-  if (status === 404 || text.includes("model") && (text.includes("not found") || text.includes("not_available") || text.includes("does not exist"))) {
-    return {
-      status: 404,
-      type: "zen_model_unavailable",
-      message: `模型不在 OpenCode Zen 当前目录中（免费模型动态轮换），请刷新模型列表。${upstreamMessage ? `上游详情：${upstreamMessage}` : ""}`,
-    };
-  }
-  if (status === 401) {
-    return {
-      status: 401,
-      type: "zen_authentication_error",
-      message: `OpenCode Zen 鉴权失败：请检查 OPENCODE_API_KEY 是否有效。${upstreamMessage ? `上游详情：${upstreamMessage}` : ""}`,
-    };
-  }
-  return {
-    status: status >= 400 && status <= 599 ? status : 502,
-    type: "zen_upstream_error",
-    message: `OpenCode Zen 上游响应失败（HTTP ${status}）。${upstreamMessage ? `上游详情：${upstreamMessage}` : ""}`,
-  };
+  const normalizedStatus = status >= 400 && status <= 599 ? status : 502;
+  const type = classifyOpencodeZenUpstreamError(status, body);
+  const message = extractUpstreamMessage(body) || ZEN_ERROR_FALLBACK[type] || `OpenCode Zen 上游请求失败（HTTP ${normalizedStatus}）。`;
+  return { status: normalizedStatus, type, message };
 }
 
+/** 上游未给出 message 时的中性兜底文案（只述事实，不给修复指引）。 */
+const ZEN_ERROR_FALLBACK: Record<string, string> = {
+  zen_free_tier_error: "OpenCode Zen 免费层校验未通过：上游拒绝了当前请求形态。",
+  zen_region_error: "OpenCode Zen 提示该模型在当前网络地区不可用。",
+  zen_rate_limited: "OpenCode Zen 免费额度限流，请稍后重试。",
+  zen_model_unavailable: "OpenCode Zen 当前目录中没有该模型。",
+  zen_authentication_error: "OpenCode Zen 鉴权失败。",
+};
+
+/**
+ * 分类优先看上游 `error.type`（结构化、最可靠），再退到报文关键词与状态码。
+ *
+ * 关键约束：不再「任何 403 都算门禁失效」。403 里至少混着三种成因——门禁拒绝
+ * （`FreeTierError`）、地区限制（`RegionError`）、上游自身故障（`server_error`，
+ * 如模型端点已下线）；前两者是客户端形态问题，第三者与网关无关。
+ */
+function classifyOpencodeZenUpstreamError(status: number, body: string): string {
+  const upstreamType = extractUpstreamErrorType(body).toLowerCase();
+  const text = body.toLowerCase();
+  if (upstreamType === "freetiererror" || text.includes("free tier") || text.includes("freetier")) return "zen_free_tier_error";
+  if (upstreamType === "regionerror" || text.includes("region") || text.includes("country") || text.includes("not available in your")) return "zen_region_error";
+  if (status === 429 || upstreamType.includes("usagelimit") || upstreamType.includes("ratelimit") || text.includes("freeusagelimit") || text.includes("rate limit")) return "zen_rate_limited";
+  if (status === 404 || text.includes("not found") || text.includes("not_available") || text.includes("does not exist") || text.includes("endpoint is unavailable")) return "zen_model_unavailable";
+  if (status === 401) return "zen_authentication_error";
+  return "zen_upstream_error";
+}
+
+/** 解析上游 JSON 的 `error.type`（兼容 `error` 为字符串与顶层 `type`）；取不到返回空串。 */
+function extractUpstreamErrorType(body: string): string {
+  const parsed = parseUpstreamError(body);
+  if (typeof parsed === "string") return "";
+  const error = parsed.error;
+  if (isUpstreamErrorRecord(error)) return typeof error.type === "string" ? error.type : "";
+  return typeof parsed.type === "string" ? parsed.type : "";
+}
+
+/**
+ * 取上游错误描述：`error.message` → `error`（字符串）→ 顶层 `message`。
+ * 报文是 JSON 却取不到描述时返回空串，交给兜底文案——不把裸 JSON 当成人话透给客户端；
+ * 报文不是 JSON（纯文本 / HTML 错误页）时才原样截断透出。
+ */
 function extractUpstreamMessage(body: string): string {
+  const parsed = parseUpstreamError(body);
+  if (typeof parsed === "string") return parsed;
+  const error = parsed.error;
+  const message = typeof error === "string"
+    ? error
+    : isUpstreamErrorRecord(error) && typeof error.message === "string"
+      ? error.message
+      : typeof parsed.message === "string"
+        ? parsed.message
+        : "";
+  return message.trim().slice(0, 300);
+}
+
+/**
+ * 上游错误报文：JSON 对象，或（不是对象 / 解析失败时的）截断原文。
+ * `null` 与标量都走原文分支，调用方取属性不会抛错；解析用未截断的原文，
+ * 避免长报文被截成非法 JSON 而误判成纯文本。
+ */
+function parseUpstreamError(body: string): UpstreamErrorPayload | string {
   try {
-    const parsed = JSON.parse(body) as { error?: { message?: unknown } | string; message?: unknown };
-    const message = typeof parsed.error === "string" ? parsed.error : parsed.error?.message ?? parsed.message;
-    return typeof message === "string" && message.trim() ? message.trim().slice(0, 300) : "";
+    const parsed: unknown = JSON.parse(body);
+    return isUpstreamErrorRecord(parsed) ? parsed : body.trim().slice(0, 300);
   } catch {
     return body.trim().slice(0, 300);
   }
+}
+
+type UpstreamErrorPayload = { error?: unknown; message?: unknown; type?: unknown };
+
+function isUpstreamErrorRecord(value: unknown): value is Record<string, unknown> & Partial<UpstreamErrorPayload> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function resolveApiKey(dependencies: OpencodeZenDependencies): string {
@@ -542,7 +572,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           let body: Record<string, unknown>;
           let extraHeaders: Record<string, string> = {};
           if (protocol === "chat") {
-            // chat 端点门禁要求官方模板在场：转换后仍走注入（带工具时 agent 模板 + 官方工具集）。
+            // chat 端点门禁为工具名单制：转换后仍走注入（垫补 read/bash 之名并强制流式）。
             body = injectOpencodeZenFingerprintBody({ ...converted, model: upstreamModel }, session, store?.effortLevels(upstreamModel) ?? []).body;
           } else {
             body = { ...converted, model: upstreamModel, stream: true };

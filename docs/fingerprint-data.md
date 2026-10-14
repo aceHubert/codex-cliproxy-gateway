@@ -10,7 +10,7 @@
 | codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `catalog.ts` 的 `cloneCodexBase()`（条目 `base_instructions` + 模板） |
 | qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `catalog.ts` 的 `buildQoderCatalog()`（条目） |
 | agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `catalog.ts` 的 `buildAgyCatalog()`（条目） |
-| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`（门禁模板注入） |
+| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`（门禁占位垫补；模板与官方工具定义仅作回退材料） |
 
 与本机安装强相关的值（ZCode.app 版本）仍在运行时动态读取，JSON 中的 `appVersion` 只是分析快照。
 
@@ -20,13 +20,14 @@ Codex 发系统提示词的依据是模型目录条目的 `model_messages.instru
 Codex catalog 快照 `models/codex_client_models.json` 中每个条目都带 17–21K 字符的官方提示词；
 网关合成条目从 gpt-5.5 快照基底 clone，Codex 因此按官方默认提示词发送）。**只替换
 `base_instructions` 无效**——2026-10-09 实测 qoder 会话仍发出 19,754 字符官方提示词，与
-模板长度一致；五个适配器因此统一在**合成条目时**把 `base_instructions` 与
+模板长度一致；适配器因此统一在**合成条目时**把 `base_instructions` 与
 `model_messages.instructions_template` 一并替换为各自的 `agentSystemPrompt`（共享helper
 `src/catalog.ts` 的 `withAgentSystemPrompt`），替换随目录缓存落盘，`/v1/models` 侧只读合并、
 不重建条目。Codex 从 `/v1/models?client_version=…` 或 `config.toml` 的 `model_catalog_json`
-缓存文件读到条目后，按官方客户端提示词发送。OpenCode Zen 同时保留转发路的门禁模板注入：
-客户端送来的首条 system 已完整包含待注入模板时（目录下发即如此），`injectOpencodeZenFingerprintBody`
-不再重复注入，避免同一段提示词出现两遍。
+缓存文件读到条目后，按官方客户端提示词发送。**OpenCode Zen 例外（2026-10-14 起）**：zen 条目
+不再替换提示词（保留 gpt-5.5 基底的官方 Codex 提示词，客户端由此恢复 apply_patch freeform 协议
+与 shell 约定等操作性指令），转发路模板注入同日移除——门禁复测确认 system 内容不再被检查，
+过闸只靠工具名单占位垫补（见下文 opencode-zen notes 与 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)）。
 codebuddy 适配器的 `workbuddy/*` 条目**沿用同一份 CodeBuddy 主提示词**（本机无 WorkBuddy IDE
 与其产品配置；未做 `CODEBUDDY_BRAND_NAME` 品牌名替换——真实 WorkBuddy 客户端是把同一模板的
 CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一起改错，需拿到 WorkBuddy 产品
@@ -152,6 +153,17 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
     Schema，未随包发布，要严格对齐需再抓一次真实请求体。
   - GA 标头集新增 `x-opencode-session-id`/`X-Session-Id`/`x-opencode-parent-session-id`，网关未跟随
     （现有标头集实测仍过门禁）；W3C 追踪头实测当前非必需，保留无碍。
+  - **2026-10-14 门禁复测（`scripts/zen-gate-probe.ts`，8 项逐项隔离）**：三层画像部分失效——
+    ① 请求体层的 system 模板匹配**已不再执行**（无模板 + 官方工具全量 200，无模板 + 仅
+    read/bash 空 schema 占位也 200）；② 工具检查现为**名单制**：tools 必须同时含 `read` 与
+    `bash`/`shell` 之一的名字，schema 完全不检查（空对象占位可过），未知名工具（exec_command、
+    apply_patch 等）不干扰；③ 标头层放宽：两段式 UA `opencode/<semver>`（1.19.0 实测）重新
+    放行，四段式 GA UA 继续可用。会话 id 格式与 `stream: true` 未重测，以 10-08 结论为准。
+    对照探针（回退形态：官方模板+官方工具全量）仍 200，官方数据继续有效作回退材料。
+    **已据此实施收敛（同日）**：转发路模板注入与官方工具合并移除，`injectOpencodeZenFingerprintBody`
+    改为经 `padOpencodeZenGateTools` 垫补 `read`+`bash` 无参占位（客户端同名定义优先、shell 可
+    替代 bash、无工具流量同样垫补）；zen 目录条目停发提示词替换（保留 gpt-5.5 基底 Codex 提示词）。
+    见 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)。
   - **目录与端点（双文件缓存）**：store 维护两个磁盘文件——`opencode-zen-metadata.json` 存原始
     数据（动态 ids + 官方元数据 + 探针裁决；ids 按 10 分钟 TTL 刷新，元数据按 6 小时 TTL
     刷新，裁决 24 小时），`opencode-zen-catalog.json` 存由上述数据生成的**成品目录**
@@ -165,8 +177,9 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
      取 `latest` 版本号 → 从 `@opencode/core@<ver>` 的 `dist/chunks` 找 `src/session/runner/prompt/system.txt`
      与 `PROMPT_TITLE`（`grep -rl 'You are a title generator'`）→ 取
      `@opencode/cli-<platform>-<arch>@<ver>` 平台二进制（本机 darwin-arm64 约 81MB tgz），
-     `grep -a 'user-agent=opencode/'` 读 UA 三段的真实字面量。取值后必须用真实上游探针验证：
-     无工具走标题模板、带工具走 agent 模板 + 官方工具名，两条都要 200。
+     `grep -a 'user-agent=opencode/'` 读 UA 三段的真实字面量。取值后必须用真实上游探针验证
+     （`bun scripts/zen-gate-probe.ts`：对照探针必须 200；其余探针翻转即门禁画像漂移，按结论
+     重估注入面并更新本文件与 fingerprint-data.json）。
   2. **mitm 抓包（回退，需能运行客户端）**：`HTTPS_PROXY` 指向 mitmdump 并让运行时信任自签 CA
      （`NODE_EXTRA_CA_CERTS=~/.mitmproxy/mitmproxy-ca-cert.pem`），跑一次 zen 免费模型请求即可读到
      真实标头与请求体。GA 客户端在隔离 HOME 下内部 server 可能起不来（2026-10-09 未走通），此时用方法 1。
@@ -186,3 +199,5 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
 | 2026-10-09 | 全部 | 系统提示词改在**合成期**替换：`base_instructions` 与 `model_messages.instructions_template` 一并替换（客户端按模板渲染，只改 base_instructions 无效——实测 qoder 会话仍发 19,754 字符官方提示词）；替换点从 serve 期下移到各适配器合成/落盘处，缓存即成品；zen 补下发模板 |
 | 2026-10-09 | opencode-zen | 磁盘缓存拆双文件：`opencode-zen-metadata.json`（ids + 元数据 + 探针裁决，ids 10 分钟 / 元数据 6 小时 TTL）与 `opencode-zen-catalog.json`（成品目录，每次刷新元数据后重新生成，`/v1/models` 直接合并）；转发上游 baseURL 改由元数据 `provider.api` 确认，缺失回退缺省端点 |
 | 2026-10-09 | 全部 | 运维约束：Codex Desktop picker 的 `model/list` 只取第一页（`limit:100`，不跟随 cursor），适配器模型按 priority 排在目录尾部——上游 `selectedModels` 勾选过多会把 agy/zen 等挤出首页（实测 124 条时 zen 位于第 114-124 位、首页 0 条）。上游选择需控制目录总数 ≤ 100，恢复原选择可查 `gateway.log` 的 `config changed by models --sync` 审计行 |
+| 2026-10-14 | opencode-zen | 门禁复测（8 项隔离探针）：system 模板不再检查、工具检查收紧为名单制（须含 `read` 与 `bash`/`shell` 之名、schema 不查）、两段式 UA 放行；新增诊断探针 `scripts/zen-gate-probe.ts` 供指纹失效时单点重测，收敛方案见 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md) |
+| 2026-10-14 | opencode-zen | 实施收敛：`mergeOpencodeZenTools`（官方 12 定义合并）与模板注入移除，替换为 `padOpencodeZenGateTools`（read+bash 无参占位，无工具流量同样垫补——实测名单闸不分有无工具）；zen 目录条目停发提示词替换、回落 gpt-5.5 基底 Codex 提示词；`fingerprint-data.json` 的模板/工具降级为回退材料（探针脚本含回退形态对照项）；真机已核对服务目录（`/v1/models?client_version=` 两字段均为 Codex 提示词、OpenCode 模板零残留） |
