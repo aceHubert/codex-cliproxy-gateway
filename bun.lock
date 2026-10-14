@@ -38,7 +38,7 @@
     },
     "apps/gateway": {
       "name": "@agent-proxy/gateway",
-      "version": "0.11.2",
+      "version": "0.11.3",
       "bin": {
         "agent-proxy": "./dist/index.js",
       },
@@ -61,7 +61,7 @@
     },
     "packages/agy": {
       "name": "@agent-proxy/agy",
-      "version": "0.11.1",
+      "version": "0.11.3",
       "dependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
@@ -71,7 +71,7 @@
     },
     "packages/codebuddy": {
       "name": "@agent-proxy/codebuddy",
-      "version": "0.11.1",
+      "version": "0.11.3",
       "dependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
@@ -98,7 +98,7 @@
     },
     "packages/opencode-zen": {
       "name": "@agent-proxy/opencode-zen",
-      "version": "0.11.2",
+      "version": "0.11.3",
       "dependencies": {
         "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
@@ -113,7 +113,7 @@
     },
     "packages/qoder": {
       "name": "@agent-proxy/qoder",
-      "version": "0.11.1",
+      "version": "0.11.3",
       "dependencies": {
         "@agent-proxy/codebuddy": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
@@ -124,7 +124,7 @@
     },
     "packages/zcode": {
       "name": "@agent-proxy/zcode",
-      "version": "0.11.1",
+      "version": "0.11.3",
       "dependencies": {
         "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
