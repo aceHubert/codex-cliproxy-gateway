@@ -1,27 +1,21 @@
 /**
- * 统一请求转换 convertRequest(from, to, body, options)。
+ * 统一请求转换 convertRequest(from, to, body, options)——语义链路为
+ * 上游 endpoint (from) → 调用方 route (to)：from 是桥接拼装的上游目标协议，
+ * to 是调用方端点协议；请求数据流为 to → from（把客户端体转成上游体）。
  *
- * 以 npm llm-bridge 2.0.1 为底座：跨协议方向先做源协议最小规范化，再调用库的
- * Universal 转换，最后只针对已实测证明的缺口（L1–L6、C1/C2 与 anthropic 工具轮
- * 配对、assistant 工具内容污染）补齐结果；from === to 时结构化克隆直通，不执行
- * 任何厂商政策。工具身份（custom / namespace 安全名）在声明、调用历史与 named
- * tool_choice 间共用同一映射，映射表随结果返回供响应侧还原。
+ * 以 @ai-sdk/*（ai 引擎层，见 engine.ts）为出站拼装底座：三来源先规范化为引擎
+ * prompt（V4 消息/部件），经离线捕获得到目标协议请求体，再按目标协议补齐引擎
+ * 不表达的合同字段（stream/parallel/strict/reasoning_effort/text.format 等）。
+ * to === from 时结构化克隆直通，不执行任何厂商政策。工具身份（custom /
+ * namespace 安全名）在声明、调用历史与 named tool_choice 间共用同一映射，映射
+ * 表随结果返回供响应侧还原。
  */
 
 import { createHash } from "node:crypto";
-import {
-  anthropicToUniversal,
-  openaiToUniversal,
-  openaiResponsesToUniversal,
-  universalToAnthropic,
-  universalToGoogle,
-  universalToOpenAI,
-  universalToOpenaiResponses,
-} from "llm-bridge";
-import type { UniversalBody, UniversalContent, UniversalMessage, UniversalTool } from "llm-bridge";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import { buildTargetBody, type EngineFunctionTool, type EnginePrompt, type EngineToolChoice } from "./engine.ts";
 import {
   BridgeConversionError,
-  type BridgeProtocol,
   type ConvertRequestOptions,
   type ConvertRequestResult,
   type ToolIdentity,
@@ -29,6 +23,13 @@ import {
 } from "./types.ts";
 
 type Json = Record<string, unknown>;
+
+/* 引擎 prompt 的结构部件类型（与 @ai-sdk/provider 的 V4 部件结构一致，仅内部使用）。 */
+type Part =
+  | { type: "text"; text: string }
+  | { type: "file"; data: { type: "data"; data: string } | { type: "url"; url: string }; mediaType: string; providerOptions?: Record<string, unknown> }
+  | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown }
+  | { type: "tool-result"; toolCallId: string; toolName: string; output: { type: "text"; value: string } | { type: "content"; value: Array<{ type: "text"; text: string } | { type: "file"; data: { type: "data"; data: string } | { type: "url"; url: string }; mediaType: string }> } };
 
 function isRecord(value: unknown): value is Json {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -73,10 +74,17 @@ const CUSTOM_TOOL_PARAMETERS: Json = {
   additionalProperties: false,
 };
 
+/** data URL → {mimeType, base64}；非 data URL 返回 undefined。 */
+function parseDataUrl(url: string): { mimeType: string; data: string } | undefined {
+  const match = /^data:([^;,]+);base64,(.+)$/i.exec(url);
+  return match ? { mimeType: match[1]!, data: match[2]! } : undefined;
+}
+
 /* ============================== 工具身份注册表 ============================== */
 
 class ToolRegistry {
   readonly map: ToolIdentityMap = new Map();
+  readonly strippedTools: string[] = [];
   constructor(
     private readonly notes: string[],
     private readonly nameMapper: ConvertRequestOptions["mapToolName"],
@@ -109,9 +117,159 @@ class ToolRegistry {
     return undefined;
   }
 
+  /**
+   * 原名身份注册（同协议直通专用）：请求体不经改名，身份表 key 与 body 中
+   * 实际工具名一致，不生成请求体未使用的映射名。
+   */
+  registerIdentity(name: string, namespace: string | undefined, custom: boolean): void {
+    this.map.set(name, { name, custom, ...(namespace === undefined ? {} : { namespace }) });
+  }
+
   note(message: string): void {
     this.notes.push(message);
   }
+
+  /** 记录一次工具声明剥离：notes 负责可观测，strippedTools 负责程序化消费。 */
+  stripTool(toolType: string, message: string): void {
+    this.strippedTools.push(toolType);
+    this.note(message);
+  }
+}
+
+/* ============================ 源规范化公共结构 ============================ */
+
+type StructuredOutput =
+  | { kind: "json_schema"; name: string; strict?: boolean; schema: Json }
+  | { kind: "json_object" };
+
+interface PreparedRequest {
+  model: string;
+  prompt: EnginePrompt;
+  tools: EngineFunctionTool[];
+  /** 映射名 → 声明中的 strict（引擎不表达，按目标协议后合并）。 */
+  strictByTool: Map<string, boolean>;
+  toolChoice?: EngineToolChoice;
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  stopSequences?: string[];
+  stream?: boolean;
+  parallelToolCalls?: boolean;
+  /** Anthropic 源 tool_choice.disable_parallel_tool_use；目标 anthropic 时后合并。 */
+  disableParallelToolUse?: boolean;
+  reasoningEffort?: string;
+  structured?: StructuredOutput;
+  /** 与 prompt 中非 system 消息一一对应；chat 目标保持内容块数组形状。 */
+  contentArrayFlags: boolean[];
+}
+
+/** 逐条消息构建 prompt：user/assistant/tool 消息按序入列，system 统一合并为一条。 */
+class PromptBuilder {
+  private readonly prompt: EnginePrompt = [];
+  /** 与最终 prompt 中非 system 消息一一对应的“源内容是数组”标志（chat 目标保形用）。 */
+  private readonly arrayFlags: boolean[] = [];
+  private pendingAssistant: Part[] | null = null;
+  private pendingArray = false;
+
+  constructor(private readonly systemTexts: string[]) {}
+
+  private flush(): void {
+    if (this.pendingAssistant === null) return;
+    const parts = this.pendingAssistant;
+    const wasArray = this.pendingArray;
+    this.pendingAssistant = null;
+    this.pendingArray = false;
+    this.prompt.push({ role: "assistant", content: parts as never });
+    this.arrayFlags.push(wasArray);
+  }
+
+  /**
+   * Responses 源的相邻 assistant 合并规则与 main 适配器一致（非对称）：
+   * 工具调用无条件并入相邻 assistant 轮（文本轮 + 后续调用合成一轮）；
+   * 文本仅并入已含调用的轮，纯文本轮之间保持独立消息。
+   */
+  appendAssistantText(part: Part, wasArray: boolean): void {
+    const hasToolCall = this.pendingAssistant?.some((entry) => entry.type === "tool-call") ?? false;
+    if (this.pendingAssistant !== null && hasToolCall) {
+      this.pendingAssistant.push(part);
+      this.pendingArray = this.pendingArray || wasArray;
+      return;
+    }
+    this.flush();
+    this.pendingAssistant = [part];
+    this.pendingArray = wasArray;
+  }
+
+  appendAssistantToolCall(part: Part): void {
+    if (this.pendingAssistant !== null) {
+      this.pendingAssistant.push(part);
+      return;
+    }
+    this.pendingAssistant = [part];
+    this.pendingArray = false;
+  }
+
+  pushUser(parts: Part[], wasArray: boolean): void {
+    this.flush();
+    this.prompt.push({ role: "user", content: parts as never });
+    this.arrayFlags.push(wasArray);
+  }
+
+  pushToolResult(part: Part): void {
+    this.flush();
+    this.prompt.push({ role: "tool", content: [part] as never });
+    this.arrayFlags.push(false);
+  }
+
+  /** chat/anthropic 源的 assistant 消息保持一一对应，不跨消息合并。 */
+  pushAssistantMessage(parts: Part[], wasArray: boolean): void {
+    this.flush();
+    this.prompt.push({ role: "assistant", content: parts as never });
+    this.arrayFlags.push(wasArray);
+  }
+
+  build(): EnginePrompt {
+    this.flush();
+    if (this.systemTexts.length > 0) {
+      return [{ role: "system", content: this.systemTexts.join("\n\n") }, ...this.prompt];
+    }
+    return this.prompt;
+  }
+
+  contentArrayFlags(): boolean[] {
+    return [...this.arrayFlags];
+  }
+}
+
+/** 文本 + 图片/音频内容块 → 引擎部件；data URL 转 base64 部件，URL 保持引用。 */
+function contentPartsFromImages(
+  entries: Array<{ kind: "text"; text: string } | { kind: "image"; url: string; detail?: string } | { kind: "audio"; data: string; format: string }>,
+): Part[] {
+  const parts: Part[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "text") {
+      parts.push({ type: "text", text: entry.text });
+    } else if (entry.kind === "image") {
+      const inline = parseDataUrl(entry.url);
+      parts.push(inline
+        ? { type: "file", data: { type: "data", data: inline.data }, mediaType: inline.mimeType }
+        : { type: "file", data: { type: "url", url: entry.url }, mediaType: "image" });
+      if (entry.detail === "auto" || entry.detail === "high" || entry.detail === "low") {
+        (parts.at(-1) as { providerOptions?: Record<string, unknown> }).providerOptions = { openai: { imageDetail: entry.detail } };
+      }
+    } else {
+      parts.push({ type: "file", data: { type: "data", data: entry.data }, mediaType: `audio/${entry.format}` });
+    }
+  }
+  return parts;
+}
+
+function parseReasoningEffort(source: Json): string | undefined {
+  if (!isRecord(source.reasoning)) return undefined;
+  const effort = source.reasoning.effort;
+  if (effort === undefined) return undefined;
+  if (typeof effort !== "string") fail("reasoning.effort 必须是字符串");
+  return effort === "none" ? undefined : effort;
 }
 
 /* ============================ Responses 源规范化 ============================ */
@@ -122,7 +280,6 @@ interface ToolDeclaration {
   parameters: Json;
   strict?: boolean;
   description: string;
-  raw: Json;
   namespace?: string;
 }
 
@@ -141,7 +298,7 @@ function collectResponsesTools(source: Json, registry: ToolRegistry): ToolDeclar
         continue;
       }
       if (raw.type !== "function" && raw.type !== "custom") {
-        registry.note(`已剥离内置工具声明 ${String(raw.type)}（服务器内置工具由插件前处理决定回放或降级）`);
+        registry.stripTool(String(raw.type), `已剥离内置工具声明 ${String(raw.type)}（服务器内置工具由插件前处理决定回放或降级）`);
         continue;
       }
       const custom = raw.type === "custom";
@@ -156,7 +313,6 @@ function collectResponsesTools(source: Json, registry: ToolRegistry): ToolDeclar
         parameters: custom ? CUSTOM_TOOL_PARAMETERS : (raw.parameters as Json),
         strict: typeof raw.strict === "boolean" ? raw.strict : undefined,
         description: details.join("\n\n"),
-        raw,
         namespace,
       });
     }
@@ -165,62 +321,53 @@ function collectResponsesTools(source: Json, registry: ToolRegistry): ToolDeclar
   return declarations;
 }
 
-/** 工具输出内容 → 文本；结构化块合并为可读文本而不是 JSON.stringify 整个数组。 */
-/** Responses 消息内容 → Universal 内容；覆盖库对 output_text 等类型的 JSON.stringify 兜底。 */
-function buildResponsesMessageContent(content: unknown, field: string): { content: UniversalContent[]; wasArray: boolean } {
-  if (typeof content === "string") {
-    return { content: [{ type: "text", text: content }], wasArray: false };
-  }
+/** Responses 输出内容块 → 统一内容描述（text / image / audio）。 */
+function describeResponsesContent(content: unknown, field: string): Array<{ kind: "text"; text: string } | { kind: "image"; url: string; detail?: string } | { kind: "audio"; data: string; format: string }> {
+  if (typeof content === "string") return [{ kind: "text", text: content }];
   if (!Array.isArray(content)) fail(`${field} 必须是字符串或内容数组`);
-  const parts: UniversalContent[] = [];
+  const entries: Array<{ kind: "text"; text: string } | { kind: "image"; url: string; detail?: string } | { kind: "audio"; data: string; format: string }> = [];
   for (const raw of content) {
     if (!isRecord(raw)) fail(`${field} 包含无效内容块`);
     if (raw.type === "input_text" || raw.type === "output_text" || raw.type === "text" || raw.type === "summary_text") {
       if (typeof raw.text !== "string") fail(`${field}.text 必须是字符串`);
-      parts.push({ type: "text", text: raw.text });
+      entries.push({ kind: "text", text: raw.text });
     } else if (raw.type === "input_image" || raw.type === "image") {
       const source = raw.image_url ?? raw.url;
       const url = typeof source === "string" ? source : isRecord(source) && typeof source.url === "string" ? source.url : undefined;
       if (!url) fail("input_image 缺少 image_url");
-      const dataMatch = /^data:([^;,]+);base64,(.+)$/i.exec(url);
       const detail = isRecord(source) && (source.detail === "auto" || source.detail === "high" || source.detail === "low") ? source.detail : undefined;
-      parts.push({
-        type: "image",
-        media: dataMatch
-          ? { mimeType: dataMatch[1], data: dataMatch[2], ...(detail ? { detail } : {}) }
-          : { url, ...(detail ? { detail } : {}) },
-      });
+      entries.push({ kind: "image", url, ...(detail ? { detail } : {}) });
     } else if (raw.type === "input_audio" && isRecord(raw.input_audio)) {
-      parts.push({ type: "audio", media: { data: typeof raw.input_audio.data === "string" ? raw.input_audio.data : "", mimeType: `audio/${typeof raw.input_audio.format === "string" ? raw.input_audio.format : "wav"}` } });
+      entries.push({ kind: "audio", data: typeof raw.input_audio.data === "string" ? raw.input_audio.data : "", format: typeof raw.input_audio.format === "string" ? raw.input_audio.format : "wav" });
     } else {
       fail(`${field} 包含不支持的内容块类型 ${String(raw.type)}`);
     }
   }
-  return { content: parts, wasArray: true };
+  return entries;
 }
 
-function responsesToolResultText(output: unknown): string {
-  if (typeof output === "string") return output;
+/** 工具输出内容 → 引擎 tool-result 输出；纯文本用 text，混合内容用 content。 */
+function responsesToolResultOutput(output: unknown): Part extends { output: infer O } ? O : never {
   if (Array.isArray(output)) {
-    const texts: string[] = [];
-    for (const part of output) {
-      if (isRecord(part) && (part.type === "input_text" || part.type === "output_text" || part.type === "text") && typeof part.text === "string") {
-        texts.push(part.text);
-      }
-    }
-    return texts.join("");
+    const entries = describeResponsesContent(output, "function_call_output.output");
+    const hasFile = entries.some((entry) => entry.kind !== "text");
+    if (!hasFile) return { type: "text", value: entries.map((entry) => entry.kind === "text" ? entry.text : "").join("") } as never;
+    return {
+      type: "content",
+      value: contentPartsFromImages(entries) as never,
+    } as never;
   }
-  if (output === undefined || output === null) return "";
-  return JSON.stringify(output);
+  if (typeof output === "string") return { type: "text", value: output } as never;
+  if (output === undefined || output === null) return { type: "text", value: "" } as never;
+  return { type: "text", value: JSON.stringify(output) } as never;
 }
 
 /**
- * Responses 源 → Universal。库转换文本 / 图片 / 音频 / system 消息与基础参数；
- * 以下缺口按实测补齐：字符串 input 字段丢失（L1）、function_call 历史变空 user
- * 消息（L2）、instructions / parallel_tool_calls 不进通用体、custom / namespace
- * 声明被静默剥离（C2/C3）。
+ * Responses 源 → PreparedRequest。引擎承担目标协议拼装；以下语义按实测由封装层
+ * 保留：instructions/system/developer 合并（L1/C1）、function_call 历史与输出
+ * 配对（L2）、custom/namespace 声明与身份（C2/C3）、strict 与 named choice。
  */
-function responsesSourceToUniversal(body: Json, registry: ToolRegistry): UniversalBody {
+function responsesSourceToPrepared(body: Json, registry: ToolRegistry): PreparedRequest {
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("桥接转换是无状态的：previous_response_id 需要完整 input 历史");
   }
@@ -230,10 +377,6 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
     : asArray(input);
   if (input !== undefined && !Array.isArray(input) && typeof input !== "string") fail("input 必须是字符串或数组");
 
-  // 仅做字符串 input 的数组化；instructions / 工具 / 历史在补齐阶段统一处理。
-  const sanitizedSource: Json = { ...body, input: items };
-  delete sanitizedSource.tools;
-  const universal: UniversalBody = openaiResponsesToUniversal(sanitizedSource as never);
   const declarations = collectResponsesTools(body, registry);
   const declarationByKey = new Map<string, ToolDeclaration>();
   for (const declaration of declarations) {
@@ -244,14 +387,12 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
   if (typeof body.instructions === "string" && body.instructions) systemTexts.push(body.instructions);
   else if (body.instructions !== undefined && typeof body.instructions !== "string") fail("instructions 必须是字符串");
 
-  const messages: UniversalMessage[] = [];
+  const builder = new PromptBuilder(systemTexts);
+  const callNameByld = new Map<string, string>();
   const callsSeen = new Set<string>();
   const resultsSeen = new Set<string>();
-  const libraryMessage = (index: number): UniversalMessage | undefined =>
-    universal.messages.find((message) => message.metadata.originalIndex === index);
 
-  for (let index = 0; index < items.length; index++) {
-    const item = items[index];
+  for (const item of items) {
     if (!isRecord(item)) fail("Responses input 包含非对象 history 项");
     const type = typeof item.type === "string" ? item.type : "message";
     if (type === "message" || type === undefined) {
@@ -275,19 +416,12 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
         continue;
       }
       if (role !== "user" && role !== "assistant") fail(`不支持的消息 role ${String(role)}`);
-      const rebuilt = buildResponsesMessageContent(item.content, `${role} 消息`);
-      const previous = messages.at(-1);
-      if (role === "assistant" && previous?.role === "assistant" && previous.content.some((entry) => entry.type === "tool_call")) {
-        // 与 main 同一轮次语义：带调用的 assistant 轮次内追加文本。
-        previous.content.push(...rebuilt.content);
-        previous.metadata = { ...previous.metadata, content_was_array: previous.metadata.content_was_array || rebuilt.wasArray };
+      const wasArray = Array.isArray(item.content);
+      const parts = contentPartsFromImages(describeResponsesContent(item.content, `${role} 消息`));
+      if (role === "assistant") {
+        for (const part of parts) builder.appendAssistantText(part, wasArray);
       } else {
-        messages.push({
-          id: `msg_${index}`,
-          role,
-          content: rebuilt.content,
-          metadata: { provider: "openai-responses", originalIndex: index, content_was_array: rebuilt.wasArray },
-        });
+        builder.pushUser(parts, wasArray);
       }
       continue;
     }
@@ -302,6 +436,7 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
       const callId = requiredString(item.call_id ?? item.id, `${type}.call_id`);
       if (callsSeen.has(callId)) fail(`history 中重复的工具调用 ID ${callId}`);
       callsSeen.add(callId);
+      callNameByld.set(callId, mapped);
       const rawArguments = custom ? item.input : item.arguments;
       if (custom && typeof rawArguments !== "string") fail("custom_tool_call.input 必须是字符串");
       const argumentsText = custom
@@ -312,28 +447,8 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
             ? JSON.stringify(rawArguments)
             : fail(`${type} 的 arguments 必须是 JSON 对象或 JSON 字符串`);
       if (!custom) safeJsonParse(argumentsText, `${type}.arguments`);
-      const content: UniversalContent = {
-        type: "tool_call",
-        tool_call: {
-          id: callId,
-          name: mapped,
-          arguments: custom ? safeJsonParse(argumentsText, `${type}.input`) : safeJsonParse(argumentsText, `${type}.arguments`),
-          metadata: { custom, source_arguments: argumentsText },
-        },
-      };
-      // 与 main 适配器同一轮次语义：相邻 assistant 消息（文本/调用）合并为一条，
-      // 只有 user / 工具输出 / 系统内容会结束当前 assistant 轮次。
-      const previous = messages.at(-1);
-      if (previous && previous.role === "assistant") {
-        previous.content.push(content);
-      } else {
-        messages.push({
-          id: `msg_${index}`,
-          role: "assistant",
-          content: [content],
-          metadata: { provider: "openai-responses", originalIndex: index },
-        });
-      }
+      const parsed = custom ? safeJsonParse(argumentsText, `${type}.input`) : safeJsonParse(argumentsText, `${type}.arguments`);
+      builder.appendAssistantToolCall({ type: "tool-call", toolCallId: callId, toolName: mapped, input: parsed });
       continue;
     }
     if (type === "function_call_output" || type === "custom_tool_call_output") {
@@ -341,23 +456,11 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
       if (!callsSeen.has(callId)) fail(`${type} 未关联到同一 input 中匹配的工具调用 ${callId}`);
       if (resultsSeen.has(callId)) fail(`history 中重复的工具输出 ID ${callId}`);
       resultsSeen.add(callId);
-      messages.push({
-        id: `msg_${index}`,
-        role: "tool",
-        content: [
-          {
-            type: "tool_result",
-            tool_result: {
-              tool_call_id: callId,
-              name: "",
-              result: responsesToolResultText(item.output ?? item.content),
-              // 结构化内容（含图片）保留在元数据中：anthropic 目标可原样表达，
-              // chat 等目标按各自合同降级。
-              metadata: { content: Array.isArray(item.output) ? item.output : undefined },
-            },
-          },
-        ],
-        metadata: { provider: "openai-responses", originalIndex: index, tool_call_id: callId },
+      builder.pushToolResult({
+        type: "tool-result",
+        toolCallId: callId,
+        toolName: callNameByld.get(callId) ?? "",
+        output: responsesToolResultOutput(item.output ?? item.content),
       });
       continue;
     }
@@ -369,83 +472,90 @@ function responsesSourceToUniversal(body: Json, registry: ToolRegistry): Univers
     fail(`不支持的 Responses history 项类型 ${type}`);
   }
 
-  universal.messages = messages;
-  if (systemTexts.length > 0) universal.system = systemTexts.join("\n\n");
-  else delete universal.system;
-
-  // 工具声明：库只保留 type === "function" 并丢弃 custom / namespace / strict（C2）。
-  const tools: UniversalTool[] = declarations.map((declaration) => ({
+  const tools: EngineFunctionTool[] = declarations.map((declaration) => ({
+    type: "function",
     name: declaration.mapped,
     description: declaration.description,
-    parameters: declaration.parameters,
-    metadata: { custom: declaration.custom, strict: declaration.strict },
-    _original: { provider: "openai-responses", raw: declaration.raw },
+    inputSchema: declaration.parameters,
+    ...(declaration.strict === true ? { strict: true } : {}),
   }));
-  if (tools.length > 0) universal.tools = tools;
-  else delete universal.tools;
+  const strictByTool = new Map<string, boolean>();
+  for (const declaration of declarations) {
+    if (declaration.strict === true) strictByTool.set(declaration.mapped, true);
+  }
 
-  const maxTokens = positiveInteger(body.max_output_tokens, "max_output_tokens");
-  if (maxTokens !== undefined) universal.max_tokens = maxTokens;
-
+  const prepared: PreparedRequest = {
+    model: typeof body.model === "string" && body.model ? body.model : "",
+    prompt: builder.build(),
+    contentArrayFlags: builder.contentArrayFlags(),
+    tools,
+    strictByTool,
+    maxOutputTokens: positiveInteger(body.max_output_tokens, "max_output_tokens"),
+  };
+  if (body.temperature !== undefined) {
+    if (typeof body.temperature !== "number") fail("temperature 必须是数字");
+    prepared.temperature = body.temperature;
+  }
+  if (body.top_p !== undefined) {
+    if (typeof body.top_p !== "number") fail("top_p 必须是数字");
+    prepared.topP = body.top_p;
+  }
+  if (body.stream === true) prepared.stream = true;
   if (body.parallel_tool_calls !== undefined) {
     if (typeof body.parallel_tool_calls !== "boolean") fail("parallel_tool_calls 必须是布尔值");
-    universal.provider_params = { ...(universal.provider_params ?? {}), parallel_tool_calls: body.parallel_tool_calls };
+    prepared.parallelToolCalls = body.parallel_tool_calls;
   }
-  delete (universal as { reasoning_effort?: unknown }).reasoning_effort;
-  if (isRecord(body.reasoning)) {
-    const effort = body.reasoning.effort;
-    if (effort !== undefined) {
-      if (typeof effort !== "string") fail("reasoning.effort 必须是字符串");
-      if (effort !== "none") (universal as { reasoning_effort?: string }).reasoning_effort = effort;
-    }
-    if (body.reasoning.summary !== undefined) {
-      universal.provider_params = { ...(universal.provider_params ?? {}), reasoning_summary: body.reasoning.summary };
-    }
-  }
-  // effort → thinking 预算是各服务合同（如 ZCode 的预算表），桥接只保留 effort 语义。
-  delete universal.thinking;
+  prepared.reasoningEffort = parseReasoningEffort(body);
 
-  applyResponsesToolChoice(universal, body.tool_choice, declarationByKey, registry);
-  return universal;
-}
-
-function applyResponsesToolChoice(
-  universal: UniversalBody,
-  value: unknown,
-  declarationByKey: Map<string, ToolDeclaration>,
-  registry: ToolRegistry,
-): void {
-  if (value === undefined) return;
-  // 库会把任意形状的 tool_choice 原样透传进通用体；先清除再按合同回填。
-  delete universal.tool_choice;
-  if (typeof value === "string") {
-    if (value === "auto" || value === "none" || value === "required") {
-      universal.tool_choice = value;
-      return;
+  if (isRecord(body.text) && isRecord(body.text.format)) {
+    const format = body.text.format;
+    if (format.type === "json_schema") {
+      prepared.structured = {
+        kind: "json_schema",
+        name: requiredString(format.name, "text.format.name"),
+        strict: format.strict === true ? true : undefined,
+        schema: isRecord(format.schema) ? (format.schema as Json) : fail("text.format.schema 必须是 JSON 对象"),
+      };
+    } else if (format.type === "json_object") {
+      prepared.structured = { kind: "json_object" };
+    } else if (format.type !== undefined && format.type !== "text") {
+      fail(`不支持的 text.format 类型 ${String(format.type)}`);
     }
-    fail(`不支持的 tool_choice ${value}`);
   }
-  if (!isRecord(value)) fail("不支持的 tool_choice");
-  if (value.type === "function" || value.type === "custom") {
-    const name = requiredString(value.name, "tool_choice.name");
-    const namespace = value.namespace === undefined || value.namespace === null ? undefined : requiredString(value.namespace, "tool_choice.namespace");
-    const declaration = declarationByKey.get(JSON.stringify([namespace ?? null, name]));
-    if (!declaration) fail(`工具选择引用了未声明的工具 ${name}`);
-    if (declaration.custom !== (value.type === "custom")) fail("tool_choice 与工具声明类型不一致");
-    universal.tool_choice = { name: declaration.mapped };
-    return;
+
+  const choice = body.tool_choice;
+  if (choice !== undefined) {
+    if (typeof choice === "string") {
+      if (choice === "auto" || choice === "none" || choice === "required") prepared.toolChoice = { type: choice };
+      else fail(`不支持的 tool_choice ${choice}`);
+    } else if (isRecord(choice) && (choice.type === "function" || choice.type === "custom")) {
+      const name = requiredString(choice.name, "tool_choice.name");
+      const namespace = choice.namespace === undefined || choice.namespace === null ? undefined : requiredString(choice.namespace, "tool_choice.namespace");
+      const declaration = declarationByKey.get(JSON.stringify([namespace ?? null, name]));
+      if (!declaration) fail(`工具选择引用了未声明的工具 ${name}`);
+      if (declaration.custom !== (choice.type === "custom")) fail("tool_choice 与工具声明类型不一致");
+      prepared.toolChoice = { type: "tool", toolName: declaration.mapped };
+    } else if (isRecord(choice) && typeof choice.type === "string" && choice.type !== "") {
+      // 指向服务器内置工具的选择跨协议不可表达：显式回退 auto 并记录。
+      registry.note(`tool_choice ${String(choice.type)} 指向内置工具，跨协议目标回退为 auto`);
+    } else {
+      fail("不支持的 tool_choice");
+    }
   }
-  if (typeof value.type === "string" && value.type !== "") {
-    // 指向服务器内置工具的选择跨协议不可表达：显式回退 auto 并记录。
-    registry.note(`tool_choice ${String(value.type)} 指向内置工具，跨协议目标回退为 auto`);
-    return;
-  }
-  fail("不支持的 tool_choice");
+  return prepared;
 }
 
 /* ========================= Chat Completions 源规范化 ========================= */
 
-function chatSourceToUniversal(body: Json, registry: ToolRegistry): UniversalBody {
+/** Chat image_url 部件源（字符串或对象）→ 统一 image 描述。 */
+function describeChatImage(source: unknown): { url: string; detail?: string } {
+  const url = typeof source === "string" ? source : isRecord(source) && typeof source.url === "string" ? source.url : undefined;
+  if (!url) fail("image_url 部件缺少 url");
+  const detail = isRecord(source) && (source.detail === "auto" || source.detail === "high" || source.detail === "low") ? source.detail : undefined;
+  return { url, ...(detail ? { detail } : {}) };
+}
+
+function chatSourceToPrepared(body: Json, registry: ToolRegistry): PreparedRequest {
   if (!Array.isArray(body.messages)) fail("messages 必须是数组");
   const maxCompletion = positiveInteger(body.max_completion_tokens, "max_completion_tokens");
   const maxTokens = positiveInteger(body.max_tokens, "max_tokens");
@@ -454,45 +564,84 @@ function chatSourceToUniversal(body: Json, registry: ToolRegistry): UniversalBod
   }
   if (body.n !== undefined && body.n !== 1) fail("跨协议转换仅支持 n = 1");
 
-  // 库只读取第一条 system 消息、丢弃其余；这里先合并为一条（保留顺序）。
-  const messages = asArray(body.messages);
-  if (messages.some((entry) => isRecord(entry) && entry.role === "system")) {
-    const merged: unknown[] = [];
-    const systemTexts: string[] = [];
-    for (const message of messages) {
-      if (isRecord(message) && message.role === "system") {
-        if (typeof message.content === "string") systemTexts.push(message.content);
-        else if (Array.isArray(message.content)) {
-          for (const part of message.content) {
-            if (isRecord(part) && part.type === "text" && typeof part.text === "string") systemTexts.push(part.text);
-          }
+  const systemTexts: string[] = [];
+  const builder = new PromptBuilder(systemTexts);
+  const callNameById = new Map<string, string>();
+
+  for (const message of body.messages) {
+    if (!isRecord(message)) fail("messages 包含无效消息");
+    const role = message.role;
+    if (role === "system" || role === "developer") {
+      if (typeof message.content === "string") systemTexts.push(message.content);
+      else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (isRecord(part) && part.type === "text" && typeof part.text === "string") systemTexts.push(part.text);
         }
-      } else merged.push(message);
+      }
+      continue;
     }
-    if (systemTexts.length > 0) merged.unshift({ role: "system", content: systemTexts.join("\n\n") });
-    body = { ...body, messages: merged };
+    if (role === "user") {
+      const entries: Array<{ kind: "text"; text: string } | { kind: "image"; url: string; detail?: string }> = [];
+      if (typeof message.content === "string") entries.push({ kind: "text", text: message.content });
+      else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (!isRecord(part)) fail("user 消息包含无效内容块");
+          if (part.type === "text" && typeof part.text === "string") entries.push({ kind: "text", text: part.text });
+          else if (part.type === "image_url") entries.push({ kind: "image", ...describeChatImage(part.image_url) });
+          else fail(`user 消息包含不支持的内容块类型 ${String(part.type)}`);
+        }
+      } else if (message.content !== undefined) fail("user 消息 content 必须是字符串或数组");
+      builder.pushUser(contentPartsFromImages(entries), Array.isArray(message.content));
+      continue;
+    }
+    if (role === "assistant") {
+      const parts: Part[] = [];
+      if (typeof message.content === "string" && message.content) parts.push({ type: "text", text: message.content });
+      else if (Array.isArray(message.content)) {
+        for (const part of message.content) {
+          if (!isRecord(part)) fail("assistant 消息包含无效内容块");
+          if (part.type === "text" && typeof part.text === "string" && part.text) parts.push({ type: "text", text: part.text });
+          else if (part.type !== "text") fail(`assistant 消息包含不支持的内容块类型 ${String(part.type)}`);
+        }
+      }
+      // 调用历史中的 function.name 是客户端原始名：与声明共用同一身份映射改写，
+      // 保证上游看到的声明、历史、named choice 三处一致（L4 身份合同）。
+      for (const call of asArray(message.tool_calls)) {
+        if (!isRecord(call) || !isRecord(call.function)) fail("assistant.tool_calls 包含无效调用");
+        const original = requiredString(call.function.name, "tool_calls.function.name");
+        const mapped = registry.mappedFor(original) ?? registry.register(original, undefined, false);
+        const rawArguments = call.function.arguments;
+        const parsed = typeof rawArguments === "string"
+          ? safeJsonParse(rawArguments, "tool_calls.function.arguments")
+          : isRecord(rawArguments)
+            ? rawArguments
+            : fail("tool_calls.function.arguments 必须是 JSON 对象或 JSON 字符串");
+        const callId = requiredString(call.id, "tool_calls.id");
+        if (callNameById.has(callId)) fail(`history 中重复的工具调用 ID ${callId}`);
+        callNameById.set(callId, mapped);
+        parts.push({ type: "tool-call", toolCallId: callId, toolName: mapped, input: parsed });
+      }
+      builder.pushAssistantMessage(parts, Array.isArray(message.content));
+      continue;
+    }
+    if (role === "tool") {
+      const callId = requiredString(message.tool_call_id, "tool 消息 tool_call_id");
+      const toolName = callNameById.get(callId);
+      if (!toolName) fail(`tool 消息 ${callId} 未关联到前述 assistant 工具调用`);
+      const text = typeof message.content === "string" ? message.content : isRecord(message.content) || Array.isArray(message.content) ? JSON.stringify(message.content) : "";
+      builder.pushToolResult({ type: "tool-result", toolCallId: callId, toolName, output: { type: "text", value: text } });
+      continue;
+    }
+    fail(`不支持的消息 role ${String(role)}`);
   }
 
-  const sanitized: Json = { ...body };
-  delete sanitized.tools;
-  const universal: UniversalBody = openaiToUniversal(sanitized as never);
-
-  // 调用历史中的 function.name 是客户端原始名：与声明共用同一身份映射改写，
-  // 保证上游看到的声明、历史、named choice 三处一致（L4 身份合同）。
-  for (const message of universal.messages) {
-    for (const call of message.tool_calls ?? []) {
-      const mapped = registry.mappedFor(call.name) ?? registry.register(call.name, undefined, false);
-      call.name = mapped;
-    }
-  }
-
-  // L5：库在 tool.function.description 上直接崩溃；先校验类型，custom 以可逆
-  // {input:string} 参数降级为 function 声明。
-  const tools: UniversalTool[] = [];
+  // 工具声明：custom 以可逆 {input:string} 参数降级为 function（L5），内置类型剥离。
+  const tools: EngineFunctionTool[] = [];
+  const strictByTool = new Map<string, boolean>();
   for (const raw of asArray(body.tools)) {
     if (!isRecord(raw)) fail("tools 包含无效声明");
     if (raw.type !== "function" && raw.type !== "custom") {
-      registry.note(`已剥离工具声明 ${String(raw.type)}（目标协议不可表达）`);
+      registry.stripTool(String(raw.type), `已剥离工具声明 ${String(raw.type)}（目标协议不可表达）`);
       continue;
     }
     const custom = raw.type === "custom";
@@ -501,43 +650,78 @@ function chatSourceToUniversal(body: Json, registry: ToolRegistry): UniversalBod
     const description = custom
       ? (typeof raw.description === "string" ? raw.description : "")
       : isRecord(raw.function) && typeof raw.function.description === "string" ? raw.function.description : "";
-    const strict = !custom && isRecord(raw.function) && raw.function.strict === true ? true : undefined;
     tools.push({
+      type: "function",
       name: mapped,
       description,
-      parameters: custom ? CUSTOM_TOOL_PARAMETERS : isRecord(raw.function) && isRecord(raw.function.parameters) ? (raw.function.parameters as Json) : { type: "object", properties: {} },
-      metadata: { custom, strict },
-      _original: { provider: "openai", raw },
+      inputSchema: custom ? CUSTOM_TOOL_PARAMETERS : isRecord(raw.function) && isRecord(raw.function.parameters) ? (raw.function.parameters as Json) : { type: "object", properties: {} },
     });
+    if (!custom && isRecord(raw.function) && raw.function.strict === true) strictByTool.set(mapped, true);
   }
-  if (tools.length > 0) universal.tools = tools;
-  else delete universal.tools;
 
-  const choice = body.tool_choice;
-  if (choice !== undefined) {
-    if (typeof choice === "string") {
-      if (choice === "auto" || choice === "none" || choice === "required") universal.tool_choice = choice;
-      else fail(`不支持的 tool_choice ${choice}`);
-    } else if (isRecord(choice) && choice.type === "function" && isRecord(choice.function)) {
-      const name = requiredString(choice.function.name, "tool_choice.function.name");
-      const mapped = registry.mappedFor(name);
-      if (!mapped) fail(`工具选择引用了未声明的工具 ${name}`);
-      universal.tool_choice = { name: mapped };
-    } else if (isRecord(choice) && typeof choice.type === "string" && choice.type !== "") {
-      registry.note(`tool_choice ${String(choice.type)} 跨协议不可表达，目标回退为 auto`);
-    } else {
-      fail("不支持的 tool_choice");
+  const prepared: PreparedRequest = {
+    model: typeof body.model === "string" && body.model ? body.model : "",
+    prompt: builder.build(),
+    contentArrayFlags: builder.contentArrayFlags(),
+    tools,
+    strictByTool,
+    maxOutputTokens: maxCompletion ?? maxTokens,
+  };
+  if (body.temperature !== undefined) {
+    if (typeof body.temperature !== "number") fail("temperature 必须是数字");
+    prepared.temperature = body.temperature;
+  }
+  if (body.top_p !== undefined) {
+    if (typeof body.top_p !== "number") fail("top_p 必须是数字");
+    prepared.topP = body.top_p;
+  }
+  if (body.stream === true) prepared.stream = true;
+  if (body.parallel_tool_calls !== undefined) {
+    if (typeof body.parallel_tool_calls !== "boolean") fail("parallel_tool_calls 必须是布尔值");
+    prepared.parallelToolCalls = body.parallel_tool_calls;
+  }
+  prepared.reasoningEffort = parseReasoningEffort(body);
+
+  if (isRecord(body.response_format)) {
+    const format = body.response_format;
+    if (format.type === "json_schema" && isRecord(format.json_schema)) {
+      const schema = format.json_schema;
+      prepared.structured = {
+        kind: "json_schema",
+        name: requiredString(schema.name, "response_format.json_schema.name"),
+        strict: schema.strict === true ? true : undefined,
+        schema: isRecord(schema.schema) ? (schema.schema as Json) : fail("response_format.json_schema.schema 必须是 JSON 对象"),
+      };
+    } else if (format.type === "json_object") {
+      prepared.structured = { kind: "json_object" };
+    } else if (format.type !== undefined && format.type !== "text") {
+      fail(`不支持的 response_format 类型 ${String(format.type)}`);
     }
   }
 
   if (body.stop !== undefined) {
     const stop = Array.isArray(body.stop) ? body.stop : [body.stop];
     if (stop.some((entry) => typeof entry !== "string")) fail("stop 必须是字符串或字符串数组");
-    universal.provider_params = { ...(universal.provider_params ?? {}), stop_sequences: stop as string[] };
+    prepared.stopSequences = stop as string[];
   }
-  const limit = maxCompletion ?? maxTokens;
-  if (limit !== undefined) universal.max_tokens = limit;
-  return universal;
+
+  const choice = body.tool_choice;
+  if (choice !== undefined) {
+    if (typeof choice === "string") {
+      if (choice === "auto" || choice === "none" || choice === "required") prepared.toolChoice = { type: choice };
+      else fail(`不支持的 tool_choice ${choice}`);
+    } else if (isRecord(choice) && choice.type === "function" && isRecord(choice.function)) {
+      const name = requiredString(choice.function.name, "tool_choice.function.name");
+      const mapped = registry.mappedFor(name);
+      if (!mapped) fail(`工具选择引用了未声明的工具 ${name}`);
+      prepared.toolChoice = { type: "tool", toolName: mapped };
+    } else if (isRecord(choice) && typeof choice.type === "string" && choice.type !== "") {
+      registry.note(`tool_choice ${String(choice.type)} 跨协议不可表达，目标回退为 auto`);
+    } else {
+      fail("不支持的 tool_choice");
+    }
+  }
+  return prepared;
 }
 
 /* ============================ Anthropic 源规范化 ============================ */
@@ -579,98 +763,346 @@ function recordAnthropicLosses(body: Json, registry: ToolRegistry): void {
   }
 }
 
-function anthropicSourceToUniversal(body: Json, registry: ToolRegistry): UniversalBody {
+function anthropicSourceToPrepared(body: Json, registry: ToolRegistry): PreparedRequest {
   if (!Array.isArray(body.messages)) fail("messages 必须是数组");
   recordAnthropicLosses(body, registry);
-  const sanitized: Json = { ...body };
-  delete sanitized.tools;
-  const universal: UniversalBody = anthropicToUniversal(sanitized as never);
 
-  // 调用历史中的 tool_use.name 与声明共用同一身份映射改写（同 chat 源的三处一致合同）。
-  for (const message of universal.messages) {
-    for (const content of message.content) {
-      if (content.type === "tool_call" && content.tool_call) {
-        const mapped = registry.mappedFor(content.tool_call.name) ?? registry.register(content.tool_call.name, undefined, false);
-        content.tool_call.name = mapped;
+  const systemTexts: string[] = [];
+  if (typeof body.system === "string" && body.system) systemTexts.push(body.system);
+  else if (Array.isArray(body.system)) {
+    for (const part of body.system) {
+      if (isRecord(part) && part.type === "text" && typeof part.text === "string" && part.text) systemTexts.push(part.text);
+    }
+  }
+
+  const builder = new PromptBuilder(systemTexts);
+  const callNameById = new Map<string, string>();
+
+  for (const message of asArray(body.messages)) {
+    if (!isRecord(message)) fail("messages 包含无效消息");
+    const role = message.role;
+    if (role !== "user" && role !== "assistant") fail(`不支持的消息 role ${String(role)}`);
+    const userParts: Part[] = [];
+    const assistantParts: Part[] = [];
+    const toolResults: Part[] = [];
+    for (const block of asArray(message.content)) {
+      if (!isRecord(block)) fail("消息包含无效内容块");
+      if (block.type === "text") {
+        if (typeof block.text !== "string") fail("text 块缺少字符串 text");
+        (role === "user" ? userParts : assistantParts).push({ type: "text", text: block.text });
+      } else if (block.type === "image" && isRecord(block.source)) {
+        const source = block.source;
+        if (source.type === "base64") {
+          const mediaType = requiredString(source.media_type, "image.source.media_type");
+          const data = requiredString(source.data, "image.source.data");
+          (role === "user" ? userParts : assistantParts).push({ type: "file", data: { type: "data", data }, mediaType });
+        } else if (source.type === "url") {
+          const url = requiredString(source.url, "image.source.url");
+          (role === "user" ? userParts : assistantParts).push({ type: "file", data: { type: "url", url }, mediaType: "image" });
+        } else {
+          fail(`不支持的 image source 类型 ${String(source.type)}`);
+        }
+      } else if (block.type === "tool_use") {
+        const id = requiredString(block.id, "tool_use.id");
+        const original = requiredString(block.name, "tool_use.name");
+        // 与声明共用同一身份映射改写（三处一致合同）。
+        const mapped = registry.mappedFor(original) ?? registry.register(original, undefined, false);
+        if (callNameById.has(id)) fail(`history 中重复的工具调用 ID ${id}`);
+        callNameById.set(id, mapped);
+        assistantParts.push({
+          type: "tool-call",
+          toolCallId: id,
+          toolName: mapped,
+          input: isRecord(block.input) ? block.input : fail("tool_use.input 必须是 JSON 对象"),
+        });
+      } else if (block.type === "tool_result") {
+        const id = requiredString(block.tool_use_id, "tool_result.tool_use_id");
+        const toolName = callNameById.get(id);
+        if (!toolName) fail(`tool_result ${id} 未关联到前述 tool_use 调用`);
+        // 块数组中图片跨协议目标无法在 tool 消息中表达：保留文本并显式记录。
+        if (Array.isArray(block.content)) {
+          const texts: string[] = [];
+          let droppedImages = 0;
+          for (const part of block.content) {
+            if (isRecord(part) && part.type === "text" && typeof part.text === "string") texts.push(part.text);
+            else if (isRecord(part) && part.type === "image") droppedImages++;
+          }
+          if (droppedImages > 0) registry.note(`工具结果 ${id} 含 ${droppedImages} 个图片块，跨协议目标无法在 tool 消息中表达`);
+          toolResults.push({ type: "tool-result", toolCallId: id, toolName, output: { type: "text", value: texts.join("") } });
+        } else {
+          const text = typeof block.content === "string" ? block.content : "";
+          toolResults.push({ type: "tool-result", toolCallId: id, toolName, output: { type: "text", value: text } });
+        }
+      } else if (block.type === "thinking" || block.type === "redacted_thinking") {
+        continue; // 已由 recordAnthropicLosses 记录丢弃。
+      } else {
+        fail(`不支持的内容块类型 ${String(block.type)}`);
       }
+    }
+    if (role === "user") {
+      // V4 要求 tool-result 位于 role:"tool" 消息；先出结果再出剩余 user 内容。
+      for (const result of toolResults) builder.pushToolResult(result);
+      if (userParts.length > 0) builder.pushUser(userParts, true);
+    } else {
+      builder.pushAssistantMessage(assistantParts, true);
     }
   }
 
   // 工具声明：input_schema → 同一身份映射（custom / 内置工具在此协议不存在）。
-  const tools: UniversalTool[] = [];
+  const tools: EngineFunctionTool[] = [];
   for (const raw of asArray(body.tools)) {
     if (!isRecord(raw)) fail("tools 包含无效声明");
     const type = typeof raw.type === "string" ? raw.type : "custom";
     if (type !== "custom" && type !== "function") {
-      registry.note(`已剥离 Anthropic 服务器工具 ${type}（跨协议不可表达）`);
+      registry.stripTool(type, `已剥离 Anthropic 服务器工具 ${type}（跨协议不可表达）`);
       continue;
     }
-    const custom = type === "custom";
     const original = requiredString(raw.name, "工具 name");
-    const mapped = registry.register(original, undefined, custom);
+    const mapped = registry.register(original, undefined, type === "custom");
     const schema = isRecord(raw.input_schema) ? (raw.input_schema as Json) : undefined;
     tools.push({
+      type: "function",
       name: mapped,
       description: typeof raw.description === "string" ? raw.description : "",
-      parameters: custom || !schema ? CUSTOM_TOOL_PARAMETERS : schema,
-      metadata: { custom },
-      _original: { provider: "anthropic", raw },
+      inputSchema: type === "custom" || !schema ? CUSTOM_TOOL_PARAMETERS : schema,
     });
   }
-  if (tools.length > 0) universal.tools = tools;
-  else delete universal.tools;
 
-  // tool_choice：库把 "any" 原样透传（chat 目标非法）；disable_parallel_tool_use 收敛为 parallel = false。
+  const prepared: PreparedRequest = {
+    model: typeof body.model === "string" && body.model ? body.model : "",
+    prompt: builder.build(),
+    contentArrayFlags: builder.contentArrayFlags(),
+    tools,
+    strictByTool: new Map(),
+    maxOutputTokens: positiveInteger(body.max_tokens, "max_tokens"),
+  };
+  if (body.temperature !== undefined) {
+    if (typeof body.temperature !== "number") fail("temperature 必须是数字");
+    prepared.temperature = body.temperature;
+  }
+  if (body.top_p !== undefined) {
+    if (typeof body.top_p !== "number") fail("top_p 必须是数字");
+    prepared.topP = body.top_p;
+  }
+  if (body.stop_sequences !== undefined) {
+    if (!Array.isArray(body.stop_sequences) || body.stop_sequences.some((entry) => typeof entry !== "string")) fail("stop_sequences 必须是字符串数组");
+    prepared.stopSequences = body.stop_sequences as string[];
+  }
+
   const choice = body.tool_choice;
   if (choice !== undefined) {
     if (typeof choice === "string") {
-      if (choice === "auto" || choice === "none") universal.tool_choice = choice;
-      else if (choice === "any") universal.tool_choice = "required";
+      if (choice === "auto" || choice === "none") prepared.toolChoice = { type: choice };
+      else if (choice === "any") prepared.toolChoice = { type: "required" };
       else fail(`不支持的 Anthropic tool_choice ${choice}`);
     } else if (isRecord(choice)) {
       const type = choice.type;
       if (type === "tool" && typeof choice.name === "string") {
         const mapped = registry.mappedFor(choice.name);
         if (!mapped) fail(`工具选择引用了未声明的工具 ${choice.name}`);
-        universal.tool_choice = { name: mapped };
+        prepared.toolChoice = { type: "tool", toolName: mapped };
       } else if (type === "auto" || type === "any") {
-        universal.tool_choice = type === "any" ? "required" : "auto";
+        prepared.toolChoice = type === "any" ? { type: "required" } : { type: "auto" };
       } else if (type === "none") {
-        universal.tool_choice = "none";
+        prepared.toolChoice = { type: "none" };
       } else {
         fail(`不支持的 Anthropic tool_choice 类型 ${String(type)}`);
       }
-      if (choice.disable_parallel_tool_use === true) {
-        universal.provider_params = { ...(universal.provider_params ?? {}), parallel_tool_calls: false };
-      }
+      if (choice.disable_parallel_tool_use === true) prepared.disableParallelToolUse = true;
     } else {
       fail("不支持的 tool_choice");
     }
   }
+  return prepared;
+}
 
-  // 工具结果：库把块数组原样放在 result；跨协议目标需要纯文本，图片部分记录降级。
-  for (const message of universal.messages) {
-    for (const content of message.content) {
-      if (content.type === "tool_result" && content.tool_result && Array.isArray(content.tool_result.result)) {
-        const blocks = content.tool_result.result as unknown[];
-        const texts: string[] = [];
-        let droppedImages = 0;
-        for (const block of blocks) {
-          if (isRecord(block) && block.type === "text" && typeof block.text === "string") texts.push(block.text);
-          else if (isRecord(block) && block.type === "image") droppedImages++;
+/* ============================== Gemini 源规范化 ============================== */
+
+/**
+ * Gemini generateContent 源 → PreparedRequest。model 不在请求体（由 URL 路径
+ * 携带），由 options.model 提供；thought 思考 parts 跨协议不可表达，与 Anthropic
+ * thinking 块同合同：显式剥离并记录，不伪装为文本。
+ */
+function geminiSourceToPrepared(body: Json, registry: ToolRegistry): PreparedRequest {
+  if (!Array.isArray(body.contents)) fail("contents 必须是数组");
+
+  const systemTexts: string[] = [];
+  const instruction = body.systemInstruction;
+  if (typeof instruction === "string" && instruction) systemTexts.push(instruction);
+  else if (isRecord(instruction) && Array.isArray(instruction.parts)) {
+    for (const part of instruction.parts) {
+      if (isRecord(part) && typeof part.text === "string" && part.text) systemTexts.push(part.text);
+    }
+  } else if (instruction !== undefined) {
+    fail("systemInstruction 必须是字符串或 {parts} 对象");
+  }
+
+  const builder = new PromptBuilder(systemTexts);
+  const callIdByIndex: string[] = [];
+  const openCallsByName = new Map<string, string[]>();
+  const respondedCalls = new Set<string>();
+
+  let contentIndex = 0;
+  for (const message of body.contents) {
+    if (!isRecord(message)) fail("contents 包含无效条目");
+    const role = message.role;
+    if (role !== "user" && role !== "model") fail(`不支持的内容 role ${String(role)}`);
+    const userParts: Part[] = [];
+    const modelParts: Part[] = [];
+    const toolResults: Part[] = [];
+    for (const part of asArray(message.parts)) {
+      if (!isRecord(part)) fail("parts 包含无效块");
+      if (typeof part.text === "string" && part.text) {
+        if (part.thought === true) {
+          registry.note("Gemini thought 思考块跨协议目标不可表达，已丢弃（与 Anthropic thinking 块同合同）");
+          continue;
         }
-        if (droppedImages > 0) registry.note(`工具结果 ${String(content.tool_result.tool_call_id)} 含 ${droppedImages} 个图片块，跨协议目标无法在 tool 消息中表达`);
-        content.tool_result.result = texts.join("");
+        (role === "model" ? modelParts : userParts).push({ type: "text", text: part.text });
+      } else if (isRecord(part.inlineData) && typeof part.inlineData.data === "string") {
+        (role === "model" ? modelParts : userParts).push({
+          type: "file",
+          data: { type: "data", data: part.inlineData.data },
+          mediaType: typeof part.inlineData.mimeType === "string" ? part.inlineData.mimeType : "image",
+        });
+      } else if (isRecord(part.fileData) && typeof part.fileData.fileUri === "string") {
+        (role === "model" ? modelParts : userParts).push({
+          type: "file",
+          data: { type: "url", url: part.fileData.fileUri },
+          mediaType: typeof part.fileData.mimeType === "string" ? part.fileData.mimeType : "image",
+        });
+      } else if (isRecord(part.functionCall)) {
+        const name = requiredString(part.functionCall.name, "functionCall.name");
+        const mapped = registry.mappedFor(name) ?? registry.register(name, undefined, false);
+        const declaredId = typeof part.functionCall.id === "string" && part.functionCall.id ? part.functionCall.id : undefined;
+        const callId = declaredId ?? `gemini_call_${contentIndex}_${callIdByIndex.length}`;
+        callIdByIndex.push(callId);
+        if (!declaredId) {
+          const queue = openCallsByName.get(name) ?? [];
+          queue.push(callId);
+          openCallsByName.set(name, queue);
+        }
+        modelParts.push({
+          type: "tool-call",
+          toolCallId: callId,
+          toolName: mapped,
+          input: isRecord(part.functionCall.args) ? part.functionCall.args : {},
+        });
+      } else if (isRecord(part.functionResponse)) {
+        const name = typeof part.functionResponse.name === "string" ? part.functionResponse.name : "";
+        let callId = typeof part.functionResponse.id === "string" && part.functionResponse.id ? part.functionResponse.id : undefined;
+        if (!callId && name) {
+          // 无 id 响应按「最近一次同名未应答调用」配对；配不上则显式报错。
+          const queue = openCallsByName.get(name);
+          while (queue && queue.length > 0) {
+            const candidate = queue.shift()!;
+            if (!respondedCalls.has(candidate)) {
+              callId = candidate;
+              break;
+            }
+          }
+        }
+        if (!callId) fail(`functionResponse 缺少 id 且无法按名称 ${name || "(空)"} 配对到未应答调用`);
+        respondedCalls.add(callId);
+        const mapped = registry.mappedFor(name) ?? (name ? registry.register(name, undefined, false) : "");
+        toolResults.push({
+          type: "tool-result",
+          toolCallId: callId,
+          toolName: mapped,
+          output: { type: "text", value: JSON.stringify(isRecord(part.functionResponse.response) ? part.functionResponse.response : part.functionResponse.response ?? "") },
+        });
+      } else if (typeof part.thoughtSignature === "string") {
+        registry.note("Gemini thoughtSignature 跨协议目标不可表达，已丢弃");
+      } else {
+        fail("parts 包含不支持的块（无 text/inlineData/fileData/functionCall/functionResponse）");
       }
+    }
+    if (role === "model") {
+      for (const part of modelParts) {
+        if (part.type === "tool-call") builder.appendAssistantToolCall(part);
+        else builder.appendAssistantText(part, true);
+      }
+    } else {
+      for (const result of toolResults) builder.pushToolResult(result);
+      if (userParts.length > 0) builder.pushUser(userParts, true);
+    }
+    contentIndex++;
+  }
+
+  // 工具声明：functionDeclarations 展平（parametersJsonSchema 优先，兼容旧 parameters）。
+  const tools: EngineFunctionTool[] = [];
+  for (const raw of asArray(body.tools)) {
+    if (!isRecord(raw)) fail("tools 包含无效声明");
+    if (!Array.isArray(raw.functionDeclarations)) continue;
+    for (const declaration of raw.functionDeclarations) {
+      if (!isRecord(declaration)) fail("functionDeclarations 包含无效声明");
+      const original = requiredString(declaration.name, "functionDeclarations.name");
+      const mapped = registry.register(original, undefined, false);
+      const schema = isRecord(declaration.parametersJsonSchema)
+        ? (declaration.parametersJsonSchema as Json)
+        : isRecord(declaration.parameters)
+          ? (declaration.parameters as Json)
+          : { type: "object", properties: {} };
+      tools.push({
+        type: "function",
+        name: mapped,
+        description: typeof declaration.description === "string" ? declaration.description : "",
+        inputSchema: schema,
+      });
     }
   }
 
-  const maxTokens = positiveInteger(body.max_tokens, "max_tokens");
-  if (maxTokens !== undefined) universal.max_tokens = maxTokens;
-  return universal;
+  const prepared: PreparedRequest = {
+    model: typeof body.model === "string" && body.model ? body.model : "",
+    prompt: builder.build(),
+    contentArrayFlags: builder.contentArrayFlags(),
+    tools,
+    strictByTool: new Map(),
+  };
+  const generation = isRecord(body.generationConfig) ? body.generationConfig : {};
+  const maxTokens = positiveInteger(generation.maxOutputTokens, "generationConfig.maxOutputTokens");
+  if (maxTokens !== undefined) prepared.maxOutputTokens = maxTokens;
+  if (generation.temperature !== undefined) {
+    if (typeof generation.temperature !== "number") fail("generationConfig.temperature 必须是数字");
+    prepared.temperature = generation.temperature;
+  }
+  if (generation.topP !== undefined) {
+    if (typeof generation.topP !== "number") fail("generationConfig.topP 必须是数字");
+    prepared.topP = generation.topP;
+  }
+  if (generation.stopSequences !== undefined) {
+    if (!Array.isArray(generation.stopSequences) || generation.stopSequences.some((entry) => typeof entry !== "string")) fail("generationConfig.stopSequences 必须是字符串数组");
+    prepared.stopSequences = generation.stopSequences as string[];
+  }
+  if (generation.responseMimeType === "application/json" || isRecord(generation.responseJsonSchema) || isRecord(generation.responseSchema)) {
+    const schema = isRecord(generation.responseJsonSchema) ? generation.responseJsonSchema : isRecord(generation.responseSchema) ? generation.responseSchema : undefined;
+    prepared.structured = schema
+      ? { kind: "json_schema", name: "output", schema: schema as Json }
+      : { kind: "json_object" };
+  } else if (generation.responseMimeType !== undefined && generation.responseMimeType !== "text/plain") {
+    fail(`不支持的 generationConfig.responseMimeType ${String(generation.responseMimeType)}`);
+  }
+
+  const config = isRecord(body.toolConfig) && isRecord(body.toolConfig.functionCallingConfig) ? body.toolConfig.functionCallingConfig : undefined;
+  if (config !== undefined) {
+    const mode = typeof config.mode === "string" ? config.mode : "AUTO";
+    if (mode === "AUTO" || mode === "NONE") prepared.toolChoice = { type: mode === "AUTO" ? "auto" : "none" };
+    else if (mode === "ANY") {
+      const allowed = Array.isArray(config.allowedFunctionNames) ? config.allowedFunctionNames : [];
+      if (allowed.length === 1 && typeof allowed[0] === "string") {
+        const mapped = registry.mappedFor(allowed[0]);
+        if (!mapped) fail(`functionCallingConfig 引用了未声明的工具 ${allowed[0]}`);
+        prepared.toolChoice = { type: "tool", toolName: mapped };
+      } else {
+        prepared.toolChoice = { type: "required" };
+      }
+    } else {
+      fail(`不支持的 functionCallingConfig.mode ${mode}`);
+    }
+  }
+  return prepared;
 }
 
-/* ================================ 目标投影 ================================ */
+/* ================================ 目标后合并 ================================ */
 
 function stripUndefined(body: Json): Json {
   const result: Json = {};
@@ -681,7 +1113,7 @@ function stripUndefined(body: Json): Json {
   return result;
 }
 
-/** 递归删除 undefined 值的键（库输出常带 strict: undefined 之类的显式空键）。 */
+/** 递归删除 undefined 值的键（引擎体在序列化前可能带显式空键）。 */
 function deepStripUndefined(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(deepStripUndefined);
   if (isRecord(value)) {
@@ -695,304 +1127,242 @@ function deepStripUndefined(value: unknown): unknown {
   return value;
 }
 
-/** assistant 工具调用消息的 content 污染修复：有文本取文本，否则置 null。 */
-function fixChatToolCallContent(body: Json): void {
-  if (!Array.isArray(body.messages)) return;
-  for (const message of body.messages) {
-    if (!isRecord(message) || !Array.isArray(message.tool_calls)) continue;
-    if (Array.isArray(message.content)) {
-      const texts = message.content
-        .filter((entry) => isRecord(entry) && entry.type === "text")
-        .map((entry) => String((entry as Json).text ?? ""));
-      const text = texts.join("");
-      message.content = text === "" ? null : text;
-    } else if (typeof message.content === "string" && message.content === "") {
-      message.content = null;
+/** 工具声明 strict 合同：引擎只写自己的默认（false），声明为 true 时才保留。 */
+function applyToolStrict(target: "chat-completions" | "responses", body: Json, prepared: PreparedRequest): void {
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  for (const raw of tools) {
+    if (!isRecord(raw)) continue;
+    if (target === "chat-completions" && isRecord(raw.function)) {
+      if (raw.function.strict === true || prepared.strictByTool.get(String(raw.function.name)) === true) raw.function.strict = true;
+      else delete raw.function.strict;
+    } else if (target === "responses") {
+      if (prepared.strictByTool.get(String(raw.name)) === true) raw.strict = true;
+      else delete raw.strict;
     }
   }
 }
 
-function emitChatTarget(universal: UniversalBody, registry: ToolRegistry, stopSequences: string[] | undefined): Json {
-  const prepared = structuredClone(universal);
-  for (const message of prepared.messages) {
-    // 内容中的 tool_call 条目提升到 msg.tool_calls：emitter 对顶层 tool_calls 走
-    // 干净路径（content 置 null），留在内容里则会变成 JSON 字符串文本污染。
-    const contentCalls = message.content.filter((entry) => entry.type === "tool_call" && entry.tool_call);
-    if (contentCalls.length > 0) {
-      message.tool_calls = [
-        ...(message.tool_calls ?? []),
-        ...contentCalls.map((entry) => entry.tool_call!),
-      ];
-      message.content = message.content.filter((entry) => entry.type !== "tool_call");
-    }
-    // anthropic 源的 tool_result 在 user 消息内；chat 目标必须是 role "tool" +
-    // tool_call_id（库不重排角色，导致孤立输出）。
-    if (message.role === "user") {
-      const results = message.content.filter((entry) => entry.type === "tool_result" && entry.tool_result);
-      if (results.length > 0 && results.length === message.content.length) {
-        message.role = "tool";
-        message.metadata = { ...message.metadata, tool_call_id: results[0]!.tool_result!.tool_call_id };
-      }
-    }
-  }
-  const body = universalToOpenAI(prepared as never) as unknown as Json;
-  fixChatToolCallContent(body);
-  // 内容形状保形：源为数组内容的消息在 chat 目标保持内容块数组。
-  const chatMessages = Array.isArray(body.messages) ? body.messages : [];
-  const offset = universal.system ? 1 : 0;
-  prepared.messages.forEach((message, index) => {
-    if (message.metadata?.content_was_array !== true) return;
-    const emitted = chatMessages[offset + index];
-    if (isRecord(emitted) && typeof emitted.content === "string" && message.role !== "system") {
-      emitted.content = emitted.content === "" ? [] : [{ type: "text", text: emitted.content }];
-    }
+function structuredToJsonSchemaFormat(structured: StructuredOutput): Json {
+  if (structured.kind === "json_object") return { type: "json_object" };
+  return { type: "json_schema", name: structured.name, ...(structured.strict === true ? { strict: true } : {}), schema: structured.schema };
+}
+
+/** 引擎在未携带 tools 时可能省略 tool_choice；按合同形状补齐/覆盖。 */
+function applyChatToolChoice(body: Json, prepared: PreparedRequest): void {
+  const choice = prepared.toolChoice;
+  if (choice === undefined) return;
+  if (choice.type === "tool") body.tool_choice = { type: "function", function: { name: choice.toolName } };
+  else body.tool_choice = choice.type;
+}
+
+/**
+ * chat 目标 system 语义防御：本包三个源都把 system/developer/instructions
+ * 归并为 system 语义；盐化 modelId 已避免引擎的 developer 映射，此处兜底
+ * 把可能出现的 developer 首消息还原为 role: "system"。
+ */
+function applyChatSystemRole(body: Json): void {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const first = messages[0];
+  if (isRecord(first) && first.role === "developer") first.role = "system";
+}
+
+/** 内容形状保形：源为数组内容的消息在 chat 目标保持内容块数组。 */
+function applyChatContentShape(body: Json, prepared: PreparedRequest): void {
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const first = isRecord(messages[0]) ? messages[0].role : undefined;
+  const offset = first === "system" || first === "developer" ? 1 : 0;
+  prepared.contentArrayFlags.forEach((wasArray, index) => {
+    if (wasArray !== true) return;
+    const emitted = messages[offset + index];
+    if (!isRecord(emitted) || typeof emitted.content !== "string" || emitted.role === "system" || emitted.role === "developer") return;
+    emitted.content = emitted.content === "" ? [] : [{ type: "text", text: emitted.content }];
   });
-  if (stopSequences !== undefined && stopSequences.length > 0) body.stop = stopSequences;
-  if (isRecord(body.tool_choice) && typeof body.tool_choice.name === "string") {
-    const mapped = body.tool_choice.name;
-    const identity = registry.map.get(mapped);
-    body.tool_choice = { type: "function", function: { name: mapped } };
-    if (identity?.custom === true) registry.note(`named tool_choice ${identity.name} 为 custom 工具，chat 目标以 function 形状表达`);
-  }
-  return deepStripUndefined(stripUndefined(body)) as Json;
 }
 
-function emitAnthropicTarget(universal: UniversalBody, registry: ToolRegistry, stopSequences: string[] | undefined): Json {
-  const prepared = structuredClone(universal);
-  // 收集带结构化内容的 tool_result（anthropic 目标可表达文本+图片块）。
-  const structuredResults: Array<unknown[] | undefined> = [];
-  for (const message of prepared.messages) {
-    // 通用 tool 角色在 anthropic 必须是 user 消息内的 tool_result 块。
-    if (message.role === "tool") message.role = "user";
-    for (const content of message.content) {
-      if (content.type === "tool_result") {
-        structuredResults.push(Array.isArray(content.tool_result?.metadata?.content) ? content.tool_result?.metadata?.content as unknown[] : undefined);
-      }
-    }
+function applyChatExtras(body: Json, prepared: PreparedRequest): void {
+  applyChatSystemRole(body);
+  applyChatContentShape(body, prepared);
+  if (prepared.stream === true) body.stream = true;
+  if (prepared.parallelToolCalls !== undefined) body.parallel_tool_calls = prepared.parallelToolCalls;
+  if (prepared.reasoningEffort !== undefined) body.reasoning_effort = prepared.reasoningEffort;
+  applyChatToolChoice(body, prepared);
+  if (prepared.structured !== undefined) {
+    body.response_format = structuredToJsonSchemaFormatForChat(prepared.structured);
   }
-  const body = universalToAnthropic(prepared as never) as unknown as Json;
-  // 还原 tool_result 的结构化内容块（文本 + 图片）。
-  let structuredIndex = 0;
-  for (const rawMessage of Array.isArray(body.messages) ? body.messages : []) {
-    if (!isRecord(rawMessage) || !Array.isArray(rawMessage.content)) continue;
-    for (const rawBlock of rawMessage.content) {
-      if (!isRecord(rawBlock) || rawBlock.type !== "tool_result") continue;
-      const parts = structuredResults[structuredIndex++];
-      if (!parts) continue;
-      const blocks: Json[] = [];
-      for (const part of parts) {
-        if (!isRecord(part)) continue;
-        if ((part.type === "input_text" || part.type === "output_text" || part.type === "text") && typeof part.text === "string") {
-          blocks.push({ type: "text", text: part.text });
-        } else if (part.type === "input_image" || part.type === "image") {
-          const source = part.image_url ?? part.url;
-          const url = typeof source === "string" ? source : isRecord(source) ? source.url : undefined;
-          if (typeof url !== "string" || !url) continue;
-          const dataMatch = /^data:([^;,]+);base64,(.+)$/i.exec(url);
-          blocks.push(dataMatch
-            ? { type: "image", source: { type: "base64", media_type: dataMatch[1], data: dataMatch[2] } }
-            : { type: "image", source: { type: "url", url } });
-        }
-      }
-      if (blocks.length > 0) rawBlock.content = blocks;
-    }
+}
+
+function structuredToJsonSchemaFormatForChat(structured: StructuredOutput): Json {
+  if (structured.kind === "json_object") return { type: "json_object" };
+  return {
+    type: "json_schema",
+    json_schema: { name: structured.name, ...(structured.strict === true ? { strict: true } : {}), schema: structured.schema },
+  };
+}
+
+function applyResponsesExtras(body: Json, prepared: PreparedRequest, registry: ToolRegistry): void {
+  if (prepared.stream === true) body.stream = true;
+  if (prepared.parallelToolCalls !== undefined) body.parallel_tool_calls = prepared.parallelToolCalls;
+  // 引擎把空文本 assistant 轮写成 {role:"assistant",content:""}； Responses 输入
+  // 中该空消息无语义，删除以保持与既有合同一致。
+  if (Array.isArray(body.input)) {
+    body.input = body.input.filter((item) => !(isRecord(item) && item.role === "assistant" && (item.content === "" || (Array.isArray(item.content) && item.content.length === 0))));
   }
-  const choice = universal.tool_choice;
+  // custom 工具历史：引擎统一写 function_call，按身份表还原 custom_tool_call。
+  if (Array.isArray(body.input)) {
+    body.input = body.input.map((item) => {
+      if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string") return item;
+      const identity = registry.map.get(item.name);
+      if (!identity?.custom || typeof item.arguments !== "string") return item;
+      const parsed = safeJsonParse(item.arguments, "custom_tool_call.arguments");
+      return { type: "custom_tool_call", call_id: item.call_id, name: item.name, input: typeof parsed.input === "string" ? parsed.input : JSON.stringify(parsed.input ?? "") };
+    });
+  }
+  if (prepared.structured !== undefined) {
+    body.text = { ...(isRecord(body.text) ? body.text : {}), format: structuredToJsonSchemaFormat(prepared.structured) };
+  }
+  const choice = prepared.toolChoice;
   if (choice !== undefined) {
-    if (typeof choice === "string") {
-      body.tool_choice = choice === "required" ? { type: "any" } : { type: choice };
-    } else if (isRecord(choice) && typeof choice.name === "string") {
-      body.tool_choice = { type: "tool", name: choice.name };
-    }
+    if (choice.type === "tool") body.tool_choice = { type: "function", name: choice.toolName };
+    else body.tool_choice = choice.type;
   }
-  if (universal.provider_params?.parallel_tool_calls === false) {
+}
+
+function applyAnthropicExtras(body: Json, prepared: PreparedRequest, registry: ToolRegistry): void {
+  // 引擎把 system 写为内容块数组；合同保留字符串形状（多段以 \n\n 连接）。
+  if (Array.isArray(body.system)) {
+    const texts = body.system
+      .map((block) => (isRecord(block) && typeof block.text === "string" ? block.text : ""))
+      .filter((text) => text !== "");
+    if (texts.length > 0) body.system = texts.join("\n\n");
+    else delete body.system;
+  }
+  const choice = prepared.toolChoice;
+  if (choice !== undefined) {
+    if (choice.type === "tool") body.tool_choice = { type: "tool", name: choice.toolName };
+    else body.tool_choice = { type: choice.type === "required" ? "any" : choice.type };
+  }
+  if (prepared.disableParallelToolUse === true) {
     const current = isRecord(body.tool_choice) ? body.tool_choice : { type: "auto" };
     if (current.type !== "none") body.tool_choice = { ...current, disable_parallel_tool_use: true };
   }
-  if (stopSequences !== undefined && stopSequences.length > 0) body.stop_sequences = stopSequences;
-  if (universal.max_tokens === undefined) {
-    body.max_tokens = 1024;
-    registry.note("源请求未指定 token 上限；anthropic 目标要求 max_tokens，已用 1024 占位，插件可覆盖服务默认值");
-  }
-  if (universal.structured_output) {
+  if (prepared.structured !== undefined) {
     registry.note("结构化输出在 anthropic 目标没有对应字段，已丢弃（json_schema/json_object）");
   }
-  // thinking 预算是服务合同（插件决定）；桥接不因 effort 自动启用。
-  delete body.thinking;
-  return stripUndefined(body);
-}
-
-function emitGoogleTarget(universal: UniversalBody, registry: ToolRegistry, stopSequences: string[] | undefined): Json {
-  const body = universalToGoogle(universal as never) as unknown as Json;
-  if (stopSequences !== undefined && stopSequences.length > 0) {
-    const generationConfig = isRecord(body.generationConfig) ? body.generationConfig : {};
-    generationConfig.stopSequences = stopSequences;
-    body.generationConfig = generationConfig;
-  }
-  const choice = universal.tool_choice;
-  if (isRecord(choice) && typeof choice.name === "string" && isRecord(body.toolConfig) && isRecord(body.toolConfig.functionCallingConfig)) {
-    body.toolConfig.functionCallingConfig.mode = "ANY";
-    body.toolConfig.functionCallingConfig.allowedFunctionNames = [choice.name];
-  }
-  if (universal.reasoning_effort !== undefined && !universal.thinking?.enabled) {
-    registry.note("reasoning effort 在 gemini 目标未映射 thinkingLevel（预算/档位由插件按服务合同设置）");
-  }
-  return stripUndefined(body);
-}
-
-/** Responses 目标：库输出为基座，重建 input 条目序列以补 function_call 历史（L3）。 */
-function emitResponsesTarget(universal: UniversalBody, registry: ToolRegistry): Json {
-  const prepared = structuredClone(universal);
-  for (const message of prepared.messages) {
-    if (message.role !== "assistant") continue;
-    // chat 源的工具调用在 msg.tool_calls（顶层）；统一提升为内容条目后按序重建
-    // function_call items（库的 responses 输出会跳过它们，L3）。
-    for (const call of message.tool_calls ?? []) {
-      message.content.push({
-        type: "tool_call",
-        tool_call: {
-          id: call.id,
-          name: call.name,
-          arguments: call.arguments,
-          metadata: { custom: false, source_arguments: JSON.stringify(call.arguments ?? {}) },
-        },
-      });
-    }
-    message.tool_calls = undefined;
-  }
-  const base = universalToOpenaiResponses(prepared as never) as unknown as Json;
-  const input: unknown[] = [];
-  if (prepared.system) {
-    const systemContent = typeof prepared.system === "string" ? prepared.system : prepared.system.content;
-    if (systemContent) input.push({ role: "system", content: systemContent });
-  }
-  for (const message of prepared.messages) {
-    const toolResults = message.content.filter((entry) => entry.type === "tool_result");
-    const others = message.content.filter((entry) => entry.type !== "tool_result");
-    for (const result of toolResults) {
-      if (!result.tool_result) continue;
-      input.push({
-        type: "function_call_output",
-        call_id: result.tool_result.tool_call_id,
-        output: typeof result.tool_result.result === "string" ? result.tool_result.result : JSON.stringify(result.tool_result.result ?? ""),
-      });
-    }
-    const parts: Json[] = [];
-    const functionCalls: Array<{ id: string; name: string; arguments: string }> = [];
-    const customCalls: Array<{ id: string; name: string; input: string }> = [];
-    for (const content of others) {
-      if (content.type === "text" && content.text) {
-        parts.push({ type: "input_text", text: content.text });
-      } else if (content.type === "image") {
-        if (content.media?.url) {
-          parts.push({ type: "input_image", image_url: content.media.url, ...(content.media.detail ? { detail: content.media.detail } : {}) });
-        } else if (content.media?.data) {
-          parts.push({ type: "input_image", image_url: `data:${content.media.mimeType || "image/jpeg"};base64,${content.media.data}` });
-        }
-      } else if (content.type === "audio" && content.media?.data) {
-        parts.push({ type: "input_audio", input_audio: { data: content.media.data, format: content.media.mimeType?.split("/")[1] || "wav" } });
-      } else if (content.type === "tool_call" && content.tool_call) {
-        const custom = content.tool_call.metadata?.custom === true;
-        const identity = registry.map.get(content.tool_call.name);
-        // 历史项与声明、named choice 一致使用映射名；上游看到的名字三处统一，
-        // 客户端可见的原始名由响应侧身份表还原（L4 身份合同）。
-        const argumentsText = typeof content.tool_call.metadata?.source_arguments === "string"
-          ? (content.tool_call.metadata.source_arguments as string)
-          : JSON.stringify(content.tool_call.arguments ?? {});
-        if (custom && identity) {
-          const parsed = safeJsonParse(argumentsText, "custom_tool_call.input");
-          customCalls.push({ id: content.tool_call.id, name: content.tool_call.name, input: typeof parsed.input === "string" ? parsed.input : JSON.stringify(parsed.input ?? "") });
-        } else {
-          functionCalls.push({ id: content.tool_call.id, name: content.tool_call.name, arguments: argumentsText });
-        }
-      }
-    }
-    const toolOnlyMessage = message.role === "tool" && others.length === 0;
-    if (!toolOnlyMessage && (parts.length > 0 || (functionCalls.length === 0 && customCalls.length === 0))) {
-      const content = parts.length === 1 && parts[0]?.type === "input_text" ? parts[0].text : parts;
-      input.push({ role: message.role === "tool" ? "user" : message.role, content });
-    }
-    for (const call of functionCalls) {
-      input.push({ type: "function_call", call_id: call.id, name: call.name, arguments: call.arguments });
-    }
-    for (const call of customCalls) {
-      input.push({ type: "custom_tool_call", call_id: call.id, name: call.name, input: call.input });
-    }
-  }
-  base.input = input;
-  if (isRecord(base.tool_choice) && typeof base.tool_choice.name === "string") {
-    const mapped = base.tool_choice.name as string;
-    const identity = registry.map.get(mapped);
-    base.tool_choice = { type: identity?.custom === true ? "custom" : "function", name: mapped };
-  } else if (typeof base.tool_choice === "string" && base.tool_choice === "required") {
-    // responses 的 required 枚举与 chat 一致，保留原样。
-  }
-  return stripUndefined(base);
 }
 
 /* ================================ 主入口 ================================ */
 
-function collectPassthroughIdentities(from: BridgeProtocol, body: Json, registry: ToolRegistry): void {
-  if (from === "responses") {
-    collectResponsesTools(body, registry);
+function collectPassthroughIdentityNames(to: ClientProtocol, body: Json, registry: ToolRegistry): void {
+  if (to === "responses") {
+    // 只注册身份，不需要声明表：按 responses 声明结构展平收集原名。
+    const visit = (entries: unknown, namespace?: string): void => {
+      for (const raw of asArray(entries)) {
+        if (!isRecord(raw)) continue;
+        if (raw.type === "namespace") {
+          visit(raw.tools, typeof raw.name === "string" ? raw.name : namespace);
+          continue;
+        }
+        if (raw.type === "function" || raw.type === "custom") {
+          if (typeof raw.name === "string" && raw.name) registry.registerIdentity(raw.name, namespace, raw.type === "custom");
+        }
+      }
+    };
+    visit(body.tools);
     return;
   }
-  if (from === "chat-completions") {
+  if (to === "chat-completions") {
     for (const raw of asArray(body.tools)) {
       if (!isRecord(raw)) continue;
       if (raw.type === "custom") {
-        registry.register(requiredString(raw.name, "工具 name"), undefined, true);
+        registry.registerIdentity(requiredString(raw.name, "工具 name"), undefined, true);
       } else if (raw.type === "function" && isRecord(raw.function)) {
-        registry.register(requiredString(raw.function.name, "工具 name"), undefined, false);
+        registry.registerIdentity(requiredString(raw.function.name, "工具 name"), undefined, false);
+      }
+    }
+    return;
+  }
+  if (to === "gemini") {
+    for (const raw of asArray(body.tools)) {
+      if (!isRecord(raw) || !Array.isArray(raw.functionDeclarations)) continue;
+      for (const declaration of raw.functionDeclarations) {
+        if (isRecord(declaration) && typeof declaration.name === "string" && declaration.name) {
+          registry.registerIdentity(declaration.name, undefined, false);
+        }
       }
     }
     return;
   }
   for (const raw of asArray(body.tools)) {
     if (!isRecord(raw) || typeof raw.name !== "string" || !raw.name) continue;
-    registry.register(raw.name, undefined, false);
+    registry.registerIdentity(raw.name, undefined, false);
   }
 }
 
-export function convertRequest(
-  from: BridgeProtocol,
-  to: BridgeProtocol,
+export async function convertRequest(
+  /** 上游 endpoint 协议（from）：桥接拼装的目标、响应的源头。 */
+  from: ClientProtocol,
+  /** 调用方 route 协议（to）：请求的源协议、响应的终点。 */
+  to: ClientProtocol,
   body: unknown,
   options?: ConvertRequestOptions,
-): ConvertRequestResult {
+): Promise<ConvertRequestResult> {
   if (!isRecord(body)) fail("请求正文必须是 JSON 对象");
   const notes: string[] = [];
   const registry = new ToolRegistry(notes, options?.mapToolName);
 
-  if (from === to) {
-    // 同协议直通：保留全部可表达字段与扩展，不执行任何政策；身份表供响应侧还原。
-    collectPassthroughIdentities(from, body, registry);
+  if (to === from) {
+    // 同协议直通：保留全部可表达字段与扩展，不执行任何政策；身份表用原名注册
+    // （body 未改名，映射名与实际工具一致），供响应侧还原，且不进入 AI SDK 引擎。
+    collectPassthroughIdentityNames(to, body, registry);
     const passthrough = structuredClone(body);
     if (options?.model !== undefined) passthrough.model = options.model;
-    return { body: passthrough, tools: registry.map, notes };
+    return { body: passthrough, tools: registry.map, notes, strippedTools: registry.strippedTools };
   }
 
-  if (from === "gemini") fail("gemini 仅作为上游目标协议，不接受客户端输入");
+  const prepared = to === "responses"
+    ? responsesSourceToPrepared(body, registry)
+    : to === "chat-completions"
+      ? chatSourceToPrepared(body, registry)
+      : to === "gemini"
+        ? geminiSourceToPrepared(body, registry)
+        : anthropicSourceToPrepared(body, registry);
+  if (options?.model !== undefined) prepared.model = options.model;
 
-  let universal: UniversalBody;
-  if (from === "responses") universal = responsesSourceToUniversal(body, registry);
-  else if (from === "chat-completions") universal = chatSourceToUniversal(body, registry);
-  else universal = anthropicSourceToUniversal(body, registry);
-
-  if (options?.model !== undefined) universal.model = options.model;
-
-  const stopSequences = isRecord(universal.provider_params) && Array.isArray(universal.provider_params.stop_sequences)
-    ? (universal.provider_params.stop_sequences as string[])
-    : undefined;
-
-  let emitted: Json;
-  if (to === "chat-completions") emitted = emitChatTarget(universal, registry, stopSequences);
-  else if (to === "anthropic") emitted = emitAnthropicTarget(universal, registry, stopSequences);
-  else if (to === "gemini") emitted = emitGoogleTarget(universal, registry, stopSequences);
-  else {
-    if (stopSequences !== undefined) notes.push("源请求的 stop 序列在 responses 目标没有对应字段，已丢弃");
-    emitted = emitResponsesTarget(universal, registry);
+  // 目标特定前置调整：anthropic 必须有 max_tokens；responses 无 stop 字段。
+  if (from === "anthropic" && prepared.maxOutputTokens === undefined) {
+    prepared.maxOutputTokens = 1024;
+    registry.note("源请求未指定 token 上限；anthropic 目标要求 max_tokens，已用 1024 占位，插件可覆盖服务默认值");
+  }
+  if (from === "responses" && prepared.stopSequences !== undefined) {
+    registry.note("源请求的 stop 序列在 responses 目标没有对应字段，已丢弃");
+    prepared.stopSequences = undefined;
+  }
+  if (from === "gemini") {
+    // 引擎的 gemini provider 会下载 URL 文件，违反离线边界：显式能力错误。
+    for (const message of prepared.prompt) {
+      const parts = message.content as unknown[] | string;
+      if (typeof parts !== "string" && parts.some((part) => isRecord(part) && part.type === "file" && isRecord(part.data) && part.data.type === "url")) {
+        fail("gemini 目标不能保留图片 URL（引擎需下载才能内联）；请插件层预先转 base64 或改传其他目标协议");
+      }
+    }
+    if (prepared.reasoningEffort !== undefined) {
+      registry.note("reasoning effort 在 gemini 目标未映射 thinkingLevel（预算/档位由插件按服务合同设置）");
+    }
   }
 
-  return { body: emitted, tools: registry.map, notes };
+  const emitted = await buildTargetBody(from, prepared);
+  // 引擎使用盐化 modelId（见 engine.ts）；真实模型名可缺省（插件后处理负责写入）。
+  if (prepared.model) emitted.model = prepared.model;
+  else delete emitted.model;
+  if (from === "chat-completions") {
+    applyToolStrict("chat-completions", emitted, prepared);
+    applyChatExtras(emitted, prepared);
+  } else if (from === "responses") {
+    applyToolStrict("responses", emitted, prepared);
+    applyResponsesExtras(emitted, prepared, registry);
+  } else if (from === "anthropic") {
+    applyAnthropicExtras(emitted, prepared, registry);
+  }
+
+  return { body: deepStripUndefined(stripUndefined(emitted)) as Json, tools: registry.map, notes, strippedTools: registry.strippedTools };
 }

@@ -67,7 +67,7 @@ test("Qoder 内层 DONE 后继续读取 usage，并拒绝缺失 finish 的断流
 
 test("Qoder 重编号 index=0 的并行工具调用且能返回工具结果继续请求", async () => {
   const declaration = ["read", "list"].map((name) => ({ type: "function", name, parameters: { type: "object" } }));
-  const initial = translateQoderRequest({ input: "调用两个工具", tools: declaration }, "qfmodel");
+  const initial = await translateQoderRequest({ input: "调用两个工具", tools: declaration }, "qfmodel");
   const input = envelope(delta({ tool_calls: [{ index: 0, id: "call_read", type: "function", function: { name: "read", arguments: "{\"path\":" } }] }))
     + envelope(delta({ tool_calls: [{ index: 0, function: { arguments: "\"a\"}" } }] }))
     + envelope(delta({ tool_calls: [{ index: 0, id: "call_list", type: "function", function: { name: "list", arguments: "{}" } }] }, "tool_calls")) + finish;
@@ -76,7 +76,7 @@ test("Qoder 重编号 index=0 的并行工具调用且能返回工具结果继�
   const calls = result.output as Json[];
   assert.deepEqual(calls.map((call) => call.call_id), ["call_read", "call_list"]);
   assert.deepEqual(calls.map((call) => call.arguments), ["{\"path\":\"a\"}", "{}"]);
-  const resumed = translateQoderRequest({ input: [
+  const resumed = await translateQoderRequest({ input: [
     { role: "user", content: "调用两个工具" }, ...calls,
     { type: "function_call_output", call_id: "call_read", output: "文件" },
     { type: "function_call_output", call_id: "call_list", output: "目录" },
@@ -85,7 +85,7 @@ test("Qoder 重编号 index=0 的并行工具调用且能返回工具结果继�
 });
 
 test("Qoder custom 工具响应还原 input，命名空间保持稳定", async () => {
-  const translated = translateQoderRequest({ input: "修改", tools: [{ type: "namespace", name: "fs", tools: [{ type: "custom", name: "patch" }] }] }, "qfmodel");
+  const translated = await translateQoderRequest({ input: "修改", tools: [{ type: "namespace", name: "fs", tools: [{ type: "custom", name: "patch" }] }] }, "qfmodel");
   const name = [...translated.tools.keys()][0]!;
   const response = await translateQoderResponse("responses", upstream(envelope(delta({ tool_calls: [{ id: "call_patch", index: 0, type: "function", function: { name, arguments: "{\"input\":\"补丁\"}" } }] }, "tool_calls")) + finish), { ...options, tools: translated.tools });
   const item = ((await response.json() as Json).output as Json[])[0]!;

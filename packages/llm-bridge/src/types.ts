@@ -1,12 +1,7 @@
 /**
- * 桥接包公共类型：协议标识统一为 chat-completions / responses / anthropic / gemini，
- * 不出现客户端产品名；外部库的 ProviderType 只在实现内部使用，不对外泄漏。
+ * 桥接包公共类型。协议类型不再另设别名：全仓统一使用 plugin-api 的
+ * ClientProtocol（四种规范协议均可作为客户端入口与上游目标）。
  */
-
-export type BridgeProtocol = "chat-completions" | "responses" | "anthropic" | "gemini";
-
-/** 客户端可请求的协议面（gemini 仅作为上游目标）。 */
-export type ClientBridgeProtocol = Exclude<BridgeProtocol, "gemini">;
 
 /** 工具身份：custom 与 namespace 是 Responses 输入的标准扩展。 */
 export interface ToolIdentity {
@@ -48,6 +43,11 @@ export interface ConvertRequestResult {
   tools: ToolIdentityMap;
   /** 明确记录的降级/不可表达处理（如 custom 降级、stop 丢弃），不静默丢失。 */
   notes: string[];
+  /**
+   * 被剥离的（服务器内置）工具声明类型名，结构化返回；插件据此生成「能力已移除」
+   * 旁白或明确报错，不解析 notes 文案。
+   */
+  strippedTools: string[];
 }
 
 /* ---------------------------- 流式事件模型 ---------------------------- */
@@ -82,9 +82,3 @@ export type BridgeStreamEvent =
       model?: string;
     }
   | { type: "error"; error: { message: string; code?: string; type?: string } };
-
-/** 三种客户端协议的 SSE 帧或聚合 JSON 的统一外壳描述。 */
-export interface ProtocolErrorShape {
-  status: number;
-  body: Record<string, unknown>;
-}

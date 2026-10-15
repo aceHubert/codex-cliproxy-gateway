@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "./host-test.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { agyEnabled, createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "@agent-proxy/agy";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
+import { createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "@agent-proxy/agy";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
 import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
@@ -25,11 +27,12 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
   let fetched = 0;
   let schedules = 0;
   const inferred: string[] = [];
-  const adapter = createAgyAdapter({
+  const wideConfig: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
-  }, {
+  };
+  const adapter = createAgyAdapter(wideConfig, {
     cacheDirectory: directory, catalogMode: "manual", credentials: async () => credential(),
     setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
     fetch: async (url, init) => {
@@ -76,11 +79,12 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
 
 test("agy manual 显式刷新无缓存失败会报错", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-manual-fail-"));
-  const adapter = createAgyAdapter({
+  const baseConfig: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
-  }, {
+  };
+  const adapter = createAgyAdapter(baseConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
     credentials: async () => credential(), fetch: async () => { throw new Error("network down"); },
   });
@@ -228,21 +232,23 @@ test("agy 上游错误只输出预定义分类，不回显错误正文", () => {
   }
 });
 
-test("agy 配置校验：类型、环回监听与前缀保留", () => {
+test("agy 配置校验：检查类型和环回监听，过时 prefix 不影响校验", () => {
   const base: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
-  assert.equal(agyEnabled({ ...base }), false);
-  assert.equal(agyEnabled({ ...base, agy: true }), true);
-  assert.throws(() => validateAgyConfig({ ...base, agy: 1 as unknown as boolean }), /agy 必须为 boolean/);
+  assert.equal(agentConfigEnabled({ ...base }, "agy"), false);
+  assert.equal(agentConfigEnabled({ ...base, agy: true }, "agy"), true);
+  assert.throws(() => validateConfiguredPlugins({ ...base, agy: 1 as unknown as boolean }), /agy 必须为 boolean/);
   assert.throws(() => validateAgyConfig({ ...base, host: "0.0.0.0", agy: true }), /环回/);
-  assert.throws(() => validateAgyConfig({ ...base, prefix: "agy/", agy: true }), /前缀保留/);
-  assert.throws(() => validateAgyConfig({ ...base, prefix: "ag", agy: true }), /前缀保留/);
-  assert.equal(agyEnabled({ ...base, agy: true, upstreamOnly: true }), true);
+  assert.doesNotThrow(() => validateAgyConfig({ ...base, prefix: "agy/", agy: true }));
+  assert.doesNotThrow(() => validateAgyConfig({ ...base, prefix: "ag", agy: true }));
+  const agyUpstreamOnly = { ...base, agy: true, upstreamOnly: true };
+  assert.equal(agentConfigEnabled(agyUpstreamOnly, "agy"), true);
   // default 模式不豁免插件凭据的环回安全边界。
-  assert.throws(() => validateAgyConfig({ ...base, host: "0.0.0.0", agy: true, upstreamOnly: true }), /环回/);
+  const agyLoopback = { ...base, host: "0.0.0.0", agy: true, upstreamOnly: true };
+  assert.throws(() => validateAgyConfig(agyLoopback), /环回/);
 });
 
 test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async () => {

@@ -21,12 +21,12 @@ export interface CodebuddyResponseOptions {
 }
 
 export async function createCodebuddyResponse(
-  from: ClientProtocol,
+  to: ClientProtocol,
   upstream: Response,
   responseOptions: CodebuddyResponseOptions,
 ): Promise<Response> {
   const deepseek = /deepseek/i.test(responseOptions.model);
-  const result = await createClientResponse(from, upstream, {
+  const result = await createClientResponse(to, upstream, {
     upstreamProtocol: "chat-completions",
     model: responseOptions.model,
     stream: responseOptions.stream,

@@ -18,9 +18,9 @@ function plugin(id: string, modelPatterns: string[], overrides: Partial<GatewayP
   };
 }
 
-function httpContext(model: string, from: "chat-completions" | "responses" | "anthropic" = "responses", operation: "generate" | "compact" = "generate"): Omit<HttpRequestContext, "matchedPattern" | "matchedPrefix"> {
+function httpContext(model: string, to: "chat-completions" | "responses" | "anthropic" = "responses", operation: "generate" | "compact" = "generate"): Omit<HttpRequestContext, "matchedPattern" | "matchedPrefix"> {
   const request = new Request("http://localhost/v1/responses", { method: "POST", body: JSON.stringify({ model }) });
-  return { request, url: new URL(request.url), model, from, operation, signal: request.signal, body: new LazyRequestBody(request) };
+  return { request, url: new URL(request.url), model, to, operation, signal: request.signal, body: new LazyRequestBody(request) };
 }
 
 function wsContext(model: string, upgrade: WebSocketRequestContext["upgrade"] = () => false): Omit<WebSocketRequestContext, "matchedPattern" | "matchedPrefix"> {
@@ -106,12 +106,15 @@ test("JSON 解析失败不会消耗第二次正文且原始字节仍然可用", 
 });
 
 test("客户端入口识别覆盖 Chat Completions、Responses、Messages、compact 与本地路由边界", () => {
-  assert.deepEqual(identifyClientEndpoint("/v1/chat/completions"), { from: "chat-completions", operation: "generate" });
-  assert.deepEqual(identifyClientEndpoint("/v1/messages"), { from: "anthropic", operation: "generate" });
-  assert.deepEqual(identifyClientEndpoint("/v1/responses"), { from: "responses", operation: "generate" });
-  assert.deepEqual(identifyClientEndpoint("/v1/responses/compact"), { from: "responses", operation: "compact" });
-  assert.deepEqual(identifyClientEndpoint("/proxy/responses", "/proxy/"), { from: "responses", operation: "generate" });
-  assert.deepEqual(identifyClientEndpoint("/responses", "/"), { from: "responses", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/v1/chat/completions"), { to: "chat-completions", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/v1/messages"), { to: "anthropic", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/v1/models/gemini-2.5-pro:generateContent"), { to: "gemini", operation: "generate", pathModel: "gemini-2.5-pro", pathStream: false });
+  assert.deepEqual(identifyClientEndpoint("/v1/models/my%2Fmodel:streamGenerateContent"), { to: "gemini", operation: "generate", pathModel: "my/model", pathStream: true });
+  assert.equal(identifyClientEndpoint("/v1/models/m:countTokens"), undefined);
+  assert.deepEqual(identifyClientEndpoint("/v1/responses"), { to: "responses", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/v1/responses/compact"), { to: "responses", operation: "compact" });
+  assert.deepEqual(identifyClientEndpoint("/proxy/responses", "/proxy/"), { to: "responses", operation: "generate" });
+  assert.deepEqual(identifyClientEndpoint("/responses", "/"), { to: "responses", operation: "generate" });
   for (const path of ["/ui", "/v1/ui/api/config", "/v1/realtime", "/responses", "/v10/responses", "/v1/responses/extra", "/v1/responses/", "/v1/messages/count_tokens", "/v1/messages/"]) {
     assert.equal(identifyClientEndpoint(path), undefined);
   }
@@ -122,21 +125,21 @@ test("HTTP handler 接收所有协议与操作上下文且返回 SSE 或普通�
   const registry = new PluginRegistry([plugin("zcode", ["zcode-*/*"], {
     handleHttp(context) {
       captured.push(context);
-      return new Response(context.from === "responses" ? "{}" : "data: done\n\n", { headers: { "content-type": context.from === "responses" ? "application/json" : "text/event-stream" } });
+      return new Response(context.to === "responses" ? "{}" : "data: done\n\n", { headers: { "content-type": context.to === "responses" ? "application/json" : "text/event-stream" } });
     },
   })]);
-  for (const [from, operation] of [["chat-completions", "generate"], ["responses", "generate"], ["responses", "compact"], ["anthropic", "generate"]] as const) {
-    const context = httpContext("zcode-team/a", from, operation);
+  for (const [to, operation] of [["chat-completions", "generate"], ["responses", "generate"], ["responses", "compact"], ["anthropic", "generate"]] as const) {
+    const context = httpContext("zcode-team/a", to, operation);
     const response = await registry.dispatchHttp(context, () => { throw new Error("意外进入 default"); });
     const actual = captured.at(-1)!;
     assert.equal(actual.request, context.request);
     assert.equal(actual.body, context.body);
     assert.equal(actual.signal, context.request.signal);
-    assert.equal(actual.from, from);
+    assert.equal(actual.to, to);
     assert.equal(actual.operation, operation);
     assert.equal(actual.matchedPrefix, "zcode-team/");
     assert.equal(actual.matchedPattern, "zcode-*/*");
-    assert.equal(response.headers.get("content-type"), from === "responses" ? "application/json" : "text/event-stream");
+    assert.equal(response.headers.get("content-type"), to === "responses" ? "application/json" : "text/event-stream");
   }
 });
 

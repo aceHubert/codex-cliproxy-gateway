@@ -1,4 +1,5 @@
 import { identifyClientEndpoint, PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
+import { MOUNT_PATH } from "../apps/gateway/src/types.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 /** 只提供模式契约，帧路由测试不创建真实 agent 的凭据缓存和后台任务。 */
@@ -25,9 +26,9 @@ const allPlugins = routingRegistry();
 export const routingPluginFamily = (model: string): string | undefined => allPlugins.match(model)?.plugin.id;
 
 export function matchesPluginUpgrade(request: Request, config: GatewayConfig, pluginId: string): boolean {
-  const endpoint = identifyClientEndpoint(new URL(request.url).pathname, config.mountPath);
+  const endpoint = identifyClientEndpoint(new URL(request.url).pathname, MOUNT_PATH);
   const model = /(?:^|[;,\s])model=([^;,\s]+)/.exec(request.headers.get("x-codex-routing-hint") ?? "")?.[1];
   return request.headers.get("upgrade")?.toLowerCase() === "websocket"
-    && endpoint?.from === "responses" && endpoint.operation === "generate"
+    && endpoint?.to === "responses" && endpoint.operation === "generate"
     && model !== undefined && routingRegistry(config).match(model)?.plugin.id === pluginId;
 }

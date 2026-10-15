@@ -35,7 +35,7 @@ test("五类 agent 缺失开关默认开启，显式 false 与未知字段保留
 test("旧默认安装迁移整个目录、状态、权限与凭据，保留旧目录并支持回滚", () => fixture((home, legacy) => {
   const codexHome = path.join(home, "custom-codex");
   const paths = resolvePaths({ HOME: home });
-  const config = { zcode: false, codebuddyAccount: "person.info", catalogPath: path.join(legacy, "newapi-catalog.json"), logDir: path.join(legacy, "logs"), model_merge_json: "https://example.com/models.json?token=hidden", future: path.join(legacy, "unchanged") };
+  const config = { zcode: false, codebuddyAccount: "person.info", catalogPath: path.join(legacy, "newapi-catalog.json"), logDir: path.join(legacy, "logs"), modelMergeJson: "https://example.com/models.json?token=hidden", future: path.join(legacy, "unchanged") };
   json(path.join(legacy, "config.json"), config);
   json(path.join(legacy, "state.json"), { installedAt: "same-install", codexHome, config, configBackup: { existed: true, backup: path.join(codexHome, "config.toml.bak-cliproxy-gateway-20261011010000") } });
   json(path.join(legacy, "newapi-catalog.json"), { models: [{ slug: "model" }] });
@@ -58,7 +58,7 @@ test("旧默认安装迁移整个目录、状态、权限与凭据，保留旧�
   assert.equal(migrated.catalogPath, config.catalogPath);
   // logDir 已过时：迁移不再改写残留值，日志目录固定为新运行主目录的 logs/。
   assert.equal(migrated.logDir, config.logDir);
-  assert.equal(migrated.model_merge_json, config.model_merge_json);
+  assert.equal(migrated.modelMergeJson, config.modelMergeJson);
   assert.equal(migrated.future, config.future);
   assert.equal(migrated.zcode, false);
   assert.equal(migrated.codebuddyAccount, "person.info");

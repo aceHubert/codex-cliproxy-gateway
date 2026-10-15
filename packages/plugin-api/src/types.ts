@@ -1,5 +1,5 @@
-/** 客户端入口协议；HTTP 路径分别为 /chat/completions、/responses、/messages。 */
-export type ClientProtocol = "chat-completions" | "responses" | "anthropic";
+/** 客户端入口协议；HTTP 路径分别为 /chat/completions、/responses、/messages 与 /models/{model}:generateContent。 */
+export type ClientProtocol = "chat-completions" | "responses" | "anthropic" | "gemini";
 export type RequestOperation = "generate" | "compact";
 
 /** 目录字段与现有 Codex 目录兼容，契约包不读取宿主配置。 */
@@ -28,9 +28,13 @@ export interface RequestContext {
   request: Request;
   url: URL;
   model: string;
-  from: ClientProtocol;
+  /** 调用方 route 协议（to）：请求的源协议、响应的终点；语义链路上游 endpoint (from) → 调用方 route (to)。 */
+  to: ClientProtocol;
   operation: RequestOperation;
   signal: AbortSignal;
+  /** gemini 入口：model 由 URL 路径携带，流式由 :streamGenerateContent 后缀决定；其余协议由 body 表达。 */
+  pathModel?: string;
+  pathStream?: boolean;
 }
 
 export interface ModelMatch {
@@ -85,27 +89,30 @@ export interface HostServices<Config extends object = object> {
   processLog: ProcessLogServices;
 }
 
-/** 代理实现仅消费这些配置字段，安装及服务管理配置留在应用。 */
+/**
+ * 插件读取的有效配置及扩展入口。
+ *
+ * agent 开关的判断由网关装配层完成，插件通过模块增强声明专属配置字段。
+ * 配置文件的读取与持久化由应用负责，运行时规范由 gateway-config.schema.json 定义。
+ */
 export interface AgentConfig {
+  configVersion?: string;
   host: string;
-  /** 已过时：模型前缀按上游类型派生（cliproxy/ 或 newapi/），宿主注入 AgentConfig 时填充；消费方一律按可选处理。 */
-  prefix?: string;
+  port: number;
   requestLogging?: boolean;
-  logDir?: string;
+  /** 每类日志保留的最大文件数；0 表示不限制。 */
   maxRequestLogs?: number;
-  debug?: boolean;
-  zcode?: boolean;
-  codebuddy?: boolean;
-  codebuddyRegion?: CodebuddyRegion;
-  codebuddyAccount?: string;
-  qoder?: boolean;
-  agy?: boolean;
-  opencodeZen?: boolean;
+  /**
+   * 任意字段扩展：插件通过 `declare module` 声明专属字段（具名、带类型），
+   * 未声明的运行期字段不因类型层多余属性检查被拒绝；读取方对未知字段
+   * 一律按 unknown 处理，不假设其语义。
+   */
+  [key: string]: unknown;
 }
-export type CodebuddyRegion = "auto" | "cn" | "intl";
 export interface ProcessLogTarget { file: string; maxBytes: number; }
 export interface RequestLogSink { dir: string; maxLogs: number; processLog?: ProcessLogTarget; }
-export type LogNamespace = "cliproxy" | "zcode" | "bigmodel" | "codebuddy" | "workbuddy" | "qoder" | "agy" | "opencode-zen";
+/** 日志子目录名；由调用方按实际命中的插件或产品线声明，契约层不枚举插件 ID。 */
+export type LogNamespace = string;
 export interface ExchangeEntry {
   requestTime: string; method: string; url: string;
   reqHeaders: Headers; reqBody: unknown; status: number;
@@ -126,7 +133,8 @@ export interface CatalogServices {
 }
 export interface RequestLogServices {
   localTime(at?: Date): string;
-  requestLogDir(config: AgentConfig): string;
+  /** 请求日志目录；固定取实例路径，日志目录配置不参与。 */
+  requestLogDir(): string;
   logGroupFromPath(pathname: string): string;
   logExchange(sink: RequestLogSink | undefined, group: string, entry: ExchangeEntry, namespace?: LogNamespace): void;
 }

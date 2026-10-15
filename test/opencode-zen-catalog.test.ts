@@ -253,8 +253,8 @@ test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -fr
   // 元数据无条目（刚轮换上线）：-free 后缀宽限 + 探针裁决；无后缀无法验证免费，剔除。
   assert.deepEqual(
     filterOpencodeZenCatalogIds(["jev-1.13-free", "claude-fable-5"], metadata, {
-      "jev-1.13-free": { result: "chat", at: 1 },
-      "claude-fable-5": { result: "chat", at: 1 },
+      "jev-1.13-free": { result: "chat-completions", at: 1 },
+      "claude-fable-5": { result: "chat-completions", at: 1 },
     }),
     ["jev-1.13-free"],
   );
@@ -439,6 +439,32 @@ test("目录存储：元数据拉取失败只信 -free 后缀，旧版缓存文�
   }
 });
 
+/** 协议全名化（chat → chat-completions、google → gemini）后，旧短名探针缓存仍可读取。 */
+test("目录存储：旧版短名探针裁决归一化为全名协议", async () => {
+  const legacy = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-legacy-protocol-"));
+  try {
+    const ids = ["exo-free", "grok-code"];
+    fs.writeFileSync(path.join(legacy, "opencode-zen-catalog.json"), JSON.stringify({
+      fetched_at: Date.now(),
+      content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
+      ids,
+      probe_verdicts: {
+        "exo-free": { result: "chat", at: Date.now() },
+        "grok-code": { result: "google", at: Date.now() },
+      },
+    }));
+    const store = createOpencodeZenCatalogStore({
+      cacheDirectory: legacy,
+      fetchCatalog: async () => { throw new Error("不应拉取"); },
+    });
+    await store.catalog();
+    assert.equal(store.protocol("exo-free"), "chat-completions", "旧短名 chat 归一化为 chat-completions");
+    assert.equal(store.protocol("grok-code"), "gemini", "旧短名 google 归一化为 gemini");
+  } finally {
+    fs.rmSync(legacy, { recursive: true, force: true });
+  }
+});
+
 test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不重复拉取/探测）", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-meta-"));
   let now = 1_000_000;
@@ -482,7 +508,7 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
       metadataTtlMs: 600_000, probeTtlMs: 120_000,
       fetchCatalog,
       fetchMetadata: async () => { metadataFetches++; throw new Error("不应重复拉取元数据"); },
-      probeModel: async (id) => { probed.push(id); return "chat"; },
+      probeModel: async (id) => { probed.push(id); return "chat-completions"; },
     });
     const rereadCatalog = new Set((await reread.catalog()).map((entry) => entry.slug));
     assert.ok(rereadCatalog.has("opencode-zen/jev-1.13-free"), "探针翻转为 chat 后重新暴露");
@@ -531,11 +557,11 @@ test("目录存储：协议与 effort 档位暴露均取实时元数据", async 
         "muse-spark-1.3-contributor-free": freeMeta({ provider: { npm: "@ai-sdk/openai" } }),
         "deepseek-v4-flash-free": freeMeta({ reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }] }),
       } } }),
-      probeModel: async () => "chat",
+      probeModel: async () => "chat-completions",
     });
     await store.catalog();
     assert.equal(store.protocol("muse-spark-1.3-contributor-free"), "responses", "元数据 npm 映射端点协议");
-    assert.equal(store.protocol("never-seen"), "chat", "缺省 chat");
+    assert.equal(store.protocol("never-seen"), "chat-completions", "缺省 chat");
     assert.deepEqual(store.effortLevels("deepseek-v4-flash-free"), ["low", "high", "max"]);
     assert.deepEqual(store.effortLevels("muse-spark-1.3-contributor-free"), []);
     assert.deepEqual(store.effortLevels("never-seen"), []);

@@ -163,7 +163,7 @@ function augmentUsageWithBilling(events: AsyncGenerator<import("@agent-proxy/llm
 }
 
 export async function translateQoderResponse(
-  from: ClientProtocol,
+  to: ClientProtocol,
   upstream: Response,
   options: QoderResponseOptions,
 ): Promise<ClientOutputResult["response"]> {
@@ -171,7 +171,7 @@ export async function translateQoderResponse(
   const billing: Json = {};
   const normalized = unwrap(upstream.body, billing);
   const chatUpstream = new Response(normalized.body, { headers: { "content-type": "text/event-stream" } });
-  const result = await createClientResponse(from, chatUpstream, {
+  const result = await createClientResponse(to, chatUpstream, {
     upstreamProtocol: "chat-completions",
     model: options.model,
     stream: options.stream,

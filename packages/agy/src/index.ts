@@ -1,5 +1,5 @@
 import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
 import path from "node:path";
 import { isIP } from "node:net";
 import { atomicWrite } from "@agent-proxy/plugin-api";
@@ -22,6 +22,16 @@ import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
 import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
 import type { AgentConfig, ModelCatalog, ModelEntry, ProcessLogTarget } from "@agent-proxy/plugin-api";
+
+declare module "@agent-proxy/plugin-api" {
+  interface AgentConfig {
+    /**
+     * 是否开启调试转储：上游错误时把完整请求体落盘到日志目录（当前覆盖 agy 上游 400 的 agy-debug-400.json）。
+     * 与 requestLogging 互相独立，默认关闭。
+     */
+    debug?: boolean;
+  }
+}
 
 /**
  * Antigravity（agy）入口门面：凭据只读消费（过期即失败，绝不刷新）、fetchAvailableModels
@@ -55,19 +65,10 @@ export interface AgyDependencies {
 /** CLI 的模型轮询周期是 360 秒（见调研文档 §5.5），网关按同一节奏刷新目录。 */
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 360_000;
 
-export function agyEnabled<Config extends AgentConfig>(config: Config): boolean {
-  return config.agy === undefined || config.agy === true;
-}
-
-export function validateAgyConfig<Config extends AgentConfig>(config: Config): void {
-  if (config.agy !== undefined && typeof config.agy !== "boolean") throw new Error("agy 必须为 boolean");
-  if (!agyEnabled(config)) return;
+export function validateAgyConfig(config: AgentConfig): void {
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 agy 时网关只能监听环回地址");
-  }
-  if (config.prefix && (AGY_PREFIX.startsWith(config.prefix) || config.prefix.startsWith(AGY_PREFIX))) {
-    throw new Error(`启用 agy 时 ${AGY_PREFIX} 前缀保留给 Antigravity，请调整第三方 prefix`);
   }
 }
 
@@ -106,7 +107,6 @@ export function safeAgyUpstreamError(status: number, body: string): SafeAgyError
 
 function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}) {
   validateAgyConfig(config);
-  const enabled = agyEnabled(config);
   const credentialFile = dependencies.credentialFile ?? defaultAgyCredentialFile();
   const loadCredentials = async (): Promise<AgyCredentials | null> => {
     if (dependencies.credentials) return dependencies.credentials();
@@ -118,35 +118,31 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
   };
   const transport = createAgyTransport({ endpoint: dependencies.endpoint, fetch: dependencies.fetch });
   // 请求日志与调试转储共用同一目录解析规则；两者开关（requestLogging / debug）互相独立。
-  const logDir = requestLogDir(config);
+  const logDir = requestLogDir();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
     dir: logDir,
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
-  const store = enabled
-    ? createAgyCatalogStore({
-      cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
-      credentials: loadCredentials,
-      codexModelsCacheFile: dependencies.codexModelsCacheFile,
-      endpoint: dependencies.endpoint,
-      fetchCatalog: (credential) => transport.fetchModels(credential, AbortSignal.timeout(30_000)),
-      catalogMode: dependencies.catalogMode,
-    })
-    : undefined;
+  const store = createAgyCatalogStore({
+    cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
+    credentials: loadCredentials,
+    codexModelsCacheFile: dependencies.codexModelsCacheFile,
+    endpoint: dependencies.endpoint,
+    fetchCatalog: (credential) => transport.fetchModels(credential, AbortSignal.timeout(30_000)),
+    catalogMode: dependencies.catalogMode,
+  });
   const schedule = dependencies.setInterval ?? setInterval;
   const cancel = dependencies.clearInterval ?? clearInterval;
   let timer: ReturnType<typeof setInterval> | undefined;
   let startupRefresh: Promise<void> | undefined;
-  if (store) {
-    if (dependencies.refreshCatalogOnStart !== false) {
-      startupRefresh = store.refresh();
-      void startupRefresh.catch(() => {});
-    }
-    if (dependencies.catalogMode !== "manual") {
-      timer = schedule(() => { void store.refresh().catch(() => {}); }, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS));
-      timer.unref?.();
-    }
+  if (dependencies.refreshCatalogOnStart !== false) {
+    startupRefresh = store.refresh();
+    void startupRefresh.catch(() => {});
+  }
+  if (dependencies.catalogMode !== "manual") {
+    timer = schedule(() => { void store.refresh().catch(() => {}); }, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? DEFAULT_CATALOG_REFRESH_INTERVAL_MS));
+    timer.unref?.();
   }
   const activeRequests = new Set<AbortController>();
   /** 已知模型集合（含重定向前的旧 id）；空目录视为不可校验，透传由上游判定。 */
@@ -155,7 +151,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
   let catalogFamilies: AgyModelFamily[] = [];
   let memberIds = new Set<string>();
   let catalogReroute = new Map<string, string>();
-  const updateCatalogMeta = (catalog: Awaited<ReturnType<NonNullable<typeof store>["catalog"]>>): ModelCatalog => {
+  const updateCatalogMeta = (catalog: Awaited<ReturnType<typeof store["catalog"]>>): ModelCatalog => {
     knownModels = new Set(catalog.models.map((entry) => entry.slug));
     catalogFamilies = catalog.families;
     memberIds = new Set(catalog.families
@@ -166,7 +162,6 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
   };
   /** 尽力加载目录元数据（含磁盘缓存回退）；失败时保持未加载状态，由上游判定。 */
   const loadCatalogMeta = async (): Promise<ModelEntry[] | undefined> => {
-    if (!store) return undefined;
     try {
       await startupRefresh?.catch(() => {});
       return updateCatalogMeta(await store.catalog()).models;
@@ -176,21 +171,21 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
 
   return {
     async catalog(): Promise<ModelCatalog> {
-      if (!store || closed) return { models: [] };
+      if (closed) return { models: [] };
       // 系统提示词已在 buildAgyCatalog 合成时替换（含 model_messages 模板），缓存即成品。
       return { models: (await loadCatalogMeta()) ?? [] };
     },
     /** 显式刷新不吞错；无 last-good 时由命令报告失败。 */
     async refreshCatalog(): Promise<ModelCatalog> {
-      if (!store || closed) return { models: [] };
+      if (closed) return { models: [] };
       await store.refresh();
       return updateCatalogMeta(await store.catalog());
     },
     async reloadCatalog(): Promise<ModelCatalog> {
-      if (!store || closed) return { models: [] };
+      if (closed) return { models: [] };
       return updateCatalogMeta(await store.reload());
     },
-    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -219,7 +214,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
         log(status, JSON.stringify({ error: { type, message } }), response.headers);
         return response;
       };
-      if (!store || closed) return fail(503, "Antigravity 入口未启用或网关已关闭", "configuration_error");
+      if (closed) return fail(503, "Antigravity 入口已关闭", "configuration_error");
       const abort = new AbortController();
       const onAbort = () => abort.abort(request.signal.reason);
       let cleaned = false;
@@ -293,10 +288,10 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
             }
           }
         }
-        const translated = translateAgyRequest(input, resolvedModel, from);
+        const translated = translateAgyRequest(input, resolvedModel, to);
         abort.signal.throwIfAborted();
         const upstream = await transport.streamInfer(credential, translated.wrapper, abort.signal);
-        const response = await createAgyClientResponse(from, upstream, {
+        const response = await createAgyClientResponse(to, upstream, {
           model, tools: translated.tools, stream, signal: abort.signal,
           sanitizeError: (error) => {
             // 上游流内错误的原始对象只进本机网关日志（截断），供排查；客户端只见预定义分类。
@@ -388,7 +383,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
 export { isAgyModel, mergeAgyCatalog };
 export { AGY_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
-export function createAgyAdapter<Config extends AgentConfig>(config: Config, dependencies: AgyDependencies = {}) {
+export function createAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}) {
   return bindHostMethods(buildAgyAdapter(config, dependencies));
 }
 
@@ -405,7 +400,7 @@ export function createAgyPlugin(host: HostServices<AgentConfig>, dependencies: A
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.to);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

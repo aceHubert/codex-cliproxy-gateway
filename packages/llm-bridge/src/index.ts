@@ -1,26 +1,27 @@
 /**
  * @agent-proxy/llm-bridge：规范协议转换封装。
  *
- * 以 npm llm-bridge 2.0.1 为底座，公开统一 convertRequest(from, to, body, options)
- * 与三种客户端协议（Responses / Chat Completions / Anthropic）的流式、聚合 JSON、
- * 错误与取消输出。外部 ProviderType 与库原语不对外泄漏；本包不发上游请求、不执行
- * 工具、不持有任何插件生命周期。
+ * 以 @ai-sdk/*（ai + 各厂商 provider）为出站拼装引擎：公开统一异步
+ * convertRequest(from, to, body, options) 与四种客户端协议（Responses /
+ * Chat Completions / Anthropic / Gemini）的流式、聚合 JSON、错误与取消输出。引擎
+ * 请求体经离线 stub fetch 捕获，本包不执行任何网络 I/O、不执行工具、不持有
+ * 任何插件生命周期。
  */
 
 export {
   BridgeConversionError,
 } from "./types.ts";
 export type {
-  BridgeProtocol,
   BridgeStopReason,
   BridgeStreamEvent,
   BridgeUsage,
-  ClientBridgeProtocol,
   ConvertRequestOptions,
   ConvertRequestResult,
   ToolIdentity,
   ToolIdentityMap,
 } from "./types.ts";
+
+export type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 export { convertRequest } from "./request.ts";
 
@@ -35,6 +36,7 @@ export {
   createAnthropicClientOutput,
   createChatCompletionsClientOutput,
   createClientResponse,
+  createGeminiClientOutput,
   createResponsesClientOutput,
 } from "./output.ts";
 export type {

@@ -5,8 +5,8 @@ import { encodeCodebuddyReasoning } from "@agent-proxy/codebuddy/wire";
 
 type Json = Record<string, unknown>;
 
-test("基础翻译：instructions/system 合并、max_tokens 与参数透传", () => {
-  const { body, tools, dropped } = translateCodebuddyRequest({
+test("基础翻译：instructions/system 合并、max_tokens 与参数透传", async () => {
+  const { body, tools, dropped } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     instructions: "SYS-INSTR",
     input: [
@@ -35,8 +35,8 @@ test("基础翻译：instructions/system 合并、max_tokens 与参数透传", (
   assert.deepEqual(dropped, []);
 });
 
-test("工具声明：function/custom/namespace 与 web_search 降级旁白", () => {
-  const { body, tools, dropped } = translateCodebuddyRequest({
+test("工具声明：function/custom/namespace 与 web_search 降级旁白", async () => {
+  const { body, tools, dropped } = await translateCodebuddyRequest({
     model: "codebuddy/default-model",
     input: "hi",
     tools: [
@@ -65,8 +65,8 @@ test("工具声明：function/custom/namespace 与 web_search 降级旁白", () 
   assert.match(String(messages[0]!.content), /web_search/);
 });
 
-test("history：函数调用/输出配对、custom 调用、reasoning 与服务器调用降级", () => {
-  const { body } = translateCodebuddyRequest({
+test("history：函数调用/输出配对、custom 调用、reasoning 与服务器调用降级", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [
       { type: "message", role: "user", content: "执行工具" },
@@ -103,16 +103,16 @@ test("history：函数调用/输出配对、custom 调用、reasoning 与服务�
   assert.deepEqual(messages[7], { role: "assistant", content: [{ type: "text", text: "完成" }] });
 });
 
-test("history：输出与调用必须配对且不得重复", () => {
+test("history：输出与调用必须配对且不得重复", async () => {
   const base = {
     model: "codebuddy/m",
     tools: [{ type: "function", name: "f", parameters: { type: "object" } }],
   };
-  assert.throws(() => translateCodebuddyRequest({
+  await assert.rejects(() => translateCodebuddyRequest({
     ...base,
     input: [{ type: "function_call_output", call_id: "ghost", output: "x" }],
   }, "m"), /未关联/);
-  assert.throws(() => translateCodebuddyRequest({
+  await assert.rejects(() => translateCodebuddyRequest({
     ...base,
     input: [
       { type: "function_call", call_id: "c1", name: "f", arguments: "{}" },
@@ -122,9 +122,9 @@ test("history：输出与调用必须配对且不得重复", () => {
   }, "m"), /重复/);
 });
 
-test("DeepSeek history：完整回放 reasoning_content 并合并同轮并行工具调用", () => {
+test("DeepSeek history：完整回放 reasoning_content 并合并同轮并行工具调用", async () => {
   const reasoning = "先读取两个文件，再比较结果。";
-  const { body } = translateCodebuddyRequest({
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/deepseek-v4.1-flash",
     input: [
       { type: "message", role: "user", content: "比较文件" },
@@ -152,8 +152,8 @@ test("DeepSeek history：完整回放 reasoning_content 并合并同轮并行工
   assert.deepEqual(messages[4], { role: "tool", tool_call_id: "call_b", content: "B" });
 });
 
-test("DeepSeek history：兼容旧 summary，拒绝跨模型本地载荷", () => {
-  const legacy = translateCodebuddyRequest({
+test("DeepSeek history：兼容旧 summary，拒绝跨模型本地载荷", async () => {
+  const legacy = await translateCodebuddyRequest({
     model: "codebuddy/deepseek-v4.1-flash",
     input: [
       { type: "reasoning", id: "item_legacy", content: null, summary: [{ type: "summary_text", text: "旧版完整推理" }] },
@@ -162,7 +162,7 @@ test("DeepSeek history：兼容旧 summary，拒绝跨模型本地载荷", () =>
   }, "deepseek-v4.1-flash");
   assert.equal(((legacy.body.messages as Json[])[1]!).reasoning_content, "旧版完整推理");
 
-  const mismatched = translateCodebuddyRequest({
+  const mismatched = await translateCodebuddyRequest({
     model: "codebuddy/deepseek-v4.1-flash",
     input: [
       {
@@ -175,7 +175,7 @@ test("DeepSeek history：兼容旧 summary，拒绝跨模型本地载荷", () =>
   }, "deepseek-v4.1-flash");
   assert.equal(((mismatched.body.messages as Json[])[1]!).reasoning_content, undefined);
 
-  const nonDeepseek = translateCodebuddyRequest({
+  const nonDeepseek = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [
       { type: "reasoning", encrypted_content: encodeCodebuddyReasoning("codebuddy/gpt-5.6-luna", "仅供展示") },
@@ -185,8 +185,8 @@ test("DeepSeek history：兼容旧 summary，拒绝跨模型本地载荷", () =>
   assert.equal(((nonDeepseek.body.messages as Json[])[1]!).reasoning_content, undefined, "非 DeepSeek 保持旧的丢弃语义");
 });
 
-test("tool_choice 与 reasoning.effort 原样透传，不固定档位默认值", () => {
-  const { body } = translateCodebuddyRequest({
+test("tool_choice 与 reasoning.effort 原样透传，不固定档位默认值", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/fast-model",
     input: "hi",
     tools: [{ type: "function", name: "f", parameters: { type: "object" } }],
@@ -195,7 +195,7 @@ test("tool_choice 与 reasoning.effort 原样透传，不固定档位默认值",
   }, "fast-model");
   assert.deepEqual(body.tool_choice, { type: "function", function: { name: "f" } });
   assert.equal(body.reasoning_effort, "xhigh");
-  const relaxed = translateCodebuddyRequest({
+  const relaxed = await translateCodebuddyRequest({
     model: "codebuddy/fast-model",
     input: "hi",
     tool_choice: { type: "web_search" },
@@ -204,12 +204,12 @@ test("tool_choice 与 reasoning.effort 原样透传，不固定档位默认值",
   assert.equal(relaxed.body.tool_choice, undefined, "内置工具选择省略回到 auto");
   assert.equal(relaxed.body.reasoning_effort, undefined, "effort none 不发送推理参数");
   for (const choice of ["auto", "none", "required"] as const) {
-    assert.equal(translateCodebuddyRequest({ model: "m", input: "hi", tool_choice: choice }, "m").body.tool_choice, choice);
+    assert.equal((await translateCodebuddyRequest({ model: "m", input: "hi", tool_choice: choice }, "m")).body.tool_choice, choice);
   }
 });
 
-test("图片输入映射为 image_url 内容块", () => {
-  const { body } = translateCodebuddyRequest({
+test("图片输入映射为 image_url 内容块", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [{
       type: "message", role: "user",
@@ -224,25 +224,25 @@ test("图片输入映射为 image_url 内容块", () => {
   assert.deepEqual(content[1], { type: "image_url", image_url: { url: "data:image/png;base64,AAA" } });
 });
 
-test("不支持的字段显式报 400", () => {
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", previous_response_id: "resp_x" }, "m"), CodebuddyRequestError);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", conversation: "c" }, "m"), /conversation/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", background: true }, "m"), /background/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", text: { format: { type: "json_schema" } } }, "m"), /结构化输出/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", instructions: 42 }, "m"), /instructions/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: "hi", max_output_tokens: 0 }, "m"), /max_output_tokens/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: [{ type: "weird_item" }] }, "m"), /不支持的 Responses history/);
+test("不支持的字段显式报 400", async () => {
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", previous_response_id: "resp_x" }, "m"), CodebuddyRequestError);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", conversation: "c" }, "m"), /conversation/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", background: true }, "m"), /background/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", text: { format: { type: "json_schema" } } }, "m"), /结构化输出/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", instructions: 42 }, "m"), /instructions/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: "hi", max_output_tokens: 0 }, "m"), /max_output_tokens/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: [{ type: "weird_item" }] }, "m"), /不支持的 Responses history/);
   // 未知 *_call 类型按服务器调用降级为文本摘要，不静默丢弃。
-  const degraded = translateCodebuddyRequest({ model: "m", input: [{ type: "file_search_call" }] }, "m");
+  const degraded = await translateCodebuddyRequest({ model: "m", input: [{ type: "file_search_call" }] }, "m");
   const degradedMessages = degraded.body.messages as Json[];
   assert.deepEqual(degradedMessages[0], { role: "system", content: "" }, "无系统内容时注入空 system");
   assert.match(String(degradedMessages[1]!.content), /file_search_call/);
-  assert.throws(() => translateCodebuddyRequest({ model: "m", input: 42 }, "m"), /input 必须是/);
+  await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: 42 }, "m"), /input 必须是/);
 });
 
-test("developer 消息的文本数组内容拼接进 system，不误报图片", () => {
+test("developer 消息的文本数组内容拼接进 system，不误报图片", async () => {
   // Codex Desktop 把 developer 上下文发成多个 input_text 块的数组，仍是纯文本。
-  const { body } = translateCodebuddyRequest({
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [
       { type: "message", role: "developer", content: [
@@ -258,8 +258,8 @@ test("developer 消息的文本数组内容拼接进 system，不误报图片", 
   assert.equal(messages[1]!.role, "user");
 });
 
-test("developer 消息含图片时仍显式拒绝", () => {
-  assert.throws(() => translateCodebuddyRequest({
+test("developer 消息含图片时仍显式拒绝", async () => {
+  await assert.rejects(() => translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [{
       type: "message", role: "developer",
@@ -271,8 +271,8 @@ test("developer 消息含图片时仍显式拒绝", () => {
   }, "gpt-5.6-luna"), /developer 消息不支持/);
 });
 
-test("工具输出里的图片提升到 user 消息，tool 消息保持纯文本", () => {
-  const { body } = translateCodebuddyRequest({
+test("工具输出里的图片提升到 user 消息，tool 消息保持纯文本", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/deepseek-v4.1-flash",
     input: [
       { type: "message", role: "user", content: "看图" },
@@ -291,8 +291,8 @@ test("工具输出里的图片提升到 user 消息，tool 消息保持纯文本
   assert.deepEqual(userImage!.content, [{ type: "image_url", image_url: { url: "data:image/png;base64,AAA" } }]);
 });
 
-test("工具输出含未知内容块类型仍显式拒绝", () => {
-  assert.throws(() => translateCodebuddyRequest({
+test("工具输出含未知内容块类型仍显式拒绝", async () => {
+  await assert.rejects(() => translateCodebuddyRequest({
     model: "codebuddy/deepseek-v4.1-flash",
     input: [
       { type: "function_call", call_id: "call_1", name: "f", arguments: "{}" },

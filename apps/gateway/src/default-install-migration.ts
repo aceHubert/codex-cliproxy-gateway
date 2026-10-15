@@ -34,7 +34,7 @@ function readObject(file: string): JsonObject | undefined {
  * catalogPath 已过时（目录文件按上游类型固定派生），残留键不再改写，由配置同步移除。 */
 export function migrateManagedDefaultPaths(config: JsonObject, legacyHome: string, nextHome: string): JsonObject {
   const result = structuredClone(config);
-  if (result.model_merge_json === path.join(legacyHome, "models.json")) result.model_merge_json = path.join(nextHome, "models.json");
+  if (result.modelMergeJson === path.join(legacyHome, "models.json")) result.modelMergeJson = path.join(nextHome, "models.json");
   return result;
 }
 

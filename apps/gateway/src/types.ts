@@ -1,18 +1,17 @@
-export interface ModelEntry {
-  slug: string;
-  display_name?: string;
-  description?: string;
-  visibility?: string;
-  supported_in_api?: boolean;
-  priority?: number;
-  availability_nux?: unknown;
-  upgrade?: unknown;
-  [key: string]: unknown;
-}
+import type { AgentConfig } from "@agent-proxy/plugin-api";
+// 类型导入加载已安装插件的配置增强，不增加运行时依赖调用。
+import type {} from "@agent-proxy/codebuddy";
+import type {} from "@agent-proxy/agy";
 
-export interface ModelCatalog {
-  models: ModelEntry[];
-}
+/** 目录契约类型的单一来源在 @agent-proxy/plugin-api（契约包），网关侧只再导出，调用点不变。 */
+export type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
+
+/**
+ * 网关进程日志（gateway.log）的目标与大小上限。
+ * 请求摘要、错误摘要、配置审计与 launchd 抓到的 stdout/stderr 都落在同一个文件里，
+ * 由 maxGatewayLogBytes 统一约束；类型定义在 @agent-proxy/plugin-api。
+ */
+export type { ProcessLogTarget } from "@agent-proxy/plugin-api";
 
 /** 第三方上游类型：cliproxy 直接消费其 Codex 目录；newapi 从 OpenAI /models 列表本地合成目录。 */
 export type UpstreamType = "cliproxy" | "newapi";
@@ -21,45 +20,20 @@ export type UpstreamType = "cliproxy" | "newapi";
  * 固定路由值：mountPath 与 officialBaseUrl 由代码写死；prefix 按上游类型派生
  * （cliproxy/ 或 newapi/，见 upstream-catalog.ts 的 configuredModelPrefix）；
  * 上游已选目录按上游类型落在运行主目录（{cliproxy|newapi}-catalog.json）。
- * 对应的 GatewayConfig 字段已过时，文件残留值读取时忽略，配置同步时移除。
+ * 历史配置中的对应字段读取时忽略，配置同步时移除，不再声明为网关配置项。
  */
 export const MOUNT_PATH = "/v1";
 export const OFFICIAL_BASE_URL = "https://chatgpt.com/backend-api/codex";
 
-/** CodeBuddy 凭据地域（历史值）。字段已过时：凭据选择一律走 codebuddyAccount。 */
-export type CodebuddyRegion = "auto" | "cn" | "intl";
-
-export interface GatewayConfig {
+export interface GatewayConfig extends AgentConfig {
   $schema?: string;
-  configVersion?: string;
-  host: string;
-  port: number;
-  /**
-   * @deprecated 已过时：挂载路径固定为 /v1（MOUNT_PATH 常量）；文件残留值读取时
-   * 忽略，配置同步时移除该键。
-   */
-  mountPath?: string;
-  /**
-   * @deprecated 已过时：第三方模型前缀按上游类型派生（cliproxy/ 或 newapi/，见
-   * configuredModelPrefix）；文件残留值读取时忽略，配置同步时移除该键。
-   */
-  prefix?: string;
-  /**
-   * @deprecated 已过时：官方上游固定为 https://chatgpt.com/backend-api/codex
-   * （OFFICIAL_BASE_URL 常量）；文件残留值读取时忽略，配置同步时移除该键。
-   */
-  officialBaseUrl?: string;
   /** 第三方上游 URL（CLIProxyAPI 或 OpenAI 兼容的 new-api）；旧键 cliproxyBaseUrl 在读取与同步时自动迁移。 */
   upstreamBaseUrl: string;
   /** 第三方上游类型；缺省视为 cliproxy，运行时仅显式识别 "newapi"，其余值按 cliproxy 处理。旧键 upstream_type 在读取与同步时自动迁移。 */
   upstreamType?: UpstreamType;
-  /**
-   * @deprecated 已过时：上游已选目录固定按上游类型落在运行主目录
-   * （{cliproxy|newapi}-catalog.json，见 configuredCatalogFile）；文件残留值读取时
-   * 忽略，配置同步时移除该键。
-   */
-  catalogPath?: string;
-  model_merge_json?: string;
+  /** default 是否仅使用第三方上游裸模型 ID；不影响 agent 启用，Codex 使用合并静态目录。 */
+  upstreamOnly?: boolean;
+  modelMergeJson?: string;
   selectedModels?: string[];
   /**
    * 排除模型规则（默认 []）：网关在所有适配器与上游目录合并后统一过滤，命中
@@ -68,43 +42,16 @@ export interface GatewayConfig {
    * /models，对这些模型的推理请求也会被网关以 404 拦截。
    */
   excludedModels?: string[];
-  requestLogging?: boolean;
-  /**
-   * @deprecated 已过时：请求日志目录固定为运行主目录下的 logs/（ResolvedPaths.logDir）；
-   * 文件残留值读取时忽略，配置同步时移除该键。
-   */
-  logDir?: string;
-  /** 每类日志保留的最大文件数；0 表示不限制。 */
-  maxRequestLogs?: number;
-  /**
-   * 是否开启调试转储：上游错误时把完整请求体落盘到日志目录（当前覆盖 agy
-   * 上游 400 的 agy-debug-400.json）。与 requestLogging 互相独立，默认关闭。
-   */
-  debug?: boolean;
   /**
    * 网关进程日志 gateway.log 的最大字节数，超出时把当前内容复制为时间戳备份并原地清空
    * （copy-truncate，进程持有的句柄不受影响）；设置上限同时约束该文件中请求摘要与配置
    * 审计的可追溯深度；0 表示不限制。
    */
   maxGatewayLogBytes?: number;
-  /** default 是否仅使用第三方上游裸模型 ID；不影响 agent 启用，Codex 使用合并静态目录。 */
-  upstreamOnly?: boolean;
   /** 是否启用 ZCode Responses 入口；缺省开启，显式 false 保持关闭。 */
   zcode?: boolean;
   /** 是否启用 CodeBuddy/WorkBuddy Responses 入口；缺省开启，显式 false 保持关闭。 */
   codebuddy?: boolean;
-  /**
-   * @deprecated 已由 codebuddyAccount 取代。读取时旧值（auto/cn/intl）一次性迁移为
-   * codebuddyAccount="auto"；写入一律归一到 codebuddyAccount。
-   */
-  codebuddyRegion?: CodebuddyRegion;
-  /**
-   * CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 `.info` 文件名时锁定该账号登录
-   * （文件缺失时运行期回退 auto，不改写配置）；值为 "auto" 或缺省时按最近刷新的
-   * 登录自动选取并随客户端切换跟随。展示标签（昵称 <邮箱> / 地域）由 Web UI 实时
-   * 解析，不落配置。历史哨兵 "default" 读取时归一为 "auto"。
-   */
-  codebuddyAccount?: string;
   /** 是否启用 Qoder Responses 入口；缺省开启，自动发现各地域登录。 */
   qoder?: boolean;
   /** 是否启用 Antigravity（agy）Responses 入口；缺省开启，只读消费本机 agy 登录。 */
@@ -114,16 +61,6 @@ export interface GatewayConfig {
    * 转发消费 Zen 免费模型（公共鉴权 Bearer public，可选 OPENCODE_API_KEY）。
    */
   opencodeZen?: boolean;
-}
-
-/**
- * 网关进程日志（gateway.log）的目标与大小上限。
- * 请求摘要、错误摘要、配置审计与 launchd 抓到的 stdout/stderr 都落在同一个文件里，
- * 由 maxGatewayLogBytes 统一约束。
- */
-export interface ProcessLogTarget {
-  file: string;
-  maxBytes: number;
 }
 
 export interface ResolvedPaths {

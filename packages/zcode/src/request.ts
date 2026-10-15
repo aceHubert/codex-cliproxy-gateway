@@ -8,7 +8,7 @@ import { ANALYZE_IMAGE_SYSTEM_NOTE, ANALYZE_IMAGE_TOOL_DECLARATION, ANALYZE_IMAG
 
 /**
  * ZCode 请求准备：标准消息/工具/参数统一经 @agent-proxy/llm-bridge 的
- * convertRequest(from, "anthropic")；z.ai 私有形状（web_search_20250305 服务端工具、
+ * convertRequest(to, "anthropic")；z.ai 私有形状（web_search_20250305 服务端工具、
  * thinking 预算表、zcode-thinking 信封回放、analyze_image 代执行）作为插件前后处理。
  *
  * Responses 源的私有 history 项（reasoning / web_search_call / 其它服务器调用）不能
@@ -172,7 +172,73 @@ function anthropicMessagesOf(converted: { body: Record<string, unknown> }): Mess
   });
 }
 
-export function translateZcodeRequest(body: Record<string, unknown>, upstreamModel: string, from: ClientProtocol = "responses"): ZcodeTranslatedRequest {
+/** zcode 请求前处理产出的一条执行腿。 */
+interface ZcodeRequestLeg {
+  /** 标准段：交给桥接统一转换的请求体（responses 源为切段体，其余来源为整个 body）。 */
+  body?: Record<string, unknown>;
+  /** 私有段：zcode 私有形状（thinking 信封 / web_search 回放 / 服务器调用摘要）就地转换的内容块。 */
+  private?: Block[];
+}
+
+/**
+ * R4 统一请求前处理：responses 源按私有项切段——thinking 信封、web_search 回放
+ * 等私有段在本模块就地转换，标准段交给桥接；其余来源没有 zcode 私有项，整段返回。
+ * 主路径对所有来源统一执行一次 convertRequest(to, "anthropic", …)；to 表示路由
+ * 端点协议（响应方向 anthropic → to 的视角命名，请求方向即桥接的源协议位）。
+ */
+function segmentZcodeRequestLegs(to: ClientProtocol, body: Record<string, unknown>, options: { nativeWebSearch: boolean; clientModel: string }): ZcodeRequestLeg[] {
+  if (to !== "responses") return [{ body }];
+  const input = body.input;
+  if (typeof input !== "string" && !Array.isArray(input)) fail("input 必须是字符串或数组");
+  const items: unknown[] = typeof input === "string" ? [{ type: "message", role: "user", content: input }] : input;
+  const legs: ZcodeRequestLeg[] = [];
+  let run: unknown[] = [];
+  const flush = (): void => {
+    if (!run.length) return;
+    // 标准段沿用源体的其余字段；instructions 由本层统一管理，不重复下发。
+    legs.push({ body: { ...body, input: run, instructions: undefined } });
+    run = [];
+  };
+  for (const item of items) {
+    if (!record(item)) fail("Responses input 包含非对象 history 项");
+    const type = typeof item.type === "string" ? item.type : "message";
+    const privateKind = type === "reasoning" || type === "web_search_call"
+      || (type.endsWith("_call") && type !== "function_call" && type !== "custom_tool_call")
+      || type === "mcp_list_tools" || type === "mcp_list_resources";
+    if (!privateKind) {
+      run.push(item);
+      continue;
+    }
+    flush();
+    if (type === "reasoning") {
+      const blocks = decodeZcodeThinking(item.encrypted_content, options.clientModel);
+      // 外部或不同模型的私有载荷不能转发；自身匹配的载荷按原块还原。
+      if (blocks) legs.push({ private: blocks });
+      continue;
+    }
+    if (type === "web_search_call") {
+      const query = webSearchCallQuery(item);
+      if (options.nativeWebSearch) {
+        // 还原为 z.ai 实测回放形状：server_tool_use（web_search_prime/search_query）+ 同轮 tool_result 文本块。
+        const id = webSearchUpstreamID(item);
+        legs.push({ private: [
+          { type: "server_tool_use", id, name: "web_search_prime", input: query ? { search_query: query } : {} },
+          { type: "tool_result", tool_use_id: id, content: webSearchResultContent(item) },
+        ] });
+      } else {
+        legs.push({ private: [serverCallSummary(item)] });
+      }
+      continue;
+    }
+    // 其余服务器执行的历史调用（file_search_call、image_generation_call、托管 MCP 等）无法在上游执行，降级为文本摘要。
+    legs.push({ private: [serverCallSummary(item)] });
+  }
+  flush();
+  return legs;
+}
+
+/** to 为路由端点（客户端入口）协议：请求方向 to → anthropic，响应方向 anthropic → to。 */
+export async function translateZcodeRequest(body: Record<string, unknown>, upstreamModel: string, to: ClientProtocol = "responses"): Promise<ZcodeTranslatedRequest> {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("ZCode 不支持 previous_response_id；请提供完整 input 历史");
@@ -187,11 +253,15 @@ export function translateZcodeRequest(body: Record<string, unknown>, upstreamMod
   if (body.instructions !== undefined && typeof body.instructions !== "string") fail("instructions 必须是字符串");
 
   // 上游 token 上限按来源取参：responses 用 max_output_tokens，chat-completions /
-  // anthropic 用 max_tokens；缺省走服务默认 16384。
-  const sourceLimit = from === "responses" ? body.max_output_tokens : body.max_tokens;
+  // anthropic 用 max_tokens，gemini 用 generationConfig.maxOutputTokens；缺省走服务默认 16384。
+  const sourceLimit = to === "responses"
+    ? body.max_output_tokens
+    : to === "gemini"
+      ? (record(body.generationConfig) ? body.generationConfig.maxOutputTokens : undefined)
+      : body.max_tokens;
   const maxTokens = sourceLimit === undefined ? 16384 : positiveInteger(sourceLimit, "token 上限");
   const toolMap: ZcodeToolMap = new Map();
-  const plan: ToolPlan = from === "responses" ? planResponsesTools(body.tools, toolMap) : { declarations: [], serverTools: [], dropped: [] };
+  const plan: ToolPlan = to === "responses" ? planResponsesTools(body.tools, toolMap) : { declarations: [], serverTools: [], dropped: [] };
   const nativeWebSearch = plan.serverTools.length > 0;
   const clientModel = body.model === undefined ? upstreamModel : string(body.model, "model");
   const identities: ToolIdentityMap = new Map();
@@ -204,104 +274,39 @@ export function translateZcodeRequest(body: Record<string, unknown>, upstreamMod
   let passthroughTools: Block[] | undefined;
 
   try {
-    if (from === "responses") {
-      const input = body.input;
-      if (typeof input !== "string" && !Array.isArray(input)) fail("input 必须是字符串或数组");
-      const items: unknown[] = typeof input === "string" ? [{ type: "message", role: "user", content: input }] : input;
-      // 按私有项切段：标准段走公共转换（instructions 由本层统一管理，不重复下发），
-      // 私有段（thinking 信封 / web_search 回放 / 其它服务器调用）由本模块转换。
-      let run: unknown[] = [];
-      const segmentSystem: string[] = [];
-      const flush = (): void => {
-        if (!run.length) return;
-        const converted = convertRequest("responses", "anthropic", { ...body, input: run, instructions: undefined }, { model: upstreamModel, mapToolName: zcodeToolMapper });
-        for (const [mapped, identity] of converted.tools) identities.set(mapped, identity);
-        for (const message of anthropicMessagesOf(converted)) addMessage(messages, message.role, message.content);
-        if (typeof converted.body.system === "string" && converted.body.system) segmentSystem.push(converted.body.system);
-        run = [];
-      };
-      for (const item of items) {
-        if (!record(item)) fail("Responses input 包含非对象 history 项");
-        const type = typeof item.type === "string" ? item.type : "message";
-        const privateKind = type === "reasoning" || type === "web_search_call"
-          || (type.endsWith("_call") && type !== "function_call" && type !== "custom_tool_call")
-          || type === "mcp_list_tools" || type === "mcp_list_resources";
-        if (!privateKind) {
-          run.push(item);
-          continue;
-        }
-        flush();
-        if (type === "reasoning") {
-          const blocks = decodeZcodeThinking(item.encrypted_content, clientModel);
-          // 外部或不同模型的私有载荷不能转发；自身匹配的载荷按原块还原。
-          if (blocks) addMessage(messages, "assistant", blocks);
-          continue;
-        }
-        if (type === "web_search_call") {
-          const query = webSearchCallQuery(item);
-          if (nativeWebSearch) {
-            // 还原为 z.ai 实测回放形状：server_tool_use（web_search_prime/search_query）+ 同轮 tool_result 文本块。
-            const id = webSearchUpstreamID(item);
-            addMessage(messages, "assistant", [
-              { type: "server_tool_use", id, name: "web_search_prime", input: query ? { search_query: query } : {} },
-              { type: "tool_result", tool_use_id: id, content: webSearchResultContent(item) },
-            ]);
-          } else {
-            addMessage(messages, "assistant", [serverCallSummary(item)]);
-          }
-          continue;
-        }
-        // 其余服务器执行的历史调用（file_search_call、image_generation_call、托管 MCP 等）无法在上游执行，降级为文本摘要。
-        addMessage(messages, "assistant", [serverCallSummary(item)]);
+    // R4 统一形态：前处理切段（私有段就地转换），主路径对所有来源统一执行一次
+    // convertRequest(from, to)——from 是网关识别的真实客户端协议，目标恒为 anthropic。
+    for (const leg of segmentZcodeRequestLegs(to, body, { nativeWebSearch, clientModel })) {
+      if (leg.private !== undefined) {
+        addMessage(messages, "assistant", leg.private);
+        continue;
       }
-      flush();
-      system.push(...segmentSystem);
-    } else if (from === "chat-completions") {
-      if (!Array.isArray(body.messages)) fail("messages 必须是数组");
-      const converted = convertRequest("chat-completions", "anthropic", body, { model: upstreamModel, mapToolName: zcodeToolMapper });
+      // 桥接统一形态 convertRequest(from, to, body)：from 为上游 endpoint（anthropic），to 为调用方 route 协议。
+      const converted = await convertRequest("anthropic", to, leg.body!, { model: upstreamModel, mapToolName: zcodeToolMapper });
       for (const [mapped, identity] of converted.tools) identities.set(mapped, identity);
       for (const message of anthropicMessagesOf(converted)) addMessage(messages, message.role, message.content);
       if (typeof converted.body.system === "string" && converted.body.system) system.push(converted.body.system);
       passthroughTools = Array.isArray(converted.body.tools) ? converted.body.tools.filter(record) : undefined;
       passthroughChoice = converted.body.tool_choice;
-      if (Array.isArray(converted.body.stop_sequences)) passthroughStopSequences = converted.body.stop_sequences;
-    } else {
-      if (!Array.isArray(body.messages)) fail("messages 必须是数组");
-      const converted = convertRequest("anthropic", "anthropic", body, { model: upstreamModel });
-      for (const raw of body.messages) {
-        if (!record(raw) || (raw.role !== "user" && raw.role !== "assistant") || !Array.isArray(raw.content)) {
-          fail("messages 必须是 user/assistant 与内容块数组");
-        }
-        addMessage(messages, raw.role as "user" | "assistant", raw.content.filter(record));
-      }
-      for (const raw of Array.isArray(body.tools) ? body.tools : []) {
-        if (record(raw) && typeof raw.name === "string" && raw.name) {
-          identities.set(raw.name, { name: raw.name, custom: false });
-          toolMap.set(raw.name, { name: raw.name, custom: false });
-        }
-      }
-      passthroughTools = Array.isArray(body.tools) ? body.tools.filter(record) : undefined;
-      const systemText = converted.body.system;
-      if (typeof systemText === "string" && systemText) system.push(systemText);
-      passthroughChoice = body.tool_choice;
-      if (Array.isArray(body.stop_sequences) && body.stop_sequences.every((entry) => typeof entry === "string")) {
-        passthroughStopSequences = body.stop_sequences;
+      if (Array.isArray(converted.body.stop_sequences) && converted.body.stop_sequences.every((entry) => typeof entry === "string")) {
+        passthroughStopSequences = converted.body.stop_sequences;
       }
     }
-  } catch (error) {
+    } catch (error) {
     if (error instanceof BridgeConversionError) throw new ZcodeRequestError(error.message);
     throw error;
   }
 
-  // chat 源的工具声明来自公共转换，身份表同步进 zcode 工具表；responses 源的
-  // toolMap 只含声明工具（压缩历史中未声明的调用按需注册，不进入响应校验表）。
-  if (from === "chat-completions") {
+  // chat/gemini/anthropic 源的工具声明来自公共转换（anthropic 为同协议直通的
+  // 原名身份表），身份表同步进 zcode 工具表；responses 源的 toolMap 只含声明工具
+  // （压缩历史中未声明的调用按需注册，不进入响应校验表）。
+  if (to === "chat-completions" || to === "gemini" || to === "anthropic") {
     for (const [mapped, identity] of identities) {
-      if (!toolMap.has(mapped)) toolMap.set(mapped, { name: identity.name, custom: identity.custom, ...(identity.namespace === undefined ? {} : { namespace: identity.namespace }) });
+      if (!toolMap.has(mapped)) toolMap.set(mapped, { ...identity });
     }
   }
 
-  const declarations = from === "responses" ? plan.declarations : passthroughTools ?? [];
+  const declarations = to === "responses" ? plan.declarations : passthroughTools ?? [];
   const serverTools = plan.serverTools;
   if (plan.dropped.length) {
     // 剥离后必须告知模型，否则模型会声称拥有已被移除的能力。
@@ -321,8 +326,15 @@ export function translateZcodeRequest(body: Record<string, unknown>, upstreamMod
   if (system.length) translated.system = system.join("\n\n");
   if (declarations.length || serverTools.length) translated.tools = [...declarations, ...serverTools];
   if (body.temperature !== undefined) translated.temperature = body.temperature;
+  else if (to === "gemini" && record(body.generationConfig) && typeof body.generationConfig.temperature === "number") {
+    // gemini 源的采样参数在 generationConfig；不修改调用方原始请求。
+    translated.temperature = body.generationConfig.temperature;
+  }
   if (body.top_p !== undefined) translated.top_p = body.top_p;
-  if (from === "responses") {
+  else if (to === "gemini" && record(body.generationConfig) && typeof body.generationConfig.topP === "number") {
+    translated.top_p = body.generationConfig.topP;
+  }
+  if (to === "responses") {
     const choice = translateChoice(body.tool_choice, toolMap, body.parallel_tool_calls);
     if (choice) translated.tool_choice = choice;
   } else {
@@ -331,11 +343,11 @@ export function translateZcodeRequest(body: Record<string, unknown>, upstreamMod
     if (record(passthroughChoice) || typeof passthroughChoice === "string") translated.tool_choice = passthroughChoice;
     if (passthroughStopSequences !== undefined) translated.stop_sequences = passthroughStopSequences;
   }
-  if (from === "responses" || from === "chat-completions") {
-    const effort = from === "responses"
+  if (to === "responses" || to === "chat-completions") {
+    const effort = to === "responses"
       ? (record(body.reasoning) && typeof body.reasoning.effort === "string" ? body.reasoning.effort : undefined)
       : (typeof body.reasoning_effort === "string" ? body.reasoning_effort : undefined);
-    if (from === "responses" && record(body.reasoning) && body.reasoning.effort === "none") {
+    if (to === "responses" && record(body.reasoning) && body.reasoning.effort === "none") {
       translated.thinking = { type: "disabled" };
     } else if (effort !== undefined) {
       if (THINKING_BUDGETS[effort] === undefined) fail("不支持的 reasoning 档位");
@@ -344,7 +356,7 @@ export function translateZcodeRequest(body: Record<string, unknown>, upstreamMod
       translated.thinking = { type: "enabled", budget_tokens: budget };
     }
   }
-  if (from === "anthropic" && body.thinking !== undefined && record(body.thinking)) {
+  if (to === "anthropic" && body.thinking !== undefined && record(body.thinking)) {
     // 原生 Anthropic thinking 输入按同一服务能力验证，不静默覆盖。
     if (body.thinking.type === "enabled") {
       const budget = positiveInteger(body.thinking.budget_tokens, "thinking.budget_tokens");

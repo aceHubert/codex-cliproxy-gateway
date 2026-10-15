@@ -1,5 +1,5 @@
 import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import type { ClientProtocol, GatewayPlugin, HostServices } from "@agent-proxy/plugin-api";
 import path from "node:path";
 import { isIP } from "node:net";
 import { resolvePaths } from "@agent-proxy/plugin-api";
@@ -11,9 +11,6 @@ import {
 } from "./credentials.ts";
 import type { CodebuddyCredentialCache } from "./credentials.ts";
 import {
-  CODEBUDDY_PREFIX,
-  WORKBUDDY_PREFIX,
-  codebuddyFamilyPrefix,
   codebuddyModelProduct,
   codebuddyModelRegion,
   codebuddyUpstreamModel,
@@ -29,6 +26,19 @@ import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
 import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
 import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
+
+/** CodeBuddy 配置由插件声明，导入插件时合并到公共配置类型。 */
+declare module "@agent-proxy/plugin-api" {
+  interface AgentConfig {
+    /**
+     * CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 `.info` 文件名时锁定该账号登录
+     * （文件缺失时运行期回退 auto，不改写配置）；值为 "auto" 或缺省时按最近刷新的
+     * 登录自动选取并随客户端切换跟随。展示标签（昵称 <邮箱> / 地域）由 Web UI 实时
+     * 解析，不落配置。历史哨兵 "default" 读取时归一为 "auto"。
+     */
+    codebuddyAccount?: string;
+  }
+}
 
 /**
  * CodeBuddy/WorkBuddy 入口门面：照 ZCode 适配器模式组合凭据、目录、协议转换与
@@ -60,36 +70,17 @@ export interface CodebuddyDependencies {
 /** CodeBuddy CLI 自身约每 16 分钟刷新一次目录，网关按同一节奏主动更新。 */
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 16 * 60 * 1000;
 
-/**
- * CodeBuddy 入口仅由自身开关决定，default 路由模式不影响插件。
- */
-export function codebuddyEnabled<Config extends AgentConfig>(config: Config): boolean {
-  return config.codebuddy === undefined || config.codebuddy === true;
-}
-
-export function validateCodebuddyConfig<Config extends AgentConfig>(config: Config): void {
-  if (config.codebuddy !== undefined && typeof config.codebuddy !== "boolean") throw new Error("codebuddy 必须为 boolean");
-  if (config.codebuddyAccount !== undefined
-    && (typeof config.codebuddyAccount !== "string" || !isCodebuddyAccountName(config.codebuddyAccount))) {
+export function validateCodebuddyAccount(account: unknown): void {
+  if (account !== undefined && (typeof account !== "string" || !isCodebuddyAccountName(account))) {
     throw new Error("codebuddyAccount 必须是认证目录内的 .info 文件名或 auto");
   }
-  if (!codebuddyEnabled(config)) return;
+}
+
+export function validateCodebuddyConfig(config: AgentConfig): void {
+  validateCodebuddyAccount(config.codebuddyAccount);
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 CodeBuddy 时网关只能监听环回地址");
-  }
-  const reservedPrefixes = [
-    CODEBUDDY_PREFIX,
-    WORKBUDDY_PREFIX,
-    codebuddyFamilyPrefix("cn-cli"),
-    codebuddyFamilyPrefix("cn-work"),
-    codebuddyFamilyPrefix("intl-cli"),
-    codebuddyFamilyPrefix("intl-work"),
-  ];
-  for (const reserved of reservedPrefixes) {
-    if (config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved))) {
-      throw new Error(`启用 CodeBuddy 时 ${reserved} 前缀保留给 CodeBuddy/WorkBuddy，请调整第三方 prefix`);
-    }
   }
 }
 
@@ -99,31 +90,26 @@ export function codebuddyError(status: number, message: string, type = "invalid_
 
 function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDependencies = {}) {
   validateCodebuddyConfig(config);
-  const enabled = codebuddyEnabled(config);
-  const credentialCache = enabled
-    ? dependencies.credentialCache ?? createCodebuddyCredentialCache(
-      dependencies.authDirectory ?? defaultAuthDirectory(),
-      config.codebuddyAccount ? { preferredAccount: config.codebuddyAccount } : {},
-    )
-    : undefined;
+  const credentialCache = dependencies.credentialCache ?? createCodebuddyCredentialCache(
+    dependencies.authDirectory ?? defaultAuthDirectory(),
+    config.codebuddyAccount ? { preferredAccount: config.codebuddyAccount } : {},
+  );
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
-  const catalogStore = enabled
-    ? createCodebuddyCatalogStore({
-      cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
-      // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
-      // 请求路由则始终以带地域 slug 为准。
-      credentials: async () => {
-        const list = [];
-        for (const product of ["cli", "work"] as const) {
-          try { list.push(await credentialCache!.forProduct(product)); } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
-        }
-        return list;
-      },
-      ...(dependencies.codexModelsCacheFile ? { codexModelsCacheFile: dependencies.codexModelsCacheFile } : {}),
-      fetch: (url, init) => fetchUpstream(url, init),
-      catalogMode: dependencies.catalogMode,
-    })
-    : undefined;
+  const catalogStore = createCodebuddyCatalogStore({
+    cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
+    // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
+    // 请求路由则始终以带地域 slug 为准。
+    credentials: async () => {
+      const list = [];
+      for (const product of ["cli", "work"] as const) {
+        try { list.push(await credentialCache.forProduct(product)); } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
+      }
+      return list;
+    },
+    ...(dependencies.codexModelsCacheFile ? { codexModelsCacheFile: dependencies.codexModelsCacheFile } : {}),
+    fetch: (url, init) => fetchUpstream(url, init),
+    catalogMode: dependencies.catalogMode,
+  });
   const scheduleInterval = dependencies.setInterval ?? setInterval;
   const cancelInterval = dependencies.clearInterval ?? clearInterval;
   const catalogRefreshIntervalMs = Math.max(
@@ -132,23 +118,21 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
   );
   let catalogRefreshTimer: ReturnType<typeof setInterval> | undefined;
   let startupRefresh: Promise<void> | undefined;
-  if (catalogStore) {
-    if (dependencies.refreshCatalogOnStart !== false) {
-      // 构造不阻塞启动；目录消费者等待同一轮刷新，避免静态合成抢跑。
-      startupRefresh = catalogStore.refresh();
-      void startupRefresh.catch(() => {});
-    }
-    if (dependencies.catalogMode !== "manual") {
-      catalogRefreshTimer = scheduleInterval(() => {
-        void catalogStore.refresh().catch(() => {});
-      }, catalogRefreshIntervalMs);
-      catalogRefreshTimer.unref?.();
-    }
+  if (dependencies.refreshCatalogOnStart !== false) {
+    // 构造不阻塞启动；目录消费者等待同一轮刷新，避免静态合成抢跑。
+    startupRefresh = catalogStore.refresh();
+    void startupRefresh.catch(() => {});
+  }
+  if (dependencies.catalogMode !== "manual") {
+    catalogRefreshTimer = scheduleInterval(() => {
+      void catalogStore.refresh().catch(() => {});
+    }, catalogRefreshIntervalMs);
+    catalogRefreshTimer.unref?.();
   }
   const contexts = createCodebuddyContexts();
   const activeRequests = new Set<AbortController>();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: requestLogDir(config),
+    dir: requestLogDir(),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
@@ -167,7 +151,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
 
   return {
     async catalog(): Promise<ModelCatalog> {
-      if (!catalogStore || closed) return { models: [] };
+      if (closed) return { models: [] };
       try {
         await startupRefresh?.catch(() => {});
         const catalog = await catalogStore.catalog();
@@ -178,15 +162,15 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
     },
     /** 显式刷新不吞错；无 last-good 时由命令报告失败。 */
     async refreshCatalog(): Promise<ModelCatalog> {
-      if (!catalogStore || closed) return { models: [] };
+      if (closed) return { models: [] };
       await catalogStore.refresh();
       return updateCatalogMeta(await catalogStore.catalog());
     },
     async reloadCatalog(): Promise<ModelCatalog> {
-      if (!catalogStore || closed) return { models: [] };
+      if (closed) return { models: [] };
       return updateCatalogMeta(await catalogStore.reload());
     },
-    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -255,7 +239,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
         log(status, JSON.stringify({ error: { type, message: redact(message) } }), response.headers);
         return response;
       };
-      if (!credentialCache || closed) return fail(503, "CodeBuddy 未启用或网关已关闭", "configuration_error");
+      if (closed) return fail(503, "CodeBuddy 适配器已关闭", "configuration_error");
       const abort = new AbortController();
       const onAbort = () => abort.abort(request.signal.reason);
       let cleaned = false;
@@ -289,7 +273,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           cleanup();
           return fail(404, "此模型不在 CodeBuddy/WorkBuddy 当前账号的可服务目录内");
         }
-        const translated = translateCodebuddyRequest(input, model, from);
+        const translated = await translateCodebuddyRequest(input, model, to);
         upstreamUrl = `${credential.endpoint}/v2/chat/completions`;
         // 从当前凭据重建身份头与会话归因，不采信入站客户端的身份或授权头。
         const context = contexts.resolve(request, credential);
@@ -321,7 +305,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
         let chunks = "";
         // anthropic 源默认非流式；responses/chat 源仅在客户端声明 stream 时流式返回。
         const stream = !mapResult && input.stream === true;
-        const response = await createCodebuddyResponse(from, upstream, {
+        const response = await createCodebuddyResponse(to, upstream, {
           model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
           sanitizeError: (error) => ({
             code: typeof error.code === "string" ? redact(error.code) : "upstream_error",
@@ -362,7 +346,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
       closed = true;
       if (catalogRefreshTimer !== undefined) cancelInterval(catalogRefreshTimer);
       catalogRefreshTimer = undefined;
-      credentialCache?.close();
+      credentialCache.close();
       contexts.close();
       for (const request of activeRequests) request.abort();
       activeRequests.clear();
@@ -370,10 +354,10 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
   };
 }
 export { getActiveAccount, withInstanceContext } from "./credentials.ts";
-export type { CodebuddyInstanceContext } from "./credentials.ts";
+export type { CodebuddyInstanceContext, CodebuddyRegion } from "./credentials.ts";
 export { CODEBUDDY_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
-export function createCodebuddyAdapter<Config extends AgentConfig>(config: Config, dependencies: CodebuddyDependencies = {}) {
+export function createCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDependencies = {}) {
   return bindHostMethods(buildCodebuddyAdapter(config, dependencies));
 }
 
@@ -390,7 +374,7 @@ export function createCodebuddyPlugin(host: HostServices<AgentConfig>, dependenc
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.to);
       },
       getCatalog: () => adapter.catalog().then(dedupeCodebuddyCatalog),
       refreshCatalog: () => adapter.refreshCatalog(),

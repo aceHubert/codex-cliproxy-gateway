@@ -6,7 +6,8 @@
  */
 
 import { readSseFrames } from "./sse.ts";
-import type { BridgeProtocol, BridgeStopReason, BridgeStreamEvent, BridgeUsage } from "./types.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import type { BridgeStopReason, BridgeStreamEvent, BridgeUsage } from "./types.ts";
 
 type Json = Record<string, unknown>;
 
@@ -555,7 +556,7 @@ async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: st
 }
 
 /** 上游响应 → 桥接事件流：SSE 严格解析；整包 JSON 先重放为事件序列。 */
-export async function* parseUpstreamEvents(protocol: BridgeProtocol, upstream: Response, model: string): AsyncGenerator<BridgeStreamEvent> {
+export async function* parseUpstreamEvents(protocol: ClientProtocol, upstream: Response, model: string): AsyncGenerator<BridgeStreamEvent> {
   const contentType = upstream.headers.get("content-type") ?? "";
   if (!upstream.body) throw new Error("上游响应缺少 body");
   if (!contentType.includes("text/event-stream")) {

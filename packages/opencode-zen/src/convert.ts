@@ -2,10 +2,11 @@ import {
   convertRequest,
   createAnthropicClientOutput,
   createChatCompletionsClientOutput,
+  createGeminiClientOutput,
   createResponsesClientOutput,
   parseUpstreamEvents,
 } from "@agent-proxy/llm-bridge";
-import type { BridgeProtocol, ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { OpencodeZenModelProtocol } from "./catalog.ts";
 import { padOpencodeZenGateTools } from "./fingerprint.ts";
@@ -20,33 +21,25 @@ import { padOpencodeZenGateTools } from "./fingerprint.ts";
  * 完整 JSON。同协议原样浅拷贝/透传。
  */
 
-/** llm-bridge 协议名映射（chat = OpenAI 家族 chat completions；google = Gemini）。 */
-const CLIENT_BRIDGE_PROTOCOL: Record<ClientProtocol, BridgeProtocol> = {
-  "chat-completions": "chat-completions",
-  responses: "responses",
-  anthropic: "anthropic",
-};
-const BRIDGE_PROTOCOL: Record<OpencodeZenModelProtocol, BridgeProtocol> = {
-  chat: "chat-completions",
-  responses: "responses",
-  anthropic: "anthropic",
-  google: "gemini",
-};
-
 export interface OpencodeZenPreparedRequest {
   body: Record<string, unknown>;
   /** 转换产生的工具身份表；响应侧还原 custom/namespace 语义时使用。 */
   tools: ToolIdentityMap;
 }
 
-/** 请求体转换：客户端协议 → 模型端点协议。同协议原样浅拷贝；跨协议单跳。 */
-export function convertOpencodeZenRequest(
-  from: ClientProtocol,
-  to: OpencodeZenModelProtocol,
+/**
+ * 请求体转换：模型端点协议 → 客户端端点协议方向参数化，统一经桥接
+ * convertRequest(from, to, body) 单入口（from 为上游 endpoint 协议，to 为调用方
+ * route 协议）；同协议直通（字段保真 + 原名工具身份表 + model 回填）由桥接层
+ * 内部处理，插件不自行判断同协议。
+ */
+export async function convertOpencodeZenRequest(
+  from: OpencodeZenModelProtocol,
+  to: ClientProtocol,
   input: Record<string, unknown>,
-): OpencodeZenPreparedRequest {
-  if (CLIENT_BRIDGE_PROTOCOL[from] === BRIDGE_PROTOCOL[to]) return { body: { ...input }, tools: new Map() };
-  const converted = convertRequest(from, BRIDGE_PROTOCOL[to], input);
+  options?: { model?: string },
+): Promise<OpencodeZenPreparedRequest> {
+  const converted = await convertRequest(from, to, input, options);
   return { body: converted.body, tools: converted.tools };
 }
 
@@ -86,7 +79,7 @@ export async function renderOpencodeZenClientOutput(
   upstream: Response,
   options: OpencodeZenClientRenderOptions,
 ): Promise<Response> {
-  const events = parseUpstreamEvents(BRIDGE_PROTOCOL[from], upstream, options.model);
+  const events = parseUpstreamEvents(from, upstream, options.model);
   const shared = {
     model: options.model,
     stream: options.stream,
@@ -100,6 +93,10 @@ export async function renderOpencodeZenClientOutput(
   }
   if (to === "anthropic") {
     const result = await createAnthropicClientOutput(events, shared);
+    return result.response;
+  }
+  if (to === "gemini") {
+    const result = await createGeminiClientOutput(events, shared);
     return result.response;
   }
   const result = await createResponsesClientOutput(events, shared);

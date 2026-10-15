@@ -1,5 +1,5 @@
 import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
 import path from "node:path";
 import { isIP } from "node:net";
 import { resolvePaths } from "@agent-proxy/plugin-api";
@@ -44,21 +44,10 @@ export interface QoderDependencies extends QoderRegionDependencies {
   idleTimeoutMs?: number;
 }
 
-export function qoderEnabled<Config extends AgentConfig>(config: Config): boolean {
-  return config.qoder === undefined || config.qoder === true;
-}
-
-export function validateQoderConfig<Config extends AgentConfig>(config: Config): void {
-  if (config.qoder !== undefined && typeof config.qoder !== "boolean") throw new Error("qoder 必须为 boolean");
-  if (!qoderEnabled(config)) return;
+export function validateQoderConfig(config: AgentConfig): void {
   if (!(config.host === "localhost" || config.host === "::1" || config.host === "[::1]"
     || (isIP(config.host) === 4 && config.host.startsWith("127.")))) {
     throw new Error("启用 Qoder 时网关只能监听环回地址");
-  }
-  for (const reserved of ["qoder/", "qoder-intl/", "qoder-cn/"]) {
-    if (config.prefix && (reserved.startsWith(config.prefix) || config.prefix.startsWith(reserved))) {
-      throw new Error(`启用 Qoder 时 ${reserved} 前缀保留给 Qoder，请调整第三方 prefix`);
-    }
   }
 }
 
@@ -110,38 +99,35 @@ interface RegionRuntime {
 /** 双区域门面：认证只读，每区域独立目录与推理调用，入站授权从不参与上游请求。 */
 function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies = {}) {
   validateQoderConfig(config);
-  const enabled = qoderEnabled(config);
   const lifecycle = new AbortController();
   const active = new Set<AbortController>();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: requestLogDir(config),
+    dir: requestLogDir(),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
   } : undefined;
   const cacheDirectory = dependencies.cacheDirectory ?? resolvePaths().runtimeHome;
 
   const regions: RegionRuntime[] = [];
-  if (enabled) {
-    for (const region of ["intl", "cn"] as const) {
-      const scoped = region === "intl" ? dependencies : dependencies.cn ?? {};
-      const configDir = dependencies.configDirs?.[region] ?? (region === "intl" ? dependencies.configDir : undefined);
-      const credentials = scoped.credentials ?? (() => loadQoderCredentials({ region, configDir }));
-      const transport = scoped.transport
-        ?? createQoderTransport({ region, fetch: dependencies.fetch });
-      regions.push({
+  for (const region of ["intl", "cn"] as const) {
+    const scoped = region === "intl" ? dependencies : dependencies.cn ?? {};
+    const configDir = dependencies.configDirs?.[region] ?? (region === "intl" ? dependencies.configDir : undefined);
+    const credentials = scoped.credentials ?? (() => loadQoderCredentials({ region, configDir }));
+    const transport = scoped.transport
+      ?? createQoderTransport({ region, fetch: dependencies.fetch });
+    regions.push({
+      region,
+      label: QODER_REGION_LABELS[region],
+      credentials,
+      transport,
+      store: createQoderCatalogStore({
         region,
-        label: QODER_REGION_LABELS[region],
+        catalogMode: dependencies.catalogMode,
+        cacheDirectory,
         credentials,
-        transport,
-        store: createQoderCatalogStore({
-          region,
-          catalogMode: dependencies.catalogMode,
-          cacheDirectory,
-          credentials,
-          codexModelsCacheFile: dependencies.codexModelsCacheFile,
-          fetchCatalog: (credential) => transport.fetchCatalog(credential, AbortSignal.any([lifecycle.signal, AbortSignal.timeout(30_000)])),
-        }),
-      });
-    }
+        codexModelsCacheFile: dependencies.codexModelsCacheFile,
+        fetchCatalog: (credential) => transport.fetchCatalog(credential, AbortSignal.any([lifecycle.signal, AbortSignal.timeout(30_000)])),
+      }),
+    });
   }
   const byRegion = new Map<QoderRegion, RegionRuntime>(regions.map((runtime) => [runtime.region, runtime]));
 
@@ -164,21 +150,19 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
       });
     }
   }
-  if (regions.length) {
-    if (dependencies.refreshCatalogOnStart !== false) {
-      startup = refreshAll();
-      void startup.catch(() => {});
-      void startup.finally(() => { startup = undefined; }).catch(() => {});
-    }
-    if (dependencies.catalogMode !== "manual") {
-      timer = schedule(backgroundRefresh, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? 120_000));
-      timer.unref?.();
-    }
+  if (dependencies.refreshCatalogOnStart !== false) {
+    startup = refreshAll();
+    void startup.catch(() => {});
+    void startup.finally(() => { startup = undefined; }).catch(() => {});
+  }
+  if (dependencies.catalogMode !== "manual") {
+    timer = schedule(backgroundRefresh, Math.max(1_000, dependencies.catalogRefreshIntervalMs ?? 120_000));
+    timer.unref?.();
   }
 
   return {
     async catalog(): Promise<ModelCatalog> {
-      if (!regions.length || closed) return { models: [] };
+      if (closed) return { models: [] };
       await startup?.catch(() => {});
       const models = [];
       for (const runtime of regions) {
@@ -196,17 +180,17 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
       return { models };
     },
     async refreshCatalog(): Promise<ModelCatalog> {
-      if (!regions.length || closed) return { models: [] };
+      if (closed) return { models: [] };
       await (startup ?? refreshAll());
       return { models: (await Promise.all(regions.map((runtime) => runtime.store.catalog()))).flatMap((catalog) => catalog.models) };
     },
     async reloadCatalog(): Promise<ModelCatalog> {
-      if (!regions.length || closed) return { models: [] };
+      if (closed) return { models: [] };
       await startup?.catch(() => {});
       return { models: (await Promise.all(regions.map((runtime) => runtime.store.reload()))).flatMap((catalog) => catalog.models) };
     },
-    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
-      if (!regions.length || closed) return qoderError(404, "Qoder 适配器未启用");
+    async forward(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+      if (closed) return qoderError(404, "Qoder 适配器已关闭");
       const model = typeof input.model === "string" ? input.model : "";
       const slug = qoderModelSlug(model);
       if (!slug) return qoderError(400, "Qoder 模型必须使用 qoder-intl/ 或 qoder-cn/ 前缀");
@@ -261,7 +245,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
         signal.throwIfAborted();
         const levels = Array.isArray(entry.supported_reasoning_levels)
           ? entry.supported_reasoning_levels as Array<{ effort: string }> : [];
-        const translated = translateQoderRequest(input, modelKey, levels.map((level) => level.effort), from);
+        const translated = await translateQoderRequest(input, modelKey, levels.map((level) => level.effort), to);
         // 完整上下文档位通过独立参数选择，不能用默认输入限制代替。
         if (typeof entry.context_window === "number") {
           (translated.body.parameters as Record<string, unknown>).context_length = entry.context_window;
@@ -281,7 +265,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
         const observed = upstream.body ? new Response(upstream.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
           transform(chunk, output) { armTimeout(); output.enqueue(chunk); },
         })), { status: upstream.status, headers: upstream.headers }) : upstream;
-        const response = await translateQoderResponse(from, observed, {
+        const response = await translateQoderResponse(to, observed, {
           model, tools: translated.tools, stream: !mapResult && input.stream === true,
           signal,
           abort: () => { controller.abort(); },
@@ -322,7 +306,7 @@ export { getActiveSources, withInstanceContext } from "./credentials.ts";
 export type { QoderInstanceContext } from "./credentials.ts";
 export { QODER_RUNTIME_ARTIFACTS } from "./catalog.ts";
 
-export function createQoderAdapter<Config extends AgentConfig>(config: Config, dependencies: QoderDependencies = {}) {
+export function createQoderAdapter(config: AgentConfig, dependencies: QoderDependencies = {}) {
   return bindHostMethods(buildQoderAdapter(config, dependencies));
 }
 
@@ -339,7 +323,7 @@ export function createQoderPlugin(host: HostServices<AgentConfig>, dependencies:
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.to);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

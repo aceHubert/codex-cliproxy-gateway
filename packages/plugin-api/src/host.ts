@@ -39,7 +39,7 @@ export const withAgentSystemPrompt = (entry: ModelEntry, prompt: string): ModelE
 export const invalidateModelsCache = (file: string) => getHostServices().catalog.invalidateModelsCache(file);
 export const clearModelsCacheEntries = (file: string, matches: (slug: string) => boolean): boolean => getHostServices().catalog.clearModelsCacheEntries(file, matches);
 export const localTime = (at?: Date) => getHostServices().requestLog.localTime(at);
-export const requestLogDir = (config: AgentConfig) => getHostServices().requestLog.requestLogDir(config);
+export const requestLogDir = () => getHostServices().requestLog.requestLogDir();
 export const logGroupFromPath = (pathname: string) => getHostServices().requestLog.logGroupFromPath(pathname);
 export const logExchange = (sink: RequestLogSink | undefined, group: string, entry: ExchangeEntry, namespace?: LogNamespace) => getHostServices().requestLog.logExchange(sink, group, entry, namespace);
 export const logGatewayError = (target: ProcessLogTarget | undefined, entry: ErrorEntry) => getHostServices().processLog.logGatewayError(target, entry);

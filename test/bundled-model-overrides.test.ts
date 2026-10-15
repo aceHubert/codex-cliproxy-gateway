@@ -10,6 +10,7 @@ import {
   syncCatalog,
 } from "../apps/gateway/src/catalog.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { gatewayConfigWarnings, migrateLegacyConfig } from "../apps/gateway/src/config.ts";
 import {
   fetchConfiguredUpstreamCatalog,
   loadModelOverrideRules,
@@ -60,7 +61,7 @@ test("cached model overrides take priority over bundled values and configured do
   try {
     fs.mkdirSync(paths.runtimeHome, { recursive: true });
     fs.writeFileSync(paths.modelMergeFile, JSON.stringify({ openai: [{ name: "gpt-5.6-sol", context_window: 42 }] }));
-    config.model_merge_json = "https://models.invalid/models.json";
+    config.modelMergeJson = "https://models.invalid/models.json";
     const { modelsConfigFile } = await loadModelOverrideRules(paths, config, false);
     assert.equal(modelsConfigFile, paths.modelMergeFile);
     await rebuildCatalog(paths, config, [{ slug: "gpt-5.6-sol" }], modelsConfigFile);
@@ -81,7 +82,7 @@ test("model override downloads and explicit refresh preserve cache validation", 
     return new Response(JSON.stringify({ openai: [{ name: "gpt-5.6-sol", context_window: downloads }] }));
   }) as unknown as typeof fetch;
   try {
-    config.model_merge_json = "https://models.invalid/models.json";
+    config.modelMergeJson = "https://models.invalid/models.json";
     const first = await loadModelOverrideRules(paths, config, false);
     assert.equal(first.modelsConfigFile, paths.modelMergeFile);
     assert.equal(first.rules[0]!.fields.context_window, 1);
@@ -90,6 +91,30 @@ test("model override downloads and explicit refresh preserve cache validation", 
     globalThis.fetch = (async () => new Response("{invalid")) as unknown as typeof fetch;
     await assert.rejects(loadModelOverrideRules(paths, config, true), /Invalid model overrides/);
     assert.equal((await loadModelOverrideRules(paths, config, false)).rules[0]!.fields.context_window, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    cleanup();
+  }
+});
+
+test("modelMergeJson 使用新规范校验，旧键不迁移或触发下载", async () => {
+  const { paths, config, cleanup } = fixture();
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => { throw new Error("旧键不应触发下载"); }) as unknown as typeof fetch;
+  try {
+    const schema = JSON.parse(fs.readFileSync(path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8"));
+    assert.equal(schema.properties.modelMergeJson.type, "string");
+    assert.equal(schema.properties.modelMergeJson.format, "uri");
+    assert.equal(Object.hasOwn(schema.properties, "model_merge_json"), false);
+    const validConfig = { ...config, port: 8320, configVersion: "model-merge-json-test" };
+    assert.deepEqual(gatewayConfigWarnings({ ...validConfig, modelMergeJson: "https://models.invalid/models.json" }), []);
+    assert.deepEqual(gatewayConfigWarnings({ ...validConfig, modelMergeJson: 42 }), ["$.modelMergeJson should be string"]);
+    const legacy = { ...config, model_merge_json: "https://models.invalid/legacy.json" };
+    migrateLegacyConfig(legacy);
+    assert.equal(Object.hasOwn(legacy, "modelMergeJson"), false);
+    const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, legacy, false);
+    assert.equal(modelsConfigFile, undefined);
+    assert.ok(rules.length > 0);
   } finally {
     globalThis.fetch = originalFetch;
     cleanup();

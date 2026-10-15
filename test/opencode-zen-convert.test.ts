@@ -51,20 +51,20 @@ function chatToolStream(calls: Array<{ id: string; name: string; fragments: stri
 }
 
 /** 使用请求转换产生的身份表，验证公共输出层的工具类型还原。 */
-function renderResponses(
+async function renderResponses(
   upstream: ReadableStream<Uint8Array>,
   protocol: OpencodeZenModelProtocol,
   stream: boolean,
   tools: readonly unknown[] = [],
 ): Promise<Response> {
-  const prepared = convertOpencodeZenRequest("responses", "chat", { input: "测试", tools });
+  const prepared = await convertOpencodeZenRequest("chat-completions", "responses", { input: "测试", tools });
   return renderOpencodeZenClientOutput(protocol, "responses",
     new Response(upstream, { headers: { "content-type": "text/event-stream" } }),
     { model: "m", stream, tools: prepared.tools });
 }
 
-test("门禁工具身份只采纳实际 read/bash 占位，未知工具和未注入 shell 不获放行", () => {
-  const prepared = convertOpencodeZenRequest("responses", "chat", { input: "测试" });
+test("门禁工具身份只采纳实际 read/bash 占位，未知工具和未注入 shell 不获放行", async () => {
+  const prepared = await convertOpencodeZenRequest("chat-completions", "responses", { input: "测试" });
   const result = mergeOpencodeZenToolIdentities(prepared.tools, padOpencodeZenGateTools([]));
   assert.deepEqual([...result.entries()], [
     ["read", { name: "read", custom: false }],
@@ -94,7 +94,7 @@ test("门禁占位不覆盖客户端真实 function/custom/namespace 工具声�
     }] },
   ];
   for (const declaration of declarations) {
-    const prepared = convertOpencodeZenRequest("responses", "chat", { input: "测试", tools: declaration.tools });
+    const prepared = await convertOpencodeZenRequest("chat-completions", "responses", { input: "测试", tools: declaration.tools });
     const originalTools = prepared.body.tools as Array<Record<string, unknown>>;
     const upstreamTools = padOpencodeZenGateTools(originalTools);
     for (const tool of originalTools) assert.ok(upstreamTools.includes(tool), "客户端定义原样保留");
@@ -109,7 +109,7 @@ test("门禁占位不覆盖客户端真实 function/custom/namespace 工具声�
     assert.equal(originalIdentity.custom, declaration.custom);
     const input = "中文正文\\路径\n第二行";
     const arguments_ = JSON.stringify(declaration.custom ? { input } : { command: "pwd" });
-    const rendered = await renderOpencodeZenClientOutput("chat", "responses",
+    const rendered = await renderOpencodeZenClientOutput("chat-completions", "responses",
       new Response(chatToolStream([{ id: "call_real_tool", name: mappedName, fragments: Array.from(arguments_) }]),
         { headers: { "content-type": "text/event-stream" } }),
       { model: "m", stream: true, tools: merged });
@@ -127,8 +127,8 @@ test("门禁占位不覆盖客户端真实 function/custom/namespace 工具声�
   }
 });
 
-test("responses → chat 转换：instructions、工具历史、custom 工具与并行开关", () => {
-  const { body } = convertOpencodeZenRequest("responses", "chat", {
+test("responses → chat 转换：instructions、工具历史、custom 工具与并行开关", async () => {
+  const { body } = await convertOpencodeZenRequest("chat-completions", "responses", {
     instructions: "SYS-INSTR",
     input: [
       { type: "message", role: "user", content: [{ type: "input_text", text: "look up 42" }] },
@@ -170,21 +170,21 @@ test("responses → chat 转换：instructions、工具历史、custom 工具与
   assert.deepEqual((tools[1]!.function.parameters.properties as Record<string, unknown>).input, { type: "string" });
 });
 
-test("convertOpencodeZenRequest：同协议浅拷贝、chat → anthropic max_tokens 修正、chat → responses 结构", () => {
+test("convertOpencodeZenRequest：同协议浅拷贝、chat → anthropic max_tokens 修正、chat → responses 结构", async () => {
   const input: Record<string, unknown> = {
     model: "opencode-zen/x",
     messages: [{ role: "system", content: "sys" }, { role: "user", content: "hi" }],
     stream: false,
     max_tokens: 512,
   };
-  const same = convertOpencodeZenRequest("chat-completions", "chat", input);
+  const same = await convertOpencodeZenRequest("chat-completions", "chat-completions", input);
   assert.notEqual(same, input);
   assert.equal(same.body.max_tokens, 512);
-  const anthropic = convertOpencodeZenRequest("chat-completions", "anthropic", input);
+  const anthropic = await convertOpencodeZenRequest("anthropic", "chat-completions", input);
   assert.equal(anthropic.body.max_tokens, 512, "llm-bridge 默认 1024 需被客户端值覆盖");
   assert.equal(anthropic.body.system, "sys");
   assert.ok(Array.isArray(anthropic.body.messages));
-  const responses = convertOpencodeZenRequest("chat-completions", "responses", input);
+  const responses = await convertOpencodeZenRequest("responses", "chat-completions", input);
   assert.ok(Array.isArray(responses.body.input));
 });
 
@@ -195,7 +195,7 @@ test("renderOpencodeZenClientOutput：chat ↔ responses 工具事件双向完�
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_tokens\":3}}\n\n",
     "data: [DONE]\n\n",
   ].join("");
-  const toResponses = await renderOpencodeZenClientOutput("chat", "responses",
+  const toResponses = await renderOpencodeZenClientOutput("chat-completions", "responses",
     new Response(streamOf(chatSse), { headers: { "content-type": "text/event-stream" } }),
     { model: "m", stream: true });
   const responsesText = await toResponses.text();
@@ -260,7 +260,7 @@ test("renderOpencodeZenClientOutput：chat 上游 → anthropic 客户端（新�
     "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
     "data: [DONE]\n\n",
   ].join("");
-  const response = await renderOpencodeZenClientOutput("chat", "anthropic",
+  const response = await renderOpencodeZenClientOutput("chat-completions", "anthropic",
     new Response(streamOf(chatSse), { headers: { "content-type": "text/event-stream" } }),
     { model: "m", stream: true });
   const text = await response.text();
@@ -281,7 +281,7 @@ test("chat → responses 按客户端声明还原 custom 工具并保留并行 f
     { type: "custom", name: "apply_patch" },
     { type: "function", name: "lookup_issue", parameters: { type: "object" } },
   ];
-  const events = readSseEvents(await (await renderResponses(upstream, "chat", true, clientTools)).text());
+  const events = readSseEvents(await (await renderResponses(upstream, "chat-completions", true, clientTools)).text());
   assert.deepEqual(events.map((event) => event.sequence_number), events.map((_, index) => index));
   const added = events.filter((event) => event.type === "response.output_item.added")
     .map((event) => event.item as Record<string, unknown>);
@@ -320,7 +320,7 @@ test("chat → responses custom 恢复使用任意声明名称并接受空 input
   for (const input of ["", "首行\n次行\\\"尾部"]) {
     for (const stream of [true, false]) {
       const upstream = chatToolStream([{ id: "call_custom", name: "custom_editor", fragments: [JSON.stringify({ input })] }]);
-      const response = await renderResponses(upstream, "chat", stream, [{ type: "custom", name: "custom_editor" }]);
+      const response = await renderResponses(upstream, "chat-completions", stream, [{ type: "custom", name: "custom_editor" }]);
       let output: Array<Record<string, unknown>>;
       if (stream) {
         const events = readSseEvents(await response.text());
@@ -346,7 +346,7 @@ test("chat → responses custom 恢复使用任意声明名称并接受空 input
 test("chat → responses 未声明 custom 的同名工具仍然使用 function 协议", async () => {
   const args = JSON.stringify({ input: "补丁正文" });
   const upstream = chatToolStream([{ id: "call_function", name: "apply_patch", fragments: [args] }]);
-  const events = readSseEvents(await (await renderResponses(upstream, "chat", true, [
+  const events = readSseEvents(await (await renderResponses(upstream, "chat-completions", true, [
     { type: "function", name: "apply_patch", parameters: { type: "object" } },
   ])).text());
   assert.equal(events.some((event) => event.type === "response.custom_tool_call_input.delta"), false);
@@ -359,7 +359,7 @@ test("chat → responses 未声明 custom 的同名工具仍然使用 function �
 test("chat → responses custom 参数损坏、缺失或非字符串 input 时明确失败", async () => {
   for (const args of ["{\"input\":", "{}", "{\"input\":42}", "{\"input\":null}", "[\"patch\"]"]) {
     const upstream = chatToolStream([{ id: "call_invalid", name: "apply_patch", fragments: [args] }]);
-    const response = await renderResponses(upstream, "chat", true, [{ type: "custom", name: "apply_patch" }]);
+    const response = await renderResponses(upstream, "chat-completions", true, [{ type: "custom", name: "apply_patch" }]);
     const events = readSseEvents(await response.text());
     assert.equal(events.some((event) => event.type === "response.completed"), false, args);
     const failed = events.find((event) => event.type === "response.failed");
@@ -367,7 +367,7 @@ test("chat → responses custom 参数损坏、缺失或非字符串 input 时�
     assert.match(JSON.stringify(failed), /apply_patch|custom|input/i, args);
     const jsonResponse = await renderResponses(
       chatToolStream([{ id: "call_invalid", name: "apply_patch", fragments: [args] }]),
-      "chat", false, [{ type: "custom", name: "apply_patch" }],
+      "chat-completions", false, [{ type: "custom", name: "apply_patch" }],
     );
     assert.equal(jsonResponse.status, 502, args);
     assert.equal((await jsonResponse.json() as Record<string, unknown>).status, "failed", args);
@@ -381,7 +381,7 @@ test("chat → responses custom 调用提前结束时不产出成功完成事件
         tool_calls: [{ index: 0, id: "call_cutoff", type: "function", function: { name: "apply_patch", arguments: args } }],
       } }],
     })}\n\n`;
-    const response = await renderResponses(streamOf(text), "chat", true, [{ type: "custom", name: "apply_patch" }]);
+    const response = await renderResponses(streamOf(text), "chat-completions", true, [{ type: "custom", name: "apply_patch" }]);
     const events = readSseEvents(await response.text());
     assert.equal(events.some((event) => event.type === "response.custom_tool_call_input.done"), false);
     assert.equal(events.some((event) => event.type === "response.output_item.done"), false);
@@ -422,7 +422,7 @@ test("anthropic 与 google → responses custom 工具解包后可聚合并重�
     modelVersion: "model", candidates: [{ content: { role: "model", parts: [{ functionCall: { name: "apply_patch", args: { input } } }] }, finishReason: "STOP" }],
     usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 2, totalTokenCount: 3 },
   })}\n\n`;
-  for (const [protocol, text] of [["anthropic", anthropic], ["google", google]] as const) {
+  for (const [protocol, text] of [["anthropic", anthropic], ["gemini", google]] as const) {
     const streamResponse = await renderResponses(streamOf(text), protocol, true, [{ type: "custom", name: "apply_patch" }]);
     const events = readSseEvents(await streamResponse.text());
     assert.equal(events.filter((event) => event.type === "response.custom_tool_call_input.delta")
@@ -436,7 +436,7 @@ test("anthropic 与 google → responses custom 工具解包后可聚合并重�
     assert.equal(item.input, input, protocol);
     assert.equal(typeof item.call_id, "string");
     assert.ok(item.call_id);
-    const { body: request } = convertOpencodeZenRequest("responses", "chat", { input: [item, { type: "custom_tool_call_output", call_id: item.call_id, output: "补丁已应用" }] });
+    const { body: request } = await convertOpencodeZenRequest("chat-completions", "responses", { input: [item, { type: "custom_tool_call_output", call_id: item.call_id, output: "补丁已应用" }] });
     const messages = request.messages as Array<Record<string, unknown>>;
     const call = (messages[0]!.tool_calls as Array<Record<string, unknown>>)[0]!;
     assert.equal(call.id, item.call_id);
@@ -508,12 +508,12 @@ test("renderOpencodeZenClientOutput：失败或未完成的 custom 响应保留�
   }
 });
 
-test("convertOpencodeZenRequest：同协议原生 responses custom 声明和调用保持不变", () => {
+test("convertOpencodeZenRequest：同协议原生 responses custom 声明和调用保持不变", async () => {
   const input = {
     input: [{ id: "ctc_native", type: "custom_tool_call", call_id: "call_native", name: "apply_patch", input: "原生补丁", status: "completed" }],
     tools: [{ type: "custom", name: "apply_patch" }],
   };
-  const prepared = convertOpencodeZenRequest("responses", "responses", input);
+  const prepared = await convertOpencodeZenRequest("responses","responses", input);
   assert.deepEqual(prepared.body, input);
 });
 
@@ -536,7 +536,7 @@ test("renderOpencodeZenClientOutput：取消信号唤醒挂起的上游读取并
     },
   }, { highWaterMark: 0 });
   let abortCalls = 0;
-  const response = await renderOpencodeZenClientOutput("chat", "responses",
+  const response = await renderOpencodeZenClientOutput("chat-completions", "responses",
     new Response(upstream, { headers: { "content-type": "text/event-stream" } }),
     {
       model: "m", stream: true, signal: cancellation.signal,

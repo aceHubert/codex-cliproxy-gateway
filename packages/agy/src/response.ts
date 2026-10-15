@@ -121,7 +121,7 @@ function finishDisposition(finishReason: string | undefined): { status: "complet
   return { status: "failed", failure: `Antigravity 上游返回不支持的 finishReason：${finishReason}` };
 }
 
-/* ====================== 三种客户端协议的独立渲染层 ====================== */
+/* ====================== 四种客户端协议的独立渲染层 ====================== */
 
 interface ClientRenderState {
   model: string;
@@ -211,6 +211,78 @@ async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state:
     return Response.json(completion);
   }
   return new Response(strBytes(text), { headers: sseHeaders() });
+}
+
+/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON（零桥接依赖）。 */
+async function renderGeminiClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
+  let finish = "STOP";
+  let model = state.model;
+  const parts: Json[] = [];
+  const toolArgs = new Map<string, string>();
+  const toolNames = new Map<string, string>();
+  let toolCalled = false;
+  let usage: Json | undefined;
+  for await (const frame of iterateOwnSse(responsesSse)) {
+    if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+      parts.push({ text: frame.delta });
+    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+      parts.push({ text: frame.delta, thought: true });
+    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+      const item = record(frame.item, "item");
+      const callId = typeof item.call_id === "string" ? item.call_id : "";
+      toolArgs.set(callId, "");
+      toolNames.set(callId, typeof item.name === "string" ? item.name : "");
+    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+      const callId = [...toolArgs.keys()].at(-1) ?? "";
+      toolArgs.set(callId, (toolArgs.get(callId) ?? "") + frame.delta);
+    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+      const response = record(frame.response, "response");
+      if (typeof response.model === "string") model = state.model;
+      const output = Array.isArray(response.output) ? response.output : [];
+      finish = response.status === "incomplete" ? "MAX_TOKENS" : "STOP";
+      if (response.status === "failed") finish = "OTHER";
+      if (record(response.usage ?? {}, "usage") && response.usage !== null) usage = record(response.usage, "usage");
+      void output;
+    }
+  }
+  // functionCall parts 依到达顺序附加在正文之后（Gemini 的候选内容是单序列）。
+  for (const [callId, argsText] of toolArgs) {
+    let args: Json = {};
+    try {
+      args = record(JSON.parse(argsText || "{}"), "args");
+    } catch { args = {}; }
+    parts.push({ functionCall: { name: toolNames.get(callId) ?? "", args } });
+    toolCalled = true;
+  }
+  void toolCalled;
+  const inputTokens = typeof usage?.input_tokens === "number" ? usage.input_tokens : 0;
+  const outputTokens = typeof usage?.output_tokens === "number" ? usage.output_tokens : 0;
+  const usageMetadata: Json | undefined = usage
+    ? {
+      promptTokenCount: inputTokens,
+      candidatesTokenCount: outputTokens,
+      totalTokenCount: typeof usage.total_tokens === "number" ? usage.total_tokens : inputTokens + outputTokens,
+    }
+    : undefined;
+  if (state.stream) {
+    const frames: string[] = [];
+    for (const part of parts) {
+      const chunk: Json = { candidates: [{ content: { parts: [part], role: "model" } }], modelVersion: model };
+      frames.push(`data: ${JSON.stringify(chunk)}\n\n`);
+    }
+    const terminal: Json = { candidates: [{ content: { role: "model" }, finishReason: finish }], modelVersion: model, ...(usageMetadata ? { usageMetadata } : {}) };
+    frames.push(`data: ${JSON.stringify(terminal)}\n\n`);
+    const text = frames.join("");
+    safely(() => state.onChunk?.(text));
+    return new Response(strBytes(text), { headers: sseHeaders() });
+  }
+  const completion: Json = {
+    candidates: [{ content: { ...(parts.length > 0 ? { parts } : { parts: [{ text: "" }] }), role: "model" }, finishReason: finish }],
+    modelVersion: model,
+    ...(usageMetadata ? { usageMetadata } : {}),
+  };
+  safely(() => state.onChunk?.(JSON.stringify(completion)));
+  return Response.json(completion);
 }
 
 /** AGY 自产 Responses SSE → Anthropic Messages 事件（message_start/块生命周期/终态）。 */
@@ -365,17 +437,19 @@ function sseHeaders(): Headers {
 }
 
 /**
- * 三种客户端协议统一入口：responses 源沿用既有 Responses 输出；chat-completions /
- * anthropic 源由 AGY 自产 Responses SSE 独立渲染为对应协议外壳（零桥接依赖）。
+ * 四种客户端协议统一入口：responses 源沿用既有 Responses 输出；chat-completions /
+ * anthropic / gemini 源由 AGY 自产 Responses SSE 独立渲染为对应协议外壳（零桥接依赖）。
  */
-export async function createAgyClientResponse(from: ClientProtocol, upstream: Response, options: AgyResponseOptions): Promise<Response> {
-  if (from === "responses") return createAgyResponse(upstream, options);
-  // chat/anthropic 客户端始终先取 Responses SSE 流（非流式客户端由渲染器聚合），
+export async function createAgyClientResponse(to: ClientProtocol, upstream: Response, options: AgyResponseOptions): Promise<Response> {
+  if (to === "responses") return createAgyResponse(upstream, options);
+  // 非 responses 客户端始终先取 Responses SSE 流（非流式客户端由渲染器聚合），
   // 否则非流式时 createAgyResponse 直接返回聚合 JSON，渲染层无帧可解。
   const responsesOutput = await createAgyResponse(upstream, { ...options, stream: true });
   if (!responsesOutput.body) throw new Error("Antigravity 响应缺少 body");
   const state: ClientRenderState = { model: options.model, stream: options.stream, onChunk: options.onChunk };
-  return from === "chat-completions" ? renderChatClient(responsesOutput.body, state) : renderAnthropicClient(responsesOutput.body, state);
+  if (to === "chat-completions") return renderChatClient(responsesOutput.body, state);
+  if (to === "gemini") return renderGeminiClient(responsesOutput.body, state);
+  return renderAnthropicClient(responsesOutput.body, state);
 }
 
 export async function createAgyResponse(upstream: Response, options: AgyResponseOptions): Promise<Response> {

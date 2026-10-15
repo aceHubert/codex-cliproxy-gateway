@@ -12,6 +12,7 @@ import {
   LEGACY_FIELD_MIGRATIONS,
   migrateLegacyConfig,
   AGENT_DEFAULTS,
+  agentConfigEnabled,
   effectiveAgentConfig,
 } from "./config.ts";
 import { realPathOrResolve, resolvePaths, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker } from "./paths.ts";
@@ -46,24 +47,17 @@ import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstanc
 import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 import { requestLogDir } from "./request-log.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
-import { validateZcodeConfig, zcodeEnabled, type ZcodeDependencies } from "@agent-proxy/zcode";
-import {
-  codebuddyEnabled,
-  validateCodebuddyConfig,
-  type CodebuddyDependencies,
-} from "@agent-proxy/codebuddy";
+import type { ZcodeDependencies } from "@agent-proxy/zcode";
+import type { CodebuddyDependencies } from "@agent-proxy/codebuddy";
+import { validateConfiguredPlugins } from "./plugin-config.ts";
 import {
   defaultAuthDirectory,
   listCodebuddyAccounts,
   resolveCodebuddyAccountFile,
 } from "@agent-proxy/codebuddy/credentials";
-import {
-  qoderEnabled,
-  validateQoderConfig,
-  type QoderDependencies,
-} from "@agent-proxy/qoder";
-import { agyEnabled, validateAgyConfig, type AgyDependencies } from "@agent-proxy/agy";
-import { opencodeZenEnabled, validateOpencodeZenConfig, type OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
+import type { QoderDependencies } from "@agent-proxy/qoder";
+import type { AgyDependencies } from "@agent-proxy/agy";
+import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
 import { loadRealtimeProviderMode } from "./realtime.ts";
 import { capGatewayLog, logConfigChange } from "./process-log.ts";
 import type { ConfigChange } from "./process-log.ts";
@@ -80,7 +74,6 @@ import {
   gatewayServiceLabel,
   webUiServiceLabel,
 } from "./launchd.ts";
-import { agentConfigView } from "./host-services.ts";
 import { MOUNT_PATH } from "./types.ts";
 import type {
   CliOptions,
@@ -101,7 +94,7 @@ const DEFAULTS = {
   maxGatewayLogBytes: 0,
   upstreamOnly: false,
   ...AGENT_DEFAULTS,
-} satisfies Omit<GatewayConfig, "selectedModels">;
+} satisfies GatewayConfig;
 
 interface BackupRecord {
   existed: boolean;
@@ -698,7 +691,7 @@ const AUDITED_FIELDS = [
   "port",
   "upstreamBaseUrl",
   "upstreamType",
-  "model_merge_json",
+  "modelMergeJson",
   "selectedModels",
   "excludedModels",
 ] as const;
@@ -901,7 +894,7 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
   if (upstreamUrl) overrides.upstreamBaseUrl = upstreamUrl.replace(/\/+$/, "");
   const upstreamType = parseUpstreamTypeOption(stringOption(options, "upstream-type"));
   if (upstreamType) overrides.upstreamType = upstreamType;
-  if (modelMergeJson) overrides.model_merge_json = modelMergeJson;
+  if (modelMergeJson) overrides.modelMergeJson = modelMergeJson;
   // 已存在安装：确认（或 --yes）后原地更新；拒绝则不改动任何文件。
   if (switching && options.yes !== true) {
     if (!process.stdin.isTTY) {
@@ -1463,7 +1456,7 @@ async function models(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
   const upstreamOnly = config.upstreamOnly === true;
-  if (modelMergeJson) config.model_merge_json = modelMergeJson;
+  if (modelMergeJson) config.modelMergeJson = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
 
   if (options.exclude !== undefined) {
@@ -1918,12 +1911,7 @@ async function writeConfigAndRestart(
 ): Promise<void> {
   // 与 Web UI 同一规则：组合校验先于写盘与重启，失败时保留原配置和运行中的服务
   // （否则保存成功、新进程却被 validate*Config 拒绝启动，网关直接不可用）。
-  const agentConfig = agentConfigView(config);
-  validateZcodeConfig(agentConfig);
-  validateCodebuddyConfig(agentConfig);
-  validateQoderConfig(agentConfig);
-  validateAgyConfig(agentConfig);
-  validateOpencodeZenConfig(agentConfig);
+  validateConfiguredPlugins(config);
   const persist = async (): Promise<void> => {
     writeGatewayConfig(paths.gatewayConfig, config);
     if (fs.existsSync(paths.stateFile)) {
@@ -1975,12 +1963,11 @@ async function configCommand(options: CliOptions): Promise<void> {
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
   if (upstreamOnlyTarget === undefined && zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && opencodeZenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
-    const agentConfig = agentConfigView(config);
-    const zcodeActive = zcodeEnabled(agentConfig);
-    const codebuddyActive = codebuddyEnabled(agentConfig);
-    const qoderActive = qoderEnabled(agentConfig);
-    const agyActive = agyEnabled(agentConfig);
-    const opencodeZenActive = opencodeZenEnabled(agentConfig);
+    const zcodeActive = agentConfigEnabled(config, "zcode");
+    const codebuddyActive = agentConfigEnabled(config, "codebuddy");
+    const qoderActive = agentConfigEnabled(config, "qoder");
+    const agyActive = agentConfigEnabled(config, "agy");
+    const opencodeZenActive = agentConfigEnabled(config, "opencodeZen");
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
       zcode: zcodeActive,

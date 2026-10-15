@@ -86,7 +86,7 @@ export async function loadModelOverrideRules(
   const modelsConfigFile = await resolveModelMergeJson(
     paths.modelMergeFile,
     undefined,
-    config.model_merge_json,
+    config.modelMergeJson,
     refreshModelMerge,
   );
   return {

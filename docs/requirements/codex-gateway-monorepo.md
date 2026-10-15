@@ -3,6 +3,7 @@
 状态：monorepo 与插件迁移已完成；转换封装仍由独立计划负责，未执行发布。
 日期：2026-10-10。
 工作分支：`codex/gateway-monorepo`。
+后续变更（2026-10-14）：桥接底座与插件调用形态已由 [llm-bridge-aisdk-rebase 计划](../exec-plans/completed/llm-bridge-aisdk-rebase.md) 变更——npm `llm-bridge@2.0.1` 底座替换为 `@ai-sdk/*` 引擎离线捕获，四类标准桥接插件统一调用异步 `convertRequest(from, to, body)`，协议面扩展 ClientProtocol 四值（含 gemini 客户端入口）。本需求文中涉及外部 llm-bridge 封装、「不得直接依赖外部 llm-bridge」等表述均按需求时点（2026-10-10）理解，现行状态以该计划为准；其余目录、插件契约与装配边界未变。
 实施基线：`main` 的 `a20587d9da3e375219dca7199c892ddb639d4d64`（v0.10.0）。
 
 ## 1. 目标与已确认要求
@@ -273,7 +274,7 @@ const detected = {
 
 - install 的默认运行主目录改为 `~/.agent-proxy-gateway`，config.json、state、目录缓存、日志与其他受管运行文件统一从该目录派生；识别并迁移旧 `~/.codex-cliproxy-gateway` 默认安装，保留用户配置、安装状态、备份与回滚材料，不自动删除旧目录。
 - 配置合并优先级：新目录已有用户字段 > 旧安装中迁入的缺失用户字段 > 新默认值；显式 false/true、账号选择及未知字段保留。新旧安装归属或 state 冲突时保留两端并报告，不盲目覆盖。
-- JSON 内旧默认地址按明确受管字段与默认路径白名单迁移，例如旧默认 catalogPath 和 logDir；state.config 镜像同步。自定义 catalog/log/model_merge_json 路径、远程 URL、$schema 地址及任意包含旧目录文字的字段不做全局替换。
+- JSON 内旧默认地址按明确受管字段与默认路径白名单迁移，例如旧默认 catalogPath 和 logDir；state.config 镜像同步。自定义 catalog/log/modelMergeJson 路径、远程 URL、$schema 地址及任意包含旧目录文字的字段不做全局替换。
 - 显式实例目录、`CODEX_CLIPROXY_HOME` 和自定义 `serve --config` 继续优先，不改变用户指定地址。macOS LaunchAgent 保持在 ~/Library/LaunchAgents，更新受管启动参数与 ownership；~/.codex 配置/缓存不搬迁，manual-codex-config 保持只读，凭据路径迁移沿用 keychain 分派存储边界。
 - zcode、codebuddy（含 WorkBuddy）、qoder、agy、opencodeZen 的合并默认值均为 true，只在字段缺失时生效。CLI、网关、Web UI、插件初始化和 Schema 使用一致默认；已有用户字段不动，不为修改默认值批量重写存量配置或把显式 false 改为 true。
 - 调整安装 DEFAULTS 和命令同步中缺失开关补 false 的旧逻辑，同步 Schema/类型说明及测试。新安装保存合并结果，存量读取形成有效默认；缺省开启不等于插件热加载或自动生成凭据。

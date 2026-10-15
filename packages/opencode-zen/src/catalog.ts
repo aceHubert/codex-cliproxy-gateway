@@ -179,20 +179,22 @@ function metadataApi(value: unknown): string | undefined {
   } catch { return; }
 }
 
-/** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点。 */
-export type OpencodeZenModelProtocol = "chat" | "responses" | "anthropic" | "google";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+
+/** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点；与全仓公共协议同型。 */
+export type OpencodeZenModelProtocol = ClientProtocol;
 
 const NPM_PROTOCOL: Record<string, OpencodeZenModelProtocol> = {
-  "@ai-sdk/openai-compatible": "chat",
+  "@ai-sdk/openai-compatible": "chat-completions",
   "@ai-sdk/openai": "responses",
   "@ai-sdk/anthropic": "anthropic",
-  "@ai-sdk/google": "google",
+  "@ai-sdk/google": "gemini",
   // @ai-sdk/mistral 等 OpenAI 兼容 SDK 走缺省 chat（Mistral 的 chat completions 与 OpenAI 同构）。
 };
 
-/** npm 字段 → 端点协议；缺省（无覆盖）即继承 openai-compatible chat。 */
+/** npm 字段 → 端点协议；缺省（无覆盖）即继承 openai-compatible chat-completions。 */
 export function protocolFromNpm(npm: string | undefined): OpencodeZenModelProtocol {
-  return (npm && NPM_PROTOCOL[npm]) || "chat";
+  return (npm && NPM_PROTOCOL[npm]) || "chat-completions";
 }
 
 /** 元数据 limit.context 提取：正有限数才采纳，其余（0/负数/NaN/字符串）视为缺失。 */
@@ -433,9 +435,12 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
           for (const [id, raw] of Object.entries(verdictsRaw)) {
             const entry = record(raw);
             if (!entry || typeof entry.at !== "number") continue;
-            if (entry.result === "drop" || entry.result === "chat" || entry.result === "responses"
-              || entry.result === "anthropic" || entry.result === "google") {
+            if (entry.result === "drop" || entry.result === "chat-completions" || entry.result === "responses"
+              || entry.result === "anthropic" || entry.result === "gemini") {
               verdicts[id] = { result: entry.result, at: entry.at };
+            } else if (entry.result === "chat" || entry.result === "google") {
+              // 旧版短名缓存归一化（chat → chat-completions、google → gemini）。
+              verdicts[id] = { result: entry.result === "chat" ? "chat-completions" : "gemini", at: entry.at };
             }
           }
           if (Object.keys(verdicts).length > 0) value.verdicts = verdicts;
@@ -575,13 +580,13 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       }
       return structuredClone(cached?.models ?? []);
     },
-    /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat。 */
+    /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat-completions。 */
     protocol(id: string): OpencodeZenModelProtocol {
       const models = cached?.metadata?.models;
       const meta = models && Object.hasOwn(models, id) ? models[id] : undefined;
       if (meta) return protocolFromNpm(meta.npm);
       const result = cached?.verdicts?.[id]?.result;
-      return result && result !== "drop" ? result : "chat";
+      return result && result !== "drop" ? result : "chat-completions";
     },
     /**
      * 模型上游 baseURL：元数据 provider.api 确认（全 provider 共享一份），元数据缺失或

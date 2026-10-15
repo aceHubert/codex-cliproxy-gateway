@@ -6,14 +6,16 @@
  *   response.ts）已验证的实现收敛而来，插件（zcode 多腿、server tool 折叠）可直接
  *   驱动同一外壳，序号跨腿连续。
  * - createResponsesClientOutput / createChatCompletionsClientOutput /
- *   createAnthropicClientOutput：以 BridgeStreamEvent 驱动三种客户端协议的
- *   SSE / 聚合 JSON 输出；工具身份（含 custom / namespace）在输出前还原。
+ *   createAnthropicClientOutput / createGeminiClientOutput：以 BridgeStreamEvent
+ *   驱动四种客户端协议的 SSE / 聚合 JSON 输出；工具身份（含 custom / namespace）
+ *   在输出前还原。
  * - createClientResponse：上游响应 → 解析 →（可选数据变换）→ 客户端协议输出的
  *   高层组合入口。
  */
 
 import { parseUpstreamEvents } from "./events.ts";
-import type { BridgeProtocol, BridgeStreamEvent, BridgeUsage, ClientBridgeProtocol, ToolIdentityMap } from "./types.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import type { BridgeStopReason, BridgeStreamEvent, BridgeUsage, ToolIdentityMap } from "./types.ts";
 
 type Json = Record<string, unknown>;
 
@@ -1053,14 +1055,231 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
 
 /* =============================== 高层组合入口 =============================== */
 
+/* ========================= Gemini 客户端输出（generateContent） ========================= */
+
+/** BridgeStopReason → Gemini finishReason。 */
+function geminiFinishReason(stop: BridgeStopReason, toolCalled: boolean): string {
+  if (stop === "length") return "MAX_TOKENS";
+  if (stop === "content_filter") return "SAFETY";
+  if (stop === "tool_calls" || toolCalled) return "STOP";
+  return stop === "stop" ? "STOP" : "OTHER";
+}
+
+function bridgeUsageToGemini(usage: BridgeUsage | undefined): Json | undefined {
+  if (!usage) return undefined;
+  const result: Json = {
+    promptTokenCount: usage.inputTokens ?? 0,
+    candidatesTokenCount: usage.outputTokens ?? 0,
+    totalTokenCount: usage.totalTokens ?? (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0),
+  };
+  if (usage.reasoningTokens !== undefined) result.thoughtsTokenCount = usage.reasoningTokens;
+  if (usage.cachedInputTokens !== undefined) result.cachedContentTokenCount = usage.cachedInputTokens;
+  return result;
+}
+
+/**
+ * 事件驱动的 Gemini 客户端输出。流式为 SSE data 帧（与 parseGeminiStream 的
+ * 上游形状对称：每帧携带增量 parts，末帧带 finishReason 与 usageMetadata）；
+ * 非流式聚合为完整 GenerateContentResponse JSON。
+ */
+export async function createGeminiClientOutput(events: AsyncIterable<BridgeStreamEvent>, options: ClientOutputOptions): Promise<ClientOutputResult> {
+  let finalResolve!: (value: Json | undefined) => void;
+  const final = new Promise<Json | undefined>((resolve) => {
+    finalResolve = resolve;
+  });
+  let canceled = false;
+  const model = options.model;
+  const parts: Json[] = [];
+  const toolArgs = new Map<string, string>();
+  let toolCalled = false;
+  let finishReason: string | undefined;
+  let usage: Json | undefined;
+  let error: { message: string; code?: string } | undefined;
+  const toolCallMeta = new Map<string, string>();
+  const pendingFunctionCalls: Json[] = [];
+
+  const responseBase = (): Json => ({ modelVersion: model });
+  const fullResponse = (): Json => ({
+    ...responseBase(),
+    candidates: [{ content: { parts: parts.length > 0 ? parts : [{ text: "" }], role: "model" }, finishReason: finishReason ?? "STOP" }],
+    ...(usage ? { usageMetadata: usage } : {}),
+  });
+  let settled = false;
+  const settleFinal = (): void => {
+    if (settled) return;
+    settled = true;
+    if (!canceled && !error) {
+      const completion = fullResponse();
+      safely(() => options.onComplete?.(structuredClone(completion)));
+      finalResolve(structuredClone(completion));
+    } else finalResolve(undefined);
+  };
+  const handleAbort = (): void => {
+    if (settled) return;
+    canceled = true;
+    settleFinal();
+    safely(options.abort);
+  };
+  options.signal?.addEventListener("abort", handleAbort, { once: true });
+  if (options.signal?.aborted) handleAbort();
+
+  type Frame = Json | { __error: { message: string; code?: string } };
+  async function* frames(): AsyncGenerator<Frame> {
+    try {
+      if (canceled) return;
+      const source = options.transform ? options.transform(events) : events;
+      for await (const event of source) {
+        if (canceled) return;
+        switch (event.type) {
+          case "message_start": {
+            break; // 客户端始终看到请求的展示模型。
+          }
+          case "content_delta": {
+            // Gemini 无 delta 概念：每帧携带增量 part，客户端按序拼接。
+            if (event.delta.text) {
+              const part: Json = { text: event.delta.text };
+              parts.push(part);
+              yield { ...responseBase(), candidates: [{ content: { parts: [structuredClone(part)], role: "model" } }] };
+            }
+            if (event.delta.thinking) {
+              const part: Json = { text: event.delta.thinking, thought: true };
+              parts.push(part);
+              yield { ...responseBase(), candidates: [{ content: { parts: [structuredClone(part)], role: "model" } }] };
+            }
+            if (event.delta.refusal) {
+              // Gemini 无 refusal part；以 finishReason SAFETY 表达，正文不伪装。
+              finishReason = "SAFETY";
+            }
+            break;
+          }
+          case "tool_call_start": {
+            const identity = options.toolIdentities?.get(event.tool_call.name);
+            if (options.toolIdentities !== undefined && identity === undefined) {
+              throw new Error(`上游返回了未声明的工具：${event.tool_call.name}`);
+            }
+            toolArgs.set(event.tool_call.id, "");
+            toolCallMeta.set(event.tool_call.id, identity?.name ?? event.tool_call.name);
+            break;
+          }
+          case "tool_call_delta": {
+            const current = toolArgs.get(event.tool_call.id);
+            if (current !== undefined) toolArgs.set(event.tool_call.id, current + event.tool_call.arguments_delta);
+            break;
+          }
+          case "tool_call_end": {
+            const argumentsText = toolArgs.get(event.tool_call.id) ?? "{}";
+            let args: Json = {};
+            try {
+              const parsed: unknown = JSON.parse(argumentsText || "{}");
+              if (isRecord(parsed)) args = parsed;
+            } catch {
+              throw new Error(`工具 ${event.tool_call.id} 的参数不是有效 JSON`);
+            }
+            const part: Json = { functionCall: { name: toolCallMeta.get(event.tool_call.id) ?? "", args } };
+            parts.push(part);
+            toolCalled = true;
+            // functionCall 随收尾帧或终态帧下发；此处先缓存，终态统一 flush。
+            pendingFunctionCalls.push(structuredClone(part));
+            break;
+          }
+          case "message_end": {
+            if (event.stop_reason === "other" && options.unknownStopReason !== "stop") {
+              throw new Error(`上游返回了不支持的结束原因：${event.raw_stop_reason ?? "unknown"}`);
+            }
+            finishReason = geminiFinishReason(event.stop_reason, toolCalled);
+            usage = bridgeUsageToGemini(event.usage) ?? usage;
+            break;
+          }
+          case "error": {
+            error = { message: event.error.message, code: event.error.code ?? "upstream_error" };
+            yield { __error: error };
+            return;
+          }
+        }
+      }
+      if (canceled) return;
+      // 收尾：未下发的 functionCall parts 与终态（finishReason + usageMetadata）合并为末帧。
+      const terminalParts: Json[] = [...pendingFunctionCalls];
+      const terminal: Json = {
+        ...responseBase(),
+        candidates: [{ content: terminalParts.length > 0 ? { parts: terminalParts, role: "model" } : { role: "model" }, finishReason: finishReason ?? "STOP" }],
+      };
+      if (usage) terminal.usageMetadata = usage;
+      yield terminal;
+    } catch (caught) {
+      if (!settled) {
+        error = { message: caught instanceof Error ? caught.message : String(caught), code: "upstream_protocol_error" };
+        yield { __error: error };
+      }
+    } finally {
+      settleFinal();
+      safely(options.abort);
+      options.signal?.removeEventListener("abort", handleAbort);
+    }
+  }
+
+  if (options.stream) {
+    const iterator = frames();
+    const body = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const next = await iterator.next();
+          if (next.done) {
+            controller.close();
+            return;
+          }
+          const frame: Frame = next.value;
+          const failure = frame as { __error?: { message: string; code?: string } };
+          if (failure.__error !== undefined) {
+            // Gemini 流错误帧：{error:{code,message,status}}，客户端据此失败。
+            const chunk = { error: { code: failure.__error.code ?? 500, message: failure.__error.message, status: "INTERNAL" } };
+            const text = `data: ${JSON.stringify(chunk)}\n\n`;
+            safely(() => options.onChunk?.(text));
+            controller.enqueue(encoder.encode(text));
+            controller.close();
+            return;
+          }
+          const text = `data: ${JSON.stringify(frame)}\n\n`;
+          safely(() => options.onChunk?.(text));
+          controller.enqueue(encoder.encode(text));
+        } catch (caught) {
+          if (!canceled) controller.error(caught);
+        }
+      },
+      async cancel() {
+        handleAbort();
+        await iterator.return(undefined);
+      },
+    }, { highWaterMark: 0 });
+    return {
+      response: new Response(body, { headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" } }),
+      final,
+    };
+  }
+  for await (const frame of frames()) {
+    const failure = frame as { __error?: { message: string; code?: string } };
+    if (failure.__error === undefined) safely(() => options.onChunk?.(JSON.stringify(frame)));
+  }
+  if (error || canceled) {
+    return {
+      response: Response.json(
+        { error: { code: error ? 502 : 499, message: error?.message ?? "响应已取消", status: error?.code ?? "CANCELLED" } },
+        { status: error ? 502 : 499 },
+      ),
+      final,
+    };
+  }
+  return { response: Response.json(fullResponse()), final };
+}
+
 export interface CreateClientResponseOptions extends ClientOutputOptions {
   /** 上游协议（决定解析器）。 */
-  upstreamProtocol: BridgeProtocol;
+  upstreamProtocol: ClientProtocol;
 }
 
 /** 上游响应 → 解析 → 数据变换 → 客户端协议输出。 */
 export async function createClientResponse(
-  clientProtocol: ClientBridgeProtocol,
+  clientProtocol: ClientProtocol,
   upstream: Response,
   options: CreateClientResponseOptions,
 ): Promise<ClientOutputResult> {
@@ -1068,5 +1287,6 @@ export async function createClientResponse(
   const events = parseUpstreamEvents(upstreamProtocol, upstream, options.model);
   if (clientProtocol === "responses") return createResponsesClientOutput(events, outputOptions);
   if (clientProtocol === "chat-completions") return createChatCompletionsClientOutput(events, outputOptions);
+  if (clientProtocol === "gemini") return createGeminiClientOutput(events, outputOptions);
   return createAnthropicClientOutput(events, outputOptions);
 }

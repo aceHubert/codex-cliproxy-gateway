@@ -7,6 +7,7 @@ import { translateQoderResponse } from "@agent-proxy/qoder/response";
 import { translateZcodeRequest } from "@agent-proxy/zcode/request";
 import { createZcodeClientResponse } from "@agent-proxy/zcode/response";
 import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
+import { translateAgyRequest } from "@agent-proxy/agy/request";
 
 /**
  * 逐家三协议入口 fake 验收：每家至少覆盖 chat-completions 与 anthropic 来源的
@@ -35,8 +36,8 @@ async function readText(response: Response): Promise<string> {
 
 /* ------------------------------ CodeBuddy ------------------------------ */
 
-test("CodeBuddy chat 源：messages 转换与 reasoning_effort 透传", () => {
-  const { body } = translateCodebuddyRequest({
+test("CodeBuddy chat 源：messages 转换与 reasoning_effort 透传", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/m",
     messages: [
       { role: "system", content: "服务提示" },
@@ -59,8 +60,8 @@ test("CodeBuddy chat 源：messages 转换与 reasoning_effort 透传", () => {
   assert.equal(body.stream, true);
 });
 
-test("CodeBuddy anthropic 源：tool_use/tool_result 配对与 system 投影", () => {
-  const { body } = translateCodebuddyRequest({
+test("CodeBuddy anthropic 源：tool_use/tool_result 配对与 system 投影", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/m",
     max_tokens: 64,
     system: "服务提示",
@@ -102,8 +103,8 @@ test("CodeBuddy chat 上游 → chat-completions 客户端透传语义", async (
 
 /* ------------------------------- Qoder -------------------------------- */
 
-test("Qoder chat 源：私有信封的 messages/tools/parameters 布局", () => {
-  const { body, tools } = translateQoderRequest({
+test("Qoder chat 源：私有信封的 messages/tools/parameters 布局", async () => {
+  const { body, tools } = await translateQoderRequest({
     model: "qoder-intl/m",
     messages: [
       { role: "system", content: "系统" },
@@ -123,8 +124,8 @@ test("Qoder chat 源：私有信封的 messages/tools/parameters 布局", () => 
   assert.equal(tools.get("f")?.name, "f");
 });
 
-test("Qoder anthropic 源：tool_use/tool_result 进入信封历史", () => {
-  const { body } = translateQoderRequest({
+test("Qoder anthropic 源：tool_use/tool_result 进入信封历史", async () => {
+  const { body } = await translateQoderRequest({
     model: "qoder-intl/m",
     max_tokens: 64,
     system: "系统",
@@ -160,8 +161,8 @@ test("Qoder chat 上游 → anthropic 客户端流式渲染（信封解包后渲
 
 /* ------------------------------- ZCode -------------------------------- */
 
-test("ZCode chat 源：messages → anthropic 体，thinking 预算表生效", () => {
-  const { body, tools } = translateZcodeRequest({
+test("ZCode chat 源：messages → anthropic 体，thinking 预算表生效", async () => {
+  const { body, tools } = await translateZcodeRequest({
     model: "zcode/GLM-5.3",
     messages: [
       { role: "system", content: "服务提示" },
@@ -184,15 +185,15 @@ test("ZCode chat 源：messages → anthropic 体，thinking 预算表生效", (
   assert.equal(tools.size >= 1, true);
 });
 
-test("ZCode anthropic 源：原生 thinking 输入按服务能力校验", () => {
-  const { body } = translateZcodeRequest({
+test("ZCode anthropic 源：原生 thinking 输入按服务能力校验", async () => {
+  const { body } = await translateZcodeRequest({
     model: "zcode/GLM-5.3",
     max_tokens: 4096,
     thinking: { type: "enabled", budget_tokens: 2048 },
     messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
   }, "glm-5.3", "anthropic");
   assert.deepEqual(body.thinking, { type: "enabled", budget_tokens: 2048 });
-  assert.throws(() => translateZcodeRequest({
+  await assert.rejects(() => translateZcodeRequest({
     model: "zcode/GLM-5.3",
     max_tokens: 4096,
     thinking: { type: "enabled", budget_tokens: 4096 },
@@ -242,4 +243,96 @@ test("ZCode anthropic 上游 → anthropic 客户端经 Responses 外壳同语�
   assert.match(text, /message_stop/);
   void encoder;
   void encodeZcodeThinking;
+});
+
+
+/* ------------------------------ gemini 客户端源 ------------------------------ */
+
+test("CodeBuddy gemini 源：contents 工具轮转换为 chat 上游体", async () => {
+  const { body } = await translateCodebuddyRequest({
+    contents: [
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "model", parts: [{ functionCall: { name: "f", args: { a: 1 } } }] },
+      { role: "user", parts: [{ functionResponse: { name: "f", response: "ok" } }] },
+    ],
+    systemInstruction: "sys",
+    tools: [{ functionDeclarations: [{ name: "f", parametersJsonSchema: { type: "object" } }] }],
+  }, "gpt-5.6-luna", "gemini");
+  const messages = (body.messages ?? []) as Array<Record<string, unknown>>;
+  assert.equal(messages[0]?.role, "system");
+  const assistant = messages[2]!;
+  assert.ok(Array.isArray(assistant.tool_calls));
+  const tool = messages[3]!;
+  assert.equal(tool.role, "tool");
+  const callId = ((assistant.tool_calls as Array<Record<string, unknown>>)[0] as { id?: string })?.id;
+  assert.equal(tool.tool_call_id, callId);
+  assert.equal(tool.content, JSON.stringify("ok"));
+});
+
+test("ZCode gemini 源：generationConfig.maxOutputTokens 进入 anthropic 上限", async () => {
+  const { body } = await translateZcodeRequest({
+    contents: [{ role: "user", parts: [{ text: "你好" }] }],
+    generationConfig: { maxOutputTokens: 77 },
+  }, "glm-5.3", "gemini");
+  assert.equal(body.max_tokens, 77);
+  const messages = (body.messages ?? []) as Array<Record<string, unknown>>;
+  assert.equal(messages.length, 1);
+});
+
+test("Qoder gemini 源：转换为 chat 内层后仍进入私有信封布局", async () => {
+  const { body } = await translateQoderRequest({
+    contents: [{ role: "user", parts: [{ text: "你好" }] }],
+    systemInstruction: "sys",
+    generationConfig: { maxOutputTokens: 64 },
+  }, "qfmodel", undefined, "gemini");
+  // qoder 信封把模型与参数移入私有布局，chat 内层不带 model。
+  assert.equal(body.model, undefined);
+  assert.ok(Array.isArray(body.messages));
+  const messages = body.messages as Array<Record<string, unknown>>;
+  assert.equal(messages[0]?.role, "system");
+  assert.deepEqual(body.parameters, { max_tokens: 64 });
+});
+
+test("AGY gemini 源：contents 归一为 responses 风格输入", async () => {
+  const { wrapper } = await translateAgyRequest({
+    contents: [
+      { role: "user", parts: [{ text: "hi" }] },
+      { role: "model", parts: [{ functionCall: { name: "f", args: {} } }] },
+      { role: "user", parts: [{ functionResponse: { name: "f", response: "ok" } }] },
+    ],
+    systemInstruction: "sys",
+  }, "gemini-3.8-flash", "gemini");
+  assert.ok(JSON.stringify(wrapper).includes("hi"));
+});
+
+
+test("ZCode anthropic 源：同协议统一经桥接，消息/工具/选择消费转换结果", async () => {
+  const source = {
+    model: "zcode/glm-5.3",
+    system: "SYS",
+    max_tokens: 300,
+    messages: [
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "f", input: { a: 1 } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+    ],
+    tools: [{ name: "f", description: "d", input_schema: { type: "object" } }],
+    tool_choice: { type: "tool", name: "f" },
+    stop_sequences: ["END"],
+  };
+  const snapshot = structuredClone(source);
+  const { body, tools } = await translateZcodeRequest(source, "glm-5.3", "anthropic");
+  assert.deepEqual(source, snapshot, "调用方原始请求必须保持不变");
+  const messages = (body.messages ?? []) as Array<Record<string, unknown>>;
+  assert.equal(messages.length, 3);
+  const assistant = messages[1]!;
+  const blocks = assistant.content as Array<Record<string, unknown>>;
+  assert.equal(blocks.filter((block) => block.type === "tool_use").length, 1);
+  assert.equal(body.system, "SYS");
+  assert.equal(body.max_tokens, 300);
+  assert.deepEqual(body.stop_sequences, ["END"]);
+  const choice = body.tool_choice as Record<string, unknown>;
+  assert.equal(choice.type, "tool");
+  assert.equal(tools.size, 1);
+  assert.ok(tools.has("f"));
 });

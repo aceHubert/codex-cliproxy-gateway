@@ -272,9 +272,57 @@ function translateTools(value: unknown): { tools: Array<Record<string, unknown>>
  * Chat Completions / Anthropic 源归一化为 Responses 形状的 history 项与参数，
  * 复用既有 Responses → CloudCodeAssist 构建路径；三种来源共用同一工具身份表。
  */
-function normalizeSourceItems(body: Record<string, unknown>, from: ClientProtocol): Record<string, unknown> {
-  if (from === "responses") return body;
-  if (from === "chat-completions") {
+function normalizeSourceItems(body: Record<string, unknown>, to: ClientProtocol): Record<string, unknown> {
+  if (to === "responses") return body;
+  if (to === "gemini") {
+    if (!Array.isArray(body.contents)) fail("contents 必须是数组");
+    const items: unknown[] = [];
+    const systemTexts: string[] = [];
+    const instruction = body.systemInstruction;
+    if (typeof instruction === "string" && instruction) systemTexts.push(instruction);
+    else if (record(instruction) && Array.isArray(instruction.parts)) {
+      for (const part of instruction.parts) {
+        if (record(part) && typeof part.text === "string" && part.text) systemTexts.push(part.text);
+      }
+    }
+    let callSeq = 0;
+    const nameToOpenCall = new Map<string, string>();
+    const idByCallId = new Map<string, string>();
+    for (const message of body.contents) {
+      if (!record(message) || (message.role !== "user" && message.role !== "model")) {
+        fail("contents 必须是 user/model 角色条目");
+      }
+      for (const raw of Array.isArray(message.parts) ? message.parts : []) {
+        if (!record(raw)) fail("parts 包含非对象块");
+        if (typeof raw.text === "string" && raw.text) {
+          if (raw.thought === true) continue; // 思考块不进入 CloudCodeAssist 回放。
+          items.push({ type: "message", role: message.role === "model" ? "assistant" : "user", content: raw.text });
+        } else if (record(raw.functionCall)) {
+          const name = typeof raw.functionCall.name === "string" && raw.functionCall.name ? raw.functionCall.name : fail("functionCall.name 必须是非空字符串");
+          const id = typeof raw.functionCall.id === "string" && raw.functionCall.id ? raw.functionCall.id : `agy_gemini_call_${callSeq++}`;
+          idByCallId.set(id, id);
+          if (!(typeof raw.functionCall.id === "string" && raw.functionCall.id)) nameToOpenCall.set(name, id);
+          items.push({ type: "function_call", call_id: id, name, arguments: JSON.stringify(record(raw.functionCall.args) ? raw.functionCall.args : {}) });
+        } else if (record(raw.functionResponse)) {
+          const name = typeof raw.functionResponse.name === "string" ? raw.functionResponse.name : "";
+          let id = typeof raw.functionResponse.id === "string" && raw.functionResponse.id ? raw.functionResponse.id : nameToOpenCall.get(name);
+          if (!id) fail(`functionResponse 无法配对到 functionCall（${name || "未命名"}）`);
+          nameToOpenCall.delete(name);
+          items.push({ type: "function_call_output", call_id: id, output: JSON.stringify(record(raw.functionResponse.response) ? raw.functionResponse.response : raw.functionResponse.response ?? "") });
+        } else if (record(raw.inlineData) || record(raw.fileData)) {
+          fail("Antigravity gemini 入口暂不支持图片 parts，请改用 responses/chat/anthropic 入口");
+        } else {
+          fail("parts 包含不支持的块");
+        }
+      }
+    }
+    return {
+      ...body,
+      instructions: [typeof body.instructions === "string" ? body.instructions : "", ...systemTexts].filter(Boolean).join("\n\n") || undefined,
+      input: items,
+    };
+  }
+  if (to === "chat-completions") {
     if (!Array.isArray(body.messages)) fail("messages 必须是数组");
     const items: unknown[] = [];
     for (const raw of body.messages) {
@@ -394,9 +442,9 @@ function normalizeSourceItems(body: Record<string, unknown>, from: ClientProtoco
   return normalized;
 }
 
-export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string, from: ClientProtocol = "responses"): AgyTranslatedRequest {
+export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string, to: ClientProtocol = "responses"): AgyTranslatedRequest {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
-  body = normalizeSourceItems(body, from);
+  body = normalizeSourceItems(body, to);
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("Antigravity 不支持 previous_response_id；请提供完整 input 历史");
   }

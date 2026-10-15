@@ -1,5 +1,5 @@
 import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
 import os from "node:os";
 import path from "node:path";
 import { isIP } from "node:net";
@@ -56,21 +56,10 @@ export interface ZcodeDependencies {
 }
 export type GatewayHandler = ((request: Request) => Promise<Response>) & { close(): void };
 
-/** 插件启停仅由 ZCode 开关决定，default 上游路由策略不参与。 */
-export function zcodeEnabled<Config extends AgentConfig>(config: Config): boolean {
-  return config.zcode === undefined || config.zcode === true;
-}
-
-export function validateZcodeConfig<Config extends AgentConfig>(config: Config): void {
-  if (config.zcode !== undefined && typeof config.zcode !== "boolean") throw new Error("zcode 必须为 boolean");
-  if (!zcodeEnabled(config)) return;
+export function validateZcodeConfig(config: AgentConfig): void {
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {
     throw new Error("启用 ZCode 时网关只能监听环回地址");
-  }
-  if (config.prefix && ("zcode/".startsWith(config.prefix) || config.prefix.startsWith("zcode/")
-    || config.prefix.startsWith("zcode-"))) {
-    throw new Error("启用 ZCode 时 zcode/ 与 zcode- 前缀保留给 ZCode，请调整第三方 prefix");
   }
 }
 
@@ -80,14 +69,11 @@ export function zcodeError(status: number, message: string, type = "invalid_requ
 
 function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies = {}) {
   validateZcodeConfig(config);
-  const enabled = zcodeEnabled(config);
   const manual = dependencies.catalogMode === "manual";
   // 自管目录文件一律放运行主目录，不从 catalogPath 位置倒推。
   const cacheDirectory = dependencies.cacheDirectory ?? resolvePaths().runtimeHome;
   // 厂商元数据只取模型包预设；账号或套餐刷新仅重新投影支持集合。
-  const vendorCatalog = enabled
-    ? buildZcodeVendorCatalog()
-    : undefined;
+  const vendorCatalog = buildZcodeVendorCatalog();
   /** 套餐或选择变化时立即撤下 Codex 缓存里的旧 ZCode 条目，避免旧套餐模型继续可选。 */
   const dropCachedZcodeModels = () => {
     if (dependencies.codexModelsCacheFile) {
@@ -141,7 +127,6 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
   ];
   let synchronizeAPIKeyRoutes: (strict?: boolean) => void = () => {};
   const republishFromPlans = (force = false) => {
-    if (!vendorCatalog) return;
     const current = planRoutes.map((route) => route.snapshot);
     const previous = publishedSnapshots;
     if (!force && previous && current.length === previous.length
@@ -161,109 +146,107 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     }
     publishServedCatalog({ models });
   };
-  if (enabled) {
-    // 注入模式（测试）只为显式给出的套餐建缓存，避免读到真实的 ~/.zcode。
-    const injected: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>> | undefined = dependencies.planCaches
-      ?? (dependencies.apiKeyCaches ? {} : dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
-    for (const route of planRoutes) {
-      route.cache = injected?.[route.plan]
-        ?? (injected ? undefined : createZcodeConfigCache(home, {
-          plan: route.plan,
-          refreshOnStart: false,
-          // 选择变化只撤下本套餐的快照并重发并集；另一个套餐的条目不受影响。
-          onSelectionChange: () => {
-            if (manual) return;
-            route.snapshot = undefined;
-            republishFromPlans();
-          },
-          onSnapshotChange: (snapshot) => {
-            if (manual) return;
-            route.snapshot = snapshot;
-            republishFromPlans();
-          },
-        }));
+  // 注入模式（测试）只为显式给出的套餐建缓存，避免读到真实的 ~/.zcode。
+  const injected: Partial<Record<ZcodeSelection["kind"], ZcodeConfigCache>> | undefined = dependencies.planCaches
+    ?? (dependencies.apiKeyCaches ? {} : dependencies.configCache ? { "api-key": dependencies.configCache } : undefined);
+  for (const route of planRoutes) {
+    route.cache = injected?.[route.plan]
+      ?? (injected ? undefined : createZcodeConfigCache(home, {
+        plan: route.plan,
+        refreshOnStart: false,
+        // 选择变化只撤下本套餐的快照并重发并集；另一个套餐的条目不受影响。
+        onSelectionChange: () => {
+          if (manual) return;
+          route.snapshot = undefined;
+          republishFromPlans();
+        },
+        onSnapshotChange: (snapshot) => {
+          if (manual) return;
+          route.snapshot = snapshot;
+          republishFromPlans();
+        },
+      }));
+  }
+  if (injected) {
+    const apiCaches = dependencies.apiKeyCaches
+      ?? (dependencies.planCaches?.["api-key"] || dependencies.configCache
+        ? { current: dependencies.planCaches?.["api-key"] ?? dependencies.configCache! }
+        : {});
+    for (const [apiProviderID, cache] of Object.entries(apiCaches)) {
+      planRoutes.push({ plan: "api-key", ...(apiProviderID === "current" ? {} : { apiProviderID }), cache });
     }
-    if (injected) {
-      const apiCaches = dependencies.apiKeyCaches
-        ?? (dependencies.planCaches?.["api-key"] || dependencies.configCache
-          ? { current: dependencies.planCaches?.["api-key"] ?? dependencies.configCache! }
-          : {});
-      for (const [apiProviderID, cache] of Object.entries(apiCaches)) {
-        planRoutes.push({ plan: "api-key", ...(apiProviderID === "current" ? {} : { apiProviderID }), cache });
+  } else {
+    const createAPIRoute = (provider: ZcodeAPIKeyProvider): ZcodeRoute => {
+      const route: ZcodeRoute = { plan: "api-key", apiProviderID: provider.providerID };
+      route.cache = createZcodeConfigCache(home, {
+        plan: "api-key",
+        apiProviderID: provider.providerID,
+        refreshOnStart: false,
+        onSelectionChange: () => {
+          if (manual) return;
+          route.snapshot = undefined;
+          republishFromPlans();
+        },
+        onSnapshotChange: (snapshot) => {
+          if (manual) return;
+          route.snapshot = snapshot;
+          republishFromPlans();
+        },
+      });
+      return route;
+    };
+    const synchronize = (republish = true, strict = false): void => {
+      let providers: ZcodeAPIKeyProvider[] = [];
+      try { providers = readZcodeAPIKeyProviders(home); }
+      catch (error) {
+        if (strict) throw error;
+        /* 动态目录撤下无效 API Key；套餐路由不受影响。 */
       }
-    } else {
-      const createAPIRoute = (provider: ZcodeAPIKeyProvider): ZcodeRoute => {
-        const route: ZcodeRoute = { plan: "api-key", apiProviderID: provider.providerID };
-        route.cache = createZcodeConfigCache(home, {
-          plan: "api-key",
-          apiProviderID: provider.providerID,
-          refreshOnStart: false,
-          onSelectionChange: () => {
-            if (manual) return;
-            route.snapshot = undefined;
-            republishFromPlans();
-          },
-          onSnapshotChange: (snapshot) => {
-            if (manual) return;
-            route.snapshot = snapshot;
-            republishFromPlans();
-          },
-        });
-        return route;
-      };
-      const synchronize = (republish = true, strict = false): void => {
-        let providers: ZcodeAPIKeyProvider[] = [];
-        try { providers = readZcodeAPIKeyProviders(home); }
-        catch (error) {
-          if (strict) throw error;
-          /* 动态目录撤下无效 API Key；套餐路由不受影响。 */
+      const targetIDs = new Set(providers.map((provider) => provider.providerID));
+      let changed = false;
+      const removed = planRoutes.filter((route) => route.plan === "api-key" && route.apiProviderID && !targetIDs.has(route.apiProviderID));
+      for (const route of removed) route.cache?.close();
+      if (removed.length) {
+        for (let index = planRoutes.length - 1; index >= 0; index--) {
+          if (removed.includes(planRoutes[index]!)) planRoutes.splice(index, 1);
         }
-        const targetIDs = new Set(providers.map((provider) => provider.providerID));
-        let changed = false;
-        const removed = planRoutes.filter((route) => route.plan === "api-key" && route.apiProviderID && !targetIDs.has(route.apiProviderID));
-        for (const route of removed) route.cache?.close();
-        if (removed.length) {
-          for (let index = planRoutes.length - 1; index >= 0; index--) {
-            if (removed.includes(planRoutes[index]!)) planRoutes.splice(index, 1);
-          }
-          changed = true;
-        }
-        for (const provider of providers) {
-          if (planRoutes.some((route) => route.plan === "api-key" && route.apiProviderID === provider.providerID)) continue;
-          planRoutes.push(createAPIRoute(provider));
-          changed = true;
-        }
-        if (changed && republish) republishFromPlans();
-      };
-      synchronizeAPIKeyRoutes = (strict) => synchronize(!manual, strict);
-      synchronize(false);
-      // /models 与未知 API 前缀请求都会重新同步，支持新增/删除 provider；现有
-      // provider 的 Key 与模型变化由各自 cache 的 provider_config watcher 驱动。
-    }
+        changed = true;
+      }
+      for (const provider of providers) {
+        if (planRoutes.some((route) => route.plan === "api-key" && route.apiProviderID === provider.providerID)) continue;
+        planRoutes.push(createAPIRoute(provider));
+        changed = true;
+      }
+      if (changed && republish) republishFromPlans();
+    };
+    synchronizeAPIKeyRoutes = (strict) => synchronize(!manual, strict);
+    synchronize(false);
+    // /models 与未知 API 前缀请求都会重新同步，支持新增/删除 provider；现有
+    // provider 的 Key 与模型变化由各自 cache 的 provider_config watcher 驱动。
   }
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const activeRequests = new Set<AbortController>();
-  const identity = enabled ? dependencies.identity ?? readZcodeIdentity() : undefined;
-  const endpointRouting = enabled && dependencies.endpointRouting !== null
+  const identity = dependencies.identity ?? readZcodeIdentity();
+  const endpointRouting = dependencies.endpointRouting !== null
     ? dependencies.endpointRouting ?? new ZcodeEndpointRouting({
-      identity: identity!,
+      identity,
       fetch: (url, init) => fetchUpstream(url, init),
     })
     : undefined;
   // coding plan 官方客户端签名：逐请求补 X-Client-* 签名头；fail-open，失败按未签名继续。
-  const clientSigning = enabled && dependencies.clientSigning !== null
+  const clientSigning = dependencies.clientSigning !== null
     ? dependencies.clientSigning ?? new ZcodeClientSigning({ fetch: (url, init) => fetchUpstream(url, init) })
     : undefined;
   const contexts = createZcodeContexts();
   const sink: RequestLogSink | undefined = config.requestLogging === true ? {
-    dir: requestLogDir(config),
+    dir: requestLogDir(),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog: dependencies.processLog,
   } : undefined;
   let closed = false;
   let refreshPromise: Promise<ModelCatalog> | undefined;
   const readCatalog = async (mode: "get" | "refresh" | "reload"): Promise<ModelCatalog> => {
-    if (closed || !enabled) return { models: [] };
+    if (closed) return { models: [] };
     synchronizeAPIKeyRoutes(manual && mode !== "get");
     const neverPublished = publishedSnapshots === undefined;
     const results = await Promise.all(planRoutes.map(async (route) => {
@@ -306,7 +289,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     return promise;
   };
   /** 启动首读仍允许凭据授权，手动策略仅停止后续目录自动发布。 */
-  const startup = enabled && vendorCatalog && dependencies.refreshCatalogOnStart !== false
+  const startup = dependencies.refreshCatalogOnStart !== false
     ? refreshCatalog() : Promise.resolve({ models: [] });
   // 构造适配器与等待 modelsReady 之间允许异步间隙；失败由公开目录接口传递。
   void startup.catch(() => {});
@@ -323,7 +306,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       if (refreshPromise) await refreshPromise;
       return readCatalog("reload");
     },
-    async forward(request: Request, input: Record<string, unknown>, from: "responses" | "chat-completions" | "anthropic" = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+    async forward(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -433,7 +416,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         abort.signal.throwIfAborted();
         const model = zcodeUpstreamModel(requested, snapshot);
         if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
-        const translated = translateZcodeRequest(input, model, from);
+        const translated = await translateZcodeRequest(input, model, to);
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
         const routedUrl = endpointRouting
           // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中转）；resolve 内部 fail-open，失败保持原 URL。
@@ -442,14 +425,14 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         upstreamUrl = routedUrl;
         // 从当前快照重建协议头与会话归因，不采信入站客户端的 ZCode 身份或授权头。
         const context = contexts.resolve(request, snapshot);
-        const headers = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
+        const headers = buildZcodeModelHeaders(identity, context, zcodePlan(snapshot), key);
         const beta = request.headers.get("anthropic-beta")?.trim();
         if (beta && beta.length <= 1024 && /^[\x20-\x7e]+$/.test(beta)) headers.set("anthropic-beta", beta);
         // 客户端签名作用域绑定 base origin 与当前会话；端点重映射发生在签名之后（先签后路由）。
         const signingScope = {
           apiKey: key,
           baseUrl: snapshot.baseURL,
-          clientVersion: identity!.appVersion,
+          clientVersion: identity.appVersion,
           sessionId: context.sessionId,
         };
         // 版本未知（本机未装 ZCode）时无法声明可信客户端版本，跳过签名。
@@ -475,7 +458,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
                   image,
                   prompt,
                   headers: async () => {
-                    const requestHeaders = buildZcodeModelHeaders(identity!, context, zcodePlan(snapshot), key);
+                    const requestHeaders = buildZcodeModelHeaders(identity, context, zcodePlan(snapshot), key);
                     if (signable) await clientSigning!.decorate(requestHeaders, signingScope);
                     return requestHeaders;
                   },
@@ -558,7 +541,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         }
         let chunks = "";
         const stream = !mapResult && input.stream === true;
-        const response = await createZcodeClientResponse(from, upstream, {
+        const response = await createZcodeClientResponse(to, upstream, {
           model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
           gatewayTools,
           sanitizeError: (error) => ({
@@ -608,7 +591,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
   };
 }
 
-export function createZcodeAdapter<Config extends AgentConfig>(config: Config, dependencies: ZcodeDependencies = {}) {
+export function createZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies = {}) {
   return bindHostMethods(buildZcodeAdapter(config, dependencies));
 }
 
@@ -629,7 +612,7 @@ export function createZcodePlugin(host: HostServices<AgentConfig>, dependencies:
       async handleHttp(context) {
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
-        return adapter.forward(context.request, input as Record<string, unknown>, context.from);
+        return adapter.forward(context.request, input as Record<string, unknown>, context.to);
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

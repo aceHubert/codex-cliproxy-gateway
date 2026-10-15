@@ -177,14 +177,15 @@ async function normalize(frame: Json, block?: Block): Promise<Json[]> {
 }
 
 /**
- * 三种客户端协议的统一入口：zcode 始终以帧级驱动器合成 Responses 事件（多腿、
- * server tool 折叠与 thinking 信封都在该层），chat-completions / anthropic 客户端
- * 由 @agent-proxy/llm-bridge 从同一事件流渲染，语义与 Responses 输出一致。
+ * 四种客户端协议的统一入口：zcode 始终以帧级驱动器合成 Responses 事件（多腿、
+ * server tool 折叠与 thinking 信封都在该层），chat-completions / anthropic / gemini
+ * 客户端由 @agent-proxy/llm-bridge 从同一事件流渲染，语义与 Responses 输出一致。
  */
-export async function createZcodeClientResponse(from: ClientProtocol, upstream: Response, options: ZcodeResponseOptions): Promise<Response> {
+/** to 为路由端点（客户端入口）协议：上游 anthropic → to。 */
+export async function createZcodeClientResponse(to: ClientProtocol, upstream: Response, options: ZcodeResponseOptions): Promise<Response> {
   const responsesOutput = await createZcodeResponse(upstream, options);
-  if (from === "responses") return responsesOutput;
-  const result = await createClientResponse(from, responsesOutput, {
+  if (to === "responses") return responsesOutput;
+  const result = await createClientResponse(to, responsesOutput, {
     upstreamProtocol: "responses",
     model: options.model,
     stream: options.stream,

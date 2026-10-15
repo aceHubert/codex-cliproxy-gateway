@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createClientResponse, parseUpstreamEvents, readSseFrames, sseFrameBytes } from "@agent-proxy/llm-bridge";
-import type { BridgeProtocol, BridgeStreamEvent } from "@agent-proxy/llm-bridge";
+import type { ClientProtocol, BridgeStreamEvent } from "@agent-proxy/llm-bridge";
 
 type Json = Record<string, unknown>;
 
@@ -14,7 +14,7 @@ function upstream(frames: Array<Uint8Array>): Response {
   }), { headers: { "content-type": "text/event-stream" } });
 }
 
-async function collect(protocol: BridgeProtocol, frames: Array<Uint8Array>): Promise<BridgeStreamEvent[]> {
+async function collect(protocol: ClientProtocol, frames: Array<Uint8Array>): Promise<BridgeStreamEvent[]> {
   const result: BridgeStreamEvent[] = [];
   for await (const event of parseUpstreamEvents(protocol, upstream(frames), "model")) result.push(event);
   return result;

@@ -11,17 +11,28 @@ interface RegisteredPattern {
 }
 
 export interface ClientEndpoint {
-  from: ClientProtocol;
+  to: ClientProtocol;
   operation: RequestOperation;
+  /** gemini 入口从 URL 路径提取的模型名（body 不携带 model）。 */
+  pathModel?: string;
+  /** gemini 入口由 :streamGenerateContent 后缀决定的流式标志。 */
+  pathStream?: boolean;
 }
 
 /** 严格匹配受管入口；UI、Realtime 和 mountPath 外的路径由宿主独立处理。 */
 export function identifyClientEndpoint(pathname: string, mountPath = "/v1"): ClientEndpoint | undefined {
   const mount = mountPath === "/" ? "" : mountPath.replace(/\/$/, "");
-  if (pathname === `${mount}/chat/completions`) return { from: "chat-completions", operation: "generate" };
-  if (pathname === `${mount}/responses`) return { from: "responses", operation: "generate" };
-  if (pathname === `${mount}/responses/compact`) return { from: "responses", operation: "compact" };
-  if (pathname === `${mount}/messages`) return { from: "anthropic", operation: "generate" };
+  if (pathname === `${mount}/chat/completions`) return { to: "chat-completions", operation: "generate" };
+  if (pathname === `${mount}/responses`) return { to: "responses", operation: "generate" };
+  if (pathname === `${mount}/responses/compact`) return { to: "responses", operation: "compact" };
+  if (pathname === `${mount}/messages`) return { to: "anthropic", operation: "generate" };
+  // Gemini 原生入口：{mount}/models/{model}:generateContent | :streamGenerateContent。
+  const gemini = new RegExp(`^${mount}/models/([^/:]+):(generateContent|streamGenerateContent)$`).exec(pathname);
+  if (gemini) {
+    let pathModel = gemini[1]!;
+    try { pathModel = decodeURIComponent(pathModel); } catch { /* 保留原样，由模型匹配拒绝。 */ }
+    return { to: "gemini", operation: "generate", pathModel, pathStream: gemini[2] === "streamGenerateContent" };
+  }
   return undefined;
 }
 

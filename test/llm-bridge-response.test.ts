@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createChatCompletionsClientOutput,
-  createClientResponse,
-  createResponsesClientOutput,
-  createAnthropicClientOutput,
-  parseUpstreamEvents,
-  readSseFrames,
   ResponsesOutputShell,
   clientErrorResponse,
+  createAnthropicClientOutput,
+  createChatCompletionsClientOutput,
+  createClientResponse,
+  createGeminiClientOutput,
+  createResponsesClientOutput,
+  parseUpstreamEvents,
+  readSseFrames,
 } from "@agent-proxy/llm-bridge";
 import type { BridgeStreamEvent } from "@agent-proxy/llm-bridge";
 
@@ -677,4 +678,70 @@ test("Chat 与 Anthropic AbortSignal 唤醒挂起源并完成 final，首次读�
       else await result.response.body!.cancel();
     }
   }
+});
+
+
+/* ============================ gemini 客户端输出 ============================ */
+
+test("gemini 客户端流式输出：增量 parts 帧 + 终态 finishReason/usageMetadata", async () => {
+  const result = await createGeminiClientOutput(eventsOf([
+    { type: "message_start", id: "x", model: "up" },
+    { type: "content_delta", delta: { text: "he" } },
+    { type: "content_delta", delta: { text: "llo" } },
+    { type: "tool_call_start", tool_call: { id: "c1", name: "f" } },
+    { type: "tool_call_delta", tool_call: { id: "c1", arguments_delta: '{"a":1}' } },
+    { type: "tool_call_end", tool_call: { id: "c1" } },
+    { type: "message_end", stop_reason: "tool_calls", usage: { inputTokens: 2, outputTokens: 3 } },
+  ]), { model: "display", stream: true });
+  const text = await readAll(result.response.body!);
+  const frames = text.split("\n\n").filter(Boolean).map((frame) => JSON.parse(frame.replace("data: ", "")) as Record<string, unknown>);
+  const textParts = frames
+    .flatMap((frame) => ((frame.candidates as Array<Record<string, unknown>>)?.[0]?.content as { parts?: Array<Record<string, unknown>> })?.parts ?? [])
+    .filter((part) => typeof part.text === "string")
+    .map((part) => part.text)
+    .join("");
+  assert.equal(textParts, "hello");
+  const terminal = frames.at(-1)!;
+  const terminalCandidate = (terminal.candidates as Array<Record<string, unknown>>)[0]!;
+  assert.equal(terminalCandidate.finishReason, "STOP");
+  const fcParts = frames
+    .flatMap((frame) => ((frame.candidates as Array<Record<string, unknown>>)?.[0]?.content as { parts?: Array<Record<string, unknown>> })?.parts ?? [])
+    .filter((part) => part.functionCall !== undefined);
+  assert.equal(fcParts.length, 1);
+  assert.deepEqual((fcParts[0]!.functionCall as Record<string, unknown>).args, { a: 1 });
+  const usage = terminal.usageMetadata as Record<string, unknown>;
+  assert.equal(usage.promptTokenCount, 2);
+  assert.equal(usage.candidatesTokenCount, 3);
+  assert.equal(usage.totalTokenCount, 5);
+  const modelVersions = new Set(frames.map((frame) => frame.modelVersion));
+  assert.deepEqual([...modelVersions], ["display"]);
+});
+
+test("gemini 客户端非流式聚合为完整 GenerateContentResponse", async () => {
+  const result = await createGeminiClientOutput(eventsOf([
+    { type: "message_start", id: "x", model: "up" },
+    { type: "content_delta", delta: { thinking: "内部" } },
+    { type: "content_delta", delta: { text: "hi" } },
+    { type: "message_end", stop_reason: "length", usage: { inputTokens: 1, outputTokens: 2 } },
+  ]), { model: "display", stream: false });
+  const completion = await result.response.json() as Record<string, unknown>;
+  const candidate = (completion.candidates as Array<Record<string, unknown>>)[0]!;
+  assert.equal(candidate.finishReason, "MAX_TOKENS");
+  const parts = (candidate.content as { parts: Array<Record<string, unknown>> }).parts;
+  assert.deepEqual(parts[0], { text: "内部", thought: true });
+  assert.deepEqual(parts[1], { text: "hi" });
+  const usage = completion.usageMetadata as Record<string, unknown>;
+  assert.equal(usage.totalTokenCount, 3);
+});
+
+test("gemini 客户端流中错误帧返回 Google 错误形状并终止", async () => {
+  const result = await createGeminiClientOutput(eventsOf([
+    { type: "message_start", id: "x", model: "up" },
+    { type: "error", error: { message: "boom" } },
+  ]), { model: "m", stream: true });
+  const text = await readAll(result.response.body!);
+  const frame = JSON.parse(text.replace("data: ", "")) as Record<string, unknown>;
+  const error = frame.error as Record<string, unknown>;
+  assert.equal(error.message, "boom");
+  assert.ok(error.status);
 });

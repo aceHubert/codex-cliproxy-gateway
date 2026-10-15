@@ -1,4 +1,13 @@
-/** Qoder SSE 公共解析：帧读取与排队状态信封拆包，供响应转换与排队恢复共用。 */
+/**
+ * Qoder SSE 公共解析：帧读取与排队状态信封拆包，供响应转换与排队恢复共用。
+ *
+ * 帧读取器与 @agent-proxy/llm-bridge 的 readSseFrames 同源，但刻意不收敛为共享实现：
+ * Qoder 上流的 [DONE] 不是权威结束标识（响应转换必须等独立 finish 事件，见
+ * response.ts），[DONE] 只能按普通 data 帧透传而不能折叠成哨兵；event 字段必填，
+ * 供排队信封识别与日志诊断；8MB 上限在帧累积过程中熔断，整帧产出后再校验无法
+ * 阻止超大帧先吃满内存。排队恢复（queue.ts）还需自持字节缓冲并把未解析余量与
+ * reader 交还调用方，与共享生成器持有整个流的所有权模型不同型。
+ */
 export interface Frame { event: string; data: string; }
 export type Json = Record<string, unknown>;
 

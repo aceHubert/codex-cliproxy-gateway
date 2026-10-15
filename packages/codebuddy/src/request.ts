@@ -249,36 +249,36 @@ function replayReasoningEnvelope(sourceBody: Json, converted: Json, clientModel:
   }
 }
 
-export function translateCodebuddyRequest(body: Json, upstreamModel: string, from: ClientProtocol = "responses"): CodebuddyTranslatedRequest {
+export async function translateCodebuddyRequest(body: Json, upstreamModel: string, to: ClientProtocol = "responses"): Promise<CodebuddyTranslatedRequest> {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
   let prepared = body;
   let dropped: string[] = [];
-  if (from === "responses") {
+  if (to === "responses") {
     validateResponsesServiceConstraints(body);
     const pre = preProcessResponses(body);
     prepared = pre.body;
     dropped = pre.dropped;
-  } else if (from === "anthropic") {
+  } else if (to === "anthropic") {
     prepared = preProcessAnthropic(body);
+  } else if (to === "gemini") {
+    prepared = body; // gemini 源无 CodeBuddy 服务前处理；工具剥离/旁白仅适用于 responses 体。
   } else {
     prepared = preProcessChat(body);
   }
 
   const clientModel = typeof body.model === "string" && body.model ? body.model : upstreamModel;
   const replay = /deepseek/i.test(upstreamModel);
-  let converted: ReturnType<typeof convertRequest>;
+  let converted: Awaited<ReturnType<typeof convertRequest>>;
   try {
-    converted = convertRequest(from, "chat-completions", prepared, { model: upstreamModel });
+    converted = await convertRequest("chat-completions", to, prepared, { model: upstreamModel });
   } catch (error: unknown) {
     if (error instanceof BridgeConversionError) throw new CodebuddyRequestError(error.message);
     throw error;
   }
   // 只把「工具声明」剥离计入旁白；reasoning history 项等服务类剥离不生成工具旁白。
-  dropped = [...dropped, ...converted.notes
-    .filter((note) => note.startsWith("已剥离内置工具声明") || note.startsWith("已剥离工具声明"))
-    .map((note) => note.replace(/^已剥离(?:内置工具声明|工具声明)?\s*/, "").split("（")[0]!.trim())]
-    .filter((entry) => entry.length > 0 && entry !== "unknown");
-  replayReasoningEnvelope(body, converted.body, clientModel, replay && from === "responses");
+  // 被剥离的服务器内置工具来自桥接结构化字段，不解析 notes 文案。
+  dropped = [...dropped, ...converted.strippedTools].filter((entry) => entry.length > 0 && entry !== "unknown");
+  replayReasoningEnvelope(body, converted.body, clientModel, replay && to === "responses");
 
   const messages = converted.body.messages as Json[];
   const systemParts: string[] = [];

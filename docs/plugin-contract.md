@@ -118,6 +118,16 @@ CodeBuddy/Qoder 原有转换复用继续以显式包依赖表达。
 default 的 CLIProxy/new-api 与官方模型路由保持独立出站链路，
 不调用 agent 转换包，也不以 agent 失败作为转发到 default 的理由。
 
+（2026-10-14 后续演进：上一段为 monorepo 迁移轮的当轮验收口径，此后由
+[llm-bridge-aisdk-rebase 计划](exec-plans/completed/llm-bridge-aisdk-rebase.md)
+变更：四类标准桥接插件已统一为异步 `convertRequest(from, to, body)` 单入口——
+from 为上游 endpoint 协议、to 为调用方 route 协议，同协议直通由桥接层处理；
+协议面为 `@agent-proxy/plugin-api` 的 `ClientProtocol` 四值
+（`chat-completions`/`responses`/`anthropic`/`gemini`，gemini 亦为客户端入口）；
+转换底座为 `@ai-sdk/*` 引擎的离线捕获（npm llm-bridge 依赖已移除）；
+被剥离的服务器内置工具以 `strippedTools` 结构化返回。default 零转换与
+AGY 独立转换边界维持不变。）
+
 ## WebSocket 与 HTTP 回落
 
 同一模式表用于 HTTP 与 WS 归属。
@@ -138,6 +148,17 @@ Realtime 继续走既有独立路由及帧内模型约束。
 HostServices 实现由业务应用 `createGatewayHostServices` 提供：
 运行目录、只读有效配置、实例路径、fetch、上游 Key 分派结果、
 原子写入、目录工具、请求日志和进程日志。
+
+`AgentConfig` 只声明公共运行参数及任意字段扩展索引；各插件通过
+`declare module "@agent-proxy/plugin-api"` 增强同名接口，仅声明实际消费的专属参数：
+CodeBuddy 声明账号，AGY 声明调试转储；没有专属参数的插件无需增强接口。
+`GatewayConfig extends AgentConfig`，网关通过纯类型导入加载这些增强声明，
+补充网关专属配置及五家启用开关，不重复声明公共字段、插件字段或过时配置字段。
+模块增强在同一编译程序中合并；启用判断、开关校验、配置读取与持久化均由网关负责。
+网关只创建启用的插件；插件创建即启用，不再读取开关或维护重复的 enabled helper。
+过时的 `prefix` 不进入插件契约，不再注入配置视图或参与插件校验；网关模型前缀由上游类型派生。
+CodeBuddy 凭据地域类型由 CodeBuddy 自己提供，契约包与网关不维护副本。
+
 模型快照与厂商预设由私有 workspace 包 `@agent-proxy/models` 独立提供，原始数据只存于 `packages/models/`。网关和插件直接导入该包的 `getCodexModelSnapshot()`、`getVendorModelPresets()`，每次返回独立副本，不依赖主机上下文。模型包只声明为构建依赖，构建时内联到使用方产物，不单独发布，也不进入公开包的运行时依赖。HostServices 的目录服务只保留目录转换、合并与缓存工具。
 `apps/gateway/models.json` 是网关内部的上游覆盖规则，不对插件导出。ZCode 厂商元数据仅来自模型包的 z.ai 预设；不读取网关或运行目录的覆盖规则。账号和套餐刷新重新筛选当前授权模型集合，仍发布 `zcode-catalog.json` 并维护客户端缓存。
 插件依赖契约包，不反向导入应用实现；包的相对源码和 JSON 资源导入均限制在自身目录内。

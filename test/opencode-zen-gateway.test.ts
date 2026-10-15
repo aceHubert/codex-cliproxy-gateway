@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "./host-test.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { collectCompatibleModels } from "../apps/gateway/src/cli.ts";
 import {
   OPENCODE_ZEN_CLIENT_USER_AGENT,
@@ -11,7 +13,7 @@ import {
 } from "@agent-proxy/opencode-zen/fingerprint";
 import { getCodexModelSnapshot } from "@agent-proxy/models";
 import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
-import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "@agent-proxy/opencode-zen";
+import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
 import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
@@ -151,7 +153,7 @@ test("普通兼容模型列表与排除选择器都包含 Zen", TIMEOUT, async (
     const dependencies = { opencodeZen: {
       cacheDirectory: directory, refreshCatalogOnStart: false,
       fetch: async () => Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }),
-      fetchMetadata: async () => ({}), probeModel: async () => "chat" as const,
+      fetchMetadata: async () => ({}), probeModel: async () => "chat-completions" as const,
     } };
     const listed = await collectCompatibleModels(config, dependencies);
     assert.ok(listed.entries.some((model) => model.slug === MODEL));
@@ -167,7 +169,8 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
     let callback!: () => void;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const adapter = createOpencodeZenAdapter({ ...config, upstreamOnly: true }, {
+    const zenUpstreamOnly = { ...config, upstreamOnly: true };
+    const adapter = createOpencodeZenAdapter(zenUpstreamOnly, {
       catalogMode: "manual", cacheDirectory: directory,
       fetch: async () => { fetches++; await gate; return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }); },
       fetchMetadata: async () => ({}),
@@ -195,19 +198,21 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
   });
 });
 
-test("zen 配置校验：类型、环回监听与前缀保留", () => {
+test("zen 配置校验：检查类型和环回监听，过时 prefix 不影响校验", () => {
   const base: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
-  assert.equal(opencodeZenEnabled(base), false);
-  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true }), true);
-  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), true);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
+  assert.equal(agentConfigEnabled(base, "opencodeZen"), false);
+  assert.equal(agentConfigEnabled({ ...base, opencodeZen: true }, "opencodeZen"), true);
+  const upstreamOnlyView = { ...base, opencodeZen: true, upstreamOnly: true };
+  assert.equal(agentConfigEnabled(upstreamOnlyView, "opencodeZen"), true);
+  assert.throws(() => validateConfiguredPlugins({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
   assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true }), /环回/);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }), /前缀保留/);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true }), /环回/);
+  assert.doesNotThrow(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }));
+  const loopbackView = { ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true };
+  assert.throws(() => validateOpencodeZenConfig(loopbackView), /环回/);
 });
 
 test("上游错误归一化：分类为 zen_* 并原样透传上游描述", () => {
@@ -489,7 +494,7 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
         }
         throw new Error(`未模拟调用 ${target}`);
       },
-      probeModel: async () => "chat",
+      probeModel: async () => "chat-completions",
     });
     // 协议路由依赖元数据：先触发一次目录刷新（/v1/models）再发 responses 请求。
     await handler(new Request("http://127.0.0.1:8327/v1/models"));
@@ -941,7 +946,7 @@ test("zen 目录过滤：下线/非 chat 协议/探针剔除的模型不暴露",
         }
         throw new Error(`未模拟调用 ${target}`);
       },
-      probeModel: async (id) => (id === "jev-1.13-free" ? "drop" : "chat"),
+      probeModel: async (id) => (id === "jev-1.13-free" ? "drop" : "chat-completions"),
     });
     const response = await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const data = (await response.json() as Json).data as Json[];
@@ -1023,5 +1028,82 @@ test("目录条目提示词回落：保留官方 Codex 提示词，不再替换�
       const messages = entry.model_messages as { instructions_template?: string } | undefined;
       assert.equal(messages?.instructions_template, (base.model_messages as { instructions_template?: string }).instructions_template, `${entry.slug} 的 instructions_template 同步回落（只改 base_instructions 无效）`);
     }
+  });
+});
+
+
+test("gemini 客户端入口：URL 携带模型与流式，gemini 协议模型直通上游", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "exo-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据 provider.npm 映射 @ai-sdk/google → gemini 端点协议。
+          return Response.json({ opencode: { models: { "exo-free": { provider: { npm: "@ai-sdk/google" } } } } });
+        }
+        if (target.includes("/zen/v1/models/") && target.includes(":streamGenerateContent")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return new Response([
+            `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "gemini 直通回答" }], role: "model" } }] })}`,
+            `data: ${JSON.stringify({ candidates: [{ content: { role: "model" }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 } })}`,
+          ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    // 目录预热：protocol() 同步读缓存后 gemini 转发走直通分支。
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    // gemini 客户端入口：model 与流式均由 URL 路径表达。
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/models/opencode-zen%2Fexo-free:streamGenerateContent", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "你好" }] }] }),
+    }));
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /gemini 直通回答/);
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    assert.match(up.url, /\/zen\/v1\/models\/exo-free:streamGenerateContent\?alt=sse$/);
+    assert.equal((up.body.contents as Json[])[0]?.role, "user");
+  });
+});
+
+test("gemini 客户端入口：chat 协议模型单跳转换并渲染回 Gemini SSE", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "exo-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据缺失时探针裁决协议；直接给出 chat 探针结果。
+          return Response.json({ opencode: { models: {} } });
+        }
+        if (target.endsWith("/zen/v1/chat/completions")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return sse([
+            chunkFrame({ role: "assistant", content: "chat 转 gemini 回答" }),
+            chunkFrame({}, "stop"),
+          ]);
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/models/opencode-zen%2Fexo-free:generateContent", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "你好" }] }], systemInstruction: "sys" }),
+    }));
+    assert.equal(response.status, 200);
+    const completion = await response.json() as Json;
+    const candidate = (completion.candidates as Json[])[0]!;
+    const parts = (candidate.content as Json).parts as Json[];
+    assert.equal(parts.map((part) => part.text ?? "").join(""), "chat 转 gemini 回答");
+    assert.equal(candidate.finishReason, "STOP");
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    const messages = up.body.messages as Json[];
+    assert.ok(messages.some((message) => message.role === "system" && String(message.content).includes("sys")));
+    assert.ok(messages.some((message) => JSON.stringify(message.content).includes("你好")));
   });
 });
