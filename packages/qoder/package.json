@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/qoder",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "description": "Agent Proxy qoder 插件；保留基线转换行为。",
   "type": "module",
   "exports": {

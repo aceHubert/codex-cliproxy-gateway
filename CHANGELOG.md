@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.1 (2026-10-15)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `opencode-zen`, `plugin-api`, `qoder`, `zcode`
+  * [#19](https://github.com/aceHubert/codex-cliproxy-gateway/pull/19) feat: 统一多协议转换并增强 Agent 适配 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.12.0 (2026-10-15)
 
 #### :bug: Bug Fix
