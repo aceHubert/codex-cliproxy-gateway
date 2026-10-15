@@ -10,7 +10,7 @@
 | codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `catalog.ts` 的 `cloneCodexBase()`（条目 `base_instructions` + 模板） |
 | qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `catalog.ts` 的 `buildQoderCatalog()`（条目） |
 | agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `catalog.ts` 的 `buildAgyCatalog()`（条目） |
-| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`（门禁占位垫补；模板与官方工具定义仅作回退材料） |
+| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`/`mergeOpencodeZenGateTools(Responses)`（门禁官方 read+shell 定义合并，chat/Responses 双形状；模板仅作回退材料） |
 
 与本机安装强相关的值（ZCode.app 版本）仍在运行时动态读取，JSON 中的 `appVersion` 只是分析快照。
 
@@ -164,6 +164,43 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
     改为经 `padOpencodeZenGateTools` 垫补 `read`+`bash` 无参占位（客户端同名定义优先、shell 可
     替代 bash、无工具流量同样垫补）；zen 目录条目停发提示词替换（保留 gpt-5.5 基底 Codex 提示词）。
     见 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)。
+  - **2026-10-15 会话钉住改确定性派生（session.ts）**：Codex 入站实发 `session-id` 头
+    （与 `thread-id` 同值，另有 `originator`；旧绑定表只认 `x-session-id`，Codex 流量
+    此前全部落「每请求随机 session」分支）。服务端会**解码 session id 的时间段结构**：
+    摘要哈希直接当前缀的 id 一律 403（[dsh 同类插件同结论](https://github.com/jiesou/dsh-opencode-zen-free-provider/commit/5de7c178d3683ce09711e18df276cfaab36184cb)，
+    本仓探针 4/4 复现），counter 位（低 12 位）须为官方形状（counter=1 → hex 以 `ffe`
+    结尾）。现行为 `deriveOpenCodeSessionId(external)`：SHA-256 高 36 位作 ms 段 +
+    counter 固定 1 + 摘要派生 base62 尾——同一外部会话跨请求、跨进程重启恒得同一 id
+    （探针 3/3 过闸；Zen 按会话计量免费额度并按它路由 prompt cache，无状态派生使
+    会话粘性不依赖内存 LRU 或磁盘持久化，原 SessionBindingCache 移除）。解析优先级：
+    合法 `x-opencode-session` 透传 → `x-session-id`/`session-id`/`thread-id` 确定性
+    派生 → 单次随机铸币。探针含 `derived-session-id` 对照项。
+  - **2026-10-15 门禁再收紧（mitm 抓官方 2.0.29 实流 + 逐项隔离实测，10-14 收敛形态被否决）**：
+    ① **端点迁移**：上游 base 由 `https://opencode.ai/zen/v1` 迁至
+    `https://opencode.ai/inference/v1`（旧端点一律 403；`models.opencode.ai/api.json` 的
+    `opencode.api` 已自报新端点，元数据在线的网关自动跟随，缺省值同步更新）；② **标头新增
+    硬性要求 `x-opencode-session-id`**（与会话 id 同值；缺失即 403，官方 2.0.29 起上行）；UA
+    版本与 Accept 实测不校验（2.0.26/2.0.29 皆过）；③ **工具闸升级为实名制**：空 schema 占位
+    已被拒（仅名字+空对象 403），须含**真实 schema 的官方 `read` 与 `shell` 定义**（二者即可，
+    官方全量 12 定义亦可，客户端自定义工具可并存、同名客户端定义优先）；④ system 内容与
+    `stream: true` 要求不变（非流式 403），**无 tools 的请求只有携带官方标题生成器模板才放行**
+    （网关一律保证 tools 在场，不走该例外）；⑤ **`/responses` 端点执行同一门禁**（缺官方定义
+    403、非流式 403），anthropic `/messages` 与 gemini 端点未观测到 FreeTier 门禁（分别为模型级
+    400 与真实 API key 401）。已据此恢复工具合并（`mergeOpencodeZenGateTools` chat 包裹形状 /
+    `mergeOpencodeZenGateToolsResponses` Responses 扁平形状）、标头集补
+    `x-opencode-session-id`、同协议 responses 适配器改「上游强制流式 + 非流式聚合」；
+    `fingerprint-data.json` 更新 clientVersion 2.0.29 与全量 2.0.29 工具定义（5 个定义较 10-08
+    抓包有演进；实测新旧定义均可过闸，快照以新为准）。
+  - **2026-10-15 终版画像（同日追加隔离实测 + [linux.do 2912664](https://linux.do/t/topic/2912664)
+    同结论）**：③ 修正为 **`read` 唯一必须**——仅官方 `read` 单件即放行（bash/shell 及工具
+    数量无关，仅 shell 无 read 仍 403）；其 schema 须**非空**（空 properties 403；官方完整
+    定义与 `{path:{}}` 最小形均过闸，早前「read+shell 双件」是把空 schema 反例误计入件数）。
+    标头最小集为 Authorization + User-Agent + `x-opencode-session-id` + `x-session-affinity`
+    （最小头实验四件；完整指纹集下单缺 affinity 亦放行，存在标头互备）。帖内 `/zen/v1/responses`
+    可用的 curl 为迁移间隙过时信息，复测 chat/responses 双协议全 403（`/zen/v1` 死透）。合并面
+    已据此收敛为仅 `read`（`GATE_REQUIRED_TOOL_ORDER = ["read"]`），探针重写为 13 项
+    （minimal-read / minimal-read-schema / read-empty-schema / shell-without-read /
+    no-affinity-header 等对照），实跑 13/13 OK。
   - **目录与端点（双文件缓存）**：store 维护两个磁盘文件——`opencode-zen-metadata.json` 存原始
     数据（动态 ids + 官方元数据 + 探针裁决；ids 按 10 分钟 TTL 刷新，元数据按 6 小时 TTL
     刷新，裁决 24 小时），`opencode-zen-catalog.json` 存由上述数据生成的**成品目录**
@@ -201,3 +238,6 @@ CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一�
 | 2026-10-09 | 全部 | 运维约束：Codex Desktop picker 的 `model/list` 只取第一页（`limit:100`，不跟随 cursor），适配器模型按 priority 排在目录尾部——上游 `selectedModels` 勾选过多会把 agy/zen 等挤出首页（实测 124 条时 zen 位于第 114-124 位、首页 0 条）。上游选择需控制目录总数 ≤ 100，恢复原选择可查 `gateway.log` 的 `config changed by models --sync` 审计行 |
 | 2026-10-14 | opencode-zen | 门禁复测（8 项隔离探针）：system 模板不再检查、工具检查收紧为名单制（须含 `read` 与 `bash`/`shell` 之名、schema 不查）、两段式 UA 放行；新增诊断探针 `scripts/zen-gate-probe.ts` 供指纹失效时单点重测，收敛方案见 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md) |
 | 2026-10-14 | opencode-zen | 实施收敛：`mergeOpencodeZenTools`（官方 12 定义合并）与模板注入移除，替换为 `padOpencodeZenGateTools`（read+bash 无参占位，无工具流量同样垫补——实测名单闸不分有无工具）；zen 目录条目停发提示词替换、回落 gpt-5.5 基底 Codex 提示词；`fingerprint-data.json` 的模板/工具降级为回退材料（探针脚本含回退形态对照项）；真机已核对服务目录（`/v1/models?client_version=` 两字段均为 Codex 提示词、OpenCode 模板零残留） |
+| 2026-10-15 | opencode-zen | 门禁再收紧（官方 2.0.29 抓包+隔离实测）：端点迁 `/zen/v1` → `/inference/v1`；标头硬性新增 `x-opencode-session-id`；工具闸升级实名制（空 schema 占位被拒，须官方 read+shell 真实定义，`/responses` 同门禁）；恢复工具合并（chat 包裹/Responses 扁平双形状，最小面 read+shell）；快照 2.0.26 → 2.0.29、工具定义换 2.0.29 抓包值；同协议 responses 改强制流式+非流式聚合；探针按新画像重写（10 项实测 OK） |
+| 2026-10-15 | opencode-zen | 会话钉住改无状态确定性派生：入站外部会话头扩为 `x-session-id`/`session-id`/`thread-id`（Codex 实发 `session-id`，旧绑定表只认 `x-session-id` 致 Codex 落随机分支）；服务端解码 id 时间段结构（哈希前缀 403），派生 id counter 位固定官方形状（实测过闸）；`deriveOpenCodeSessionId` 替换 `SessionBindingCache`（跨重启稳定、零状态），探针补 derived-session-id 对照（11 项 OK） |
+| 2026-10-15 | opencode-zen | 终版画像修正：`read` 唯一必须（schema 非空即过，官方完整定义与 `{path:{}}` 最小形均可；bash/shell 及数量无关），合并面由 read+shell 收敛为仅 read；标头最小集 Authorization+UA+session-id+affinity（完整集下单缺 affinity 互备放行）；帖子 zen/v1 curl 为迁移间隙过时信息（复测死透）；探针重写 13 项实测 OK（linux.do 2912664 同结论） |

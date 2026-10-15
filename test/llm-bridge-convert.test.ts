@@ -43,6 +43,31 @@ test("L1 修复：Responses 字符串 input 保留 instructions/tools/token/stre
   assert.deepEqual(notes, []);
 });
 
+test("Codex 信封项剥离：additional_tools 与 compaction_trigger 不进入消息历史且不报错", async () => {
+  // Codex 0.162 实发：MCP 工具中途挂载时 input 历史出现 additional_tools 信封项
+  // （真实反例：zen 转发 502 BridgeConversionError「不支持的 Responses history 项
+  // 类型 additional_tools」）；compaction_trigger 是压缩请求标记。网关自身 Responses
+  // 路径对两者按信封剥离，桥接须同语义（丢弃并记录），中途增补的工具不并入本轮。
+  const { body, notes } = await convertRequest("chat-completions", "responses", {
+    model: "m",
+    input: [
+      { type: "message", role: "user", content: "hi" },
+      { type: "additional_tools", tools: [{ type: "function", name: "mcp_tool", description: "d", parameters: { type: "object" } }] },
+      { type: "message", role: "user", content: "again" },
+      { type: "compaction_trigger" },
+    ],
+    stream: true,
+  });
+  const messages = messagesOf(body);
+  assert.equal(messages.length, 2, "信封项不得产生消息");
+  assert.equal(messages[messages.length - 1]?.content, "again");
+  const tools = body.tools as AnyArray | undefined;
+  assert.equal(tools === undefined || tools.every((tool) => ((tool.function as Json | undefined)?.name as string) !== "mcp_tool"), true,
+    "中途增补的工具声明不并入本轮 tools");
+  assert.equal(notes.filter((note) => note.includes("additional_tools")).length, 1);
+  assert.equal(notes.filter((note) => note.includes("compaction_trigger")).length, 1);
+});
+
 test("L2 修复：function_call + output 历史重建为 assistant.tool_calls 与 tool 消息", async () => {
   const { body } = await convertRequest("chat-completions", "responses", {
     model: "m",
@@ -220,6 +245,54 @@ test("Anthropic 源 tool_choice any/disable_parallel 正确归一", async () => 
     tool_choice: { type: "any", disable_parallel_tool_use: true },
   });
   assert.equal(body.tool_choice, "required");
+});
+
+test("Anthropic 无 type 工具缺省按 function 转换：真实 schema 保留且调用/输出类型配对", async () => {
+  // 2026-10-15 反例：缺省 custom 导致历史回放发射 custom_tool_call 配
+  // function_call_output，muse-spark /responses 上游按类型配对 400。
+  const { body } = await convertRequest("responses", "anthropic", {
+    model: "m",
+    max_tokens: 10,
+    tools: [{ name: "WebSearch", description: "Search the web", input_schema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } }],
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "WebSearch", input: { query: "q" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "no results" }] },
+    ],
+  });
+  const declaration = (body.tools as AnyArray).find((tool) => tool.name === "WebSearch") as Json | undefined;
+  assert.ok(declaration, "工具声明应进入 responses 目标");
+  assert.equal(declaration.type, "function");
+  assert.deepEqual(declaration.parameters, { type: "object", properties: { query: { type: "string" } }, required: ["query"] }, "真实 input_schema 应保留，不换成 {input:string} 占位");
+  const input = inputOf(body);
+  const call = input.find((item) => item.type === "function_call") as Json | undefined;
+  assert.ok(call, "历史 tool_use 应发射为 function_call");
+  assert.equal(call.name, "WebSearch");
+  assert.equal(call.arguments, "{\"query\":\"q\"}");
+  const output = input.find((item) => item.type === "function_call_output") as Json | undefined;
+  assert.ok(output, "tool_result 应发射为 function_call_output");
+  assert.equal(output.call_id, "t1");
+  assert.equal(input.some((item) => item.type === "custom_tool_call" || item.type === "custom_tool_call_output"), false, "常规工具不应出现 custom 类型项");
+});
+
+test("Anthropic 显式 custom 工具的调用与输出成对还原为 custom_tool_call(_output)", async () => {
+  const { body } = await convertRequest("responses", "anthropic", {
+    model: "m",
+    max_tokens: 10,
+    tools: [{ type: "custom", name: "apply_patch", description: "patch", input_format: { type: "text" } }],
+    messages: [
+      { role: "user", content: "hi" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "apply_patch", input: { input: "*** Begin Patch" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "done" }] },
+    ],
+  });
+  const input = inputOf(body);
+  const call = input.find((item) => item.type === "custom_tool_call") as Json | undefined;
+  assert.ok(call, "显式 custom 工具的历史调用应还原为 custom_tool_call");
+  assert.equal(call.input, "*** Begin Patch");
+  const output = input.find((item) => item.type === "custom_tool_call_output") as Json | undefined;
+  assert.ok(output, "custom 调用的配对输出应还原为 custom_tool_call_output（而非 function_call_output）");
+  assert.equal(output.call_id, "t1");
 });
 
 test("Responses → Anthropic：system/instructions、token 上限与 stop 映射", async () => {

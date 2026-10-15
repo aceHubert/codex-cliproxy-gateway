@@ -9,7 +9,7 @@ import {
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { OpencodeZenModelProtocol } from "./catalog.ts";
-import { padOpencodeZenGateTools } from "./fingerprint.ts";
+import { mergeOpencodeZenGateTools, mergeOpencodeZenGateToolsResponses } from "./fingerprint.ts";
 
 /**
  * OpenCode Zen 多协议转换层。
@@ -51,16 +51,19 @@ export interface OpencodeZenClientRenderOptions {
   abort?: () => void;
 }
 
-/** 仅补齐实际垫补的门禁占位身份，客户端已有的 custom/namespace 映射优先。 */
+/** 仅补齐实际合并的门禁官方工具身份，客户端已有的 custom/namespace 映射优先。 */
 export function mergeOpencodeZenToolIdentities(identities: ToolIdentityMap, upstreamTools: unknown): ToolIdentityMap {
   const toolName = (tool: unknown): string | undefined => {
     if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return undefined;
-    const fn = (tool as Record<string, unknown>).function;
+    const record = tool as Record<string, unknown>;
+    // Responses 端点的合并定义是扁平形状（name 在顶层）；chat 端点在 function.name。
+    if (typeof record.name === "string") return record.name;
+    const fn = record.function;
     if (fn === null || typeof fn !== "object" || Array.isArray(fn)) return undefined;
     const name = (fn as Record<string, unknown>).name;
     return typeof name === "string" ? name : undefined;
   };
-  const gateNames = new Set(padOpencodeZenGateTools([]).map(toolName));
+  const gateNames = new Set([...mergeOpencodeZenGateTools([]), ...mergeOpencodeZenGateToolsResponses([])].map(toolName));
   const result = new Map(identities);
   for (const tool of Array.isArray(upstreamTools) ? upstreamTools : []) {
     const name = toolName(tool);

@@ -5,13 +5,12 @@ import path from "node:path";
 import { isIP } from "node:net";
 import {
   createOpenCodeSessionResolver,
-  createSessionBindingCache,
-  type SessionBindingCache,
 } from "./session.ts";
 import {
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
+  mergeOpencodeZenGateToolsResponses,
 } from "./fingerprint.ts";
 
 import {
@@ -40,7 +39,7 @@ import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
 import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
 
 /**
- * OpenCode Zen（https://opencode.ai/zen/v1）免费模型入口门面。
+ * OpenCode Zen（https://opencode.ai/inference/v1）免费模型入口门面。
  *
  * 不需要本地凭据：鉴权是公共 `Bearer public`（可选 OPENCODE_API_KEY），合规性由
  * 指纹层（fingerprint.ts）与合规会话（session.ts）保证。目录按官方元数据暴露每个
@@ -50,7 +49,8 @@ import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/p
  */
 
 
-export const OPENCODE_ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/zen/v1";
+/** 上游缺省端点：2026-10-15 起官方由 `/zen/v1` 迁至 `/inference/v1`（旧端点一律 403）。 */
+export const OPENCODE_ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/inference/v1";
 export const OPENCODE_ZEN_PUBLIC_API_KEY = "public";
 /** OpenCode 官方模型元数据（客户端同源数据）：含每模型端点协议（provider.npm）与 deprecated 标记。 */
 export const OPENCODE_ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
@@ -59,7 +59,7 @@ export const OPENCODE_ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 600_000;
 
 export interface OpencodeZenDependencies {
-  /** 上游端点覆盖；缺省 https://opencode.ai/zen/v1。 */
+  /** 上游端点覆盖；缺省 https://opencode.ai/inference/v1。 */
   endpoint?: string;
   /** 自定义鉴权 key；缺省读环境变量 OPENCODE_API_KEY，再缺省 "public"。 */
   apiKey?: string;
@@ -82,8 +82,6 @@ export interface OpencodeZenDependencies {
   refreshCatalogOnStart?: boolean;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
-  /** 会话绑定表（测试注入）；缺省独立 LRU（24h 滑动续期）。 */
-  sessionCache?: SessionBindingCache;
   processLog?: ProcessLogTarget;
 }
 
@@ -149,7 +147,7 @@ function extractUpstreamErrorType(body: string): string {
   const parsed = parseUpstreamError(body);
   if (typeof parsed === "string") return "";
   const error = parsed.error;
-  if (isUpstreamErrorRecord(error)) return typeof error.type === "string" ? error.type : "";
+  if (isRecord(error)) return typeof error.type === "string" ? error.type : "";
   return typeof parsed.type === "string" ? parsed.type : "";
 }
 
@@ -164,7 +162,7 @@ function extractUpstreamMessage(body: string): string {
   const error = parsed.error;
   const message = typeof error === "string"
     ? error
-    : isUpstreamErrorRecord(error) && typeof error.message === "string"
+    : isRecord(error) && typeof error.message === "string"
       ? error.message
       : typeof parsed.message === "string"
         ? parsed.message
@@ -180,7 +178,7 @@ function extractUpstreamMessage(body: string): string {
 function parseUpstreamError(body: string): UpstreamErrorPayload | string {
   try {
     const parsed: unknown = JSON.parse(body);
-    return isUpstreamErrorRecord(parsed) ? parsed : body.trim().slice(0, 300);
+    return isRecord(parsed) ? parsed : body.trim().slice(0, 300);
   } catch {
     return body.trim().slice(0, 300);
   }
@@ -188,7 +186,7 @@ function parseUpstreamError(body: string): UpstreamErrorPayload | string {
 
 type UpstreamErrorPayload = { error?: unknown; message?: unknown; type?: unknown };
 
-function isUpstreamErrorRecord(value: unknown): value is Record<string, unknown> & Partial<UpstreamErrorPayload> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -248,15 +246,22 @@ const adaptZenChatUpstream: ZenUpstreamAdapter = (converted, ctx) => {
 /** 同协议保真补丁：桥接直通体（克隆 + 原名身份表 + model 回填）只补服务必需字段。 */
 const ZEN_SAME_PROTOCOL_ADAPTATIONS: Record<OpencodeZenModelProtocol, ZenUpstreamAdapter> = {
   "chat-completions": adaptZenChatUpstream,
-  responses: (converted, ctx) => ({
-    url: `${ctx.baseUrl}/responses`,
-    body: {
-      ...converted.body,
-      ...(typeof ctx.source.prompt_cache_key === "string" && ctx.source.prompt_cache_key ? {} : { prompt_cache_key: ctx.session }),
-    },
-    extraHeaders: {},
-    tools: converted.tools,
-  }),
+  responses: (converted, ctx) => {
+    // /responses 端点执行同一门禁：官方 read/shell 扁平定义 + 强制流式（非流式 403），
+    // 非流式客户端由 forwardResponses 聚合 SSE 回完整 JSON。
+    const tools = mergeOpencodeZenGateToolsResponses(converted.body.tools);
+    return {
+      url: `${ctx.baseUrl}/responses`,
+      body: {
+        ...converted.body,
+        tools,
+        stream: true,
+        ...(typeof ctx.source.prompt_cache_key === "string" && ctx.source.prompt_cache_key ? {} : { prompt_cache_key: ctx.session }),
+      },
+      extraHeaders: {},
+      tools: mergeOpencodeZenToolIdentities(converted.tools, tools),
+    };
+  },
   anthropic: (converted, ctx) => ({
     url: `${ctx.baseUrl}/messages`,
     body: { ...converted.body, ...(ctx.source.max_tokens === undefined ? { max_tokens: 8192 } : {}) },
@@ -276,12 +281,16 @@ const ZEN_SAME_PROTOCOL_ADAPTATIONS: Record<OpencodeZenModelProtocol, ZenUpstrea
 /** 跨协议服务化改写：转换体补真实模型、恒定 SSE（桥接渲染需要事件流）与协议头。 */
 const ZEN_CROSS_PROTOCOL_ADAPTATIONS: Record<OpencodeZenModelProtocol, ZenUpstreamAdapter> = {
   "chat-completions": adaptZenChatUpstream,
-  responses: (converted, ctx) => ({
-    url: `${ctx.baseUrl}/responses`,
-    body: { ...converted.body, model: ctx.upstreamModel, stream: true, ...(converted.body.prompt_cache_key === undefined ? { prompt_cache_key: ctx.session } : {}) },
-    extraHeaders: {},
-    tools: converted.tools,
-  }),
+  responses: (converted, ctx) => {
+    // 同一 /responses 门禁：跨协议转换体同样合并官方定义（流式已恒定强制）。
+    const tools = mergeOpencodeZenGateToolsResponses(converted.body.tools);
+    return {
+      url: `${ctx.baseUrl}/responses`,
+      body: { ...converted.body, model: ctx.upstreamModel, stream: true, tools, ...(converted.body.prompt_cache_key === undefined ? { prompt_cache_key: ctx.session } : {}) },
+      extraHeaders: {},
+      tools: mergeOpencodeZenToolIdentities(converted.tools, tools),
+    };
+  },
   anthropic: (converted, ctx) => ({
     url: `${ctx.baseUrl}/messages`,
     body: { ...converted.body, model: ctx.upstreamModel, stream: true },
@@ -307,7 +316,124 @@ function adaptOpencodeZenUpstreamRequest(
   ctx: ZenUpstreamContext,
 ): ZenUpstreamRequest {
   const adapters = to === from ? ZEN_SAME_PROTOCOL_ADAPTATIONS : ZEN_CROSS_PROTOCOL_ADAPTATIONS;
-  return adapters[from](converted, ctx);
+  const adapted = adapters[from](converted, ctx);
+  // muse-spark 家族的 /responses 实现受限：适配出口统一做模型级净化，其余模型零变化。
+  if (isOpencodeZenMuseSparkUpstreamModel(ctx.upstreamModel)) {
+    adapted.body = sanitizeOpencodeZenMuseSparkResponsesBody(adapted.body);
+  }
+  return adapted;
+}
+
+/* ========== muse-spark 受限 /responses 净化（2026-10-15 上游实证） ========== */
+
+/**
+ * muse-spark 家族前缀。该家族 /responses 实现有两处已实证的受限点（chat 端点整体
+ * `ModelProtocolUnsupported`，不存在改路由空间）：Codex 0.162 的 `additional_tools`
+ * 信封项与 `web_search.search_content_types` 参数都会被 400 拒绝，按模型名前缀净化。
+ */
+const MUSE_SPARK_MODEL_PREFIX = "muse-spark-";
+
+function isOpencodeZenMuseSparkUpstreamModel(model: string): boolean {
+  return model.startsWith(MUSE_SPARK_MODEL_PREFIX);
+}
+
+/** 工具声明去重键：namespace/function/custom/web_search 的身份都落在 type + name 上。 */
+function museSparkToolKey(tool: Record<string, unknown>): string {
+  const type = typeof tool.type === "string" ? tool.type : "";
+  const name = typeof tool.name === "string" ? tool.name : "";
+  return `${type}:${name}`;
+}
+
+/**
+ * muse-spark 请求体净化（对不含相关字段的请求体是零变化直返）：
+ * - Codex 0.162 起工具声明装在 input 的 `additional_tools` 信封项里（顶层 tools
+ *   消失），上游不识别该 input 项类型（400 "`input[0]` did not match any supported
+ *   type"）。剥离信封项，工具声明原样提升到顶层 tools——namespace 形态上游可过，
+ *   不展平不改名，保证工具调用历史与声明名一致；与顶层同名时保留顶层声明。
+ * - `search_content_types` 仅 `web_search_preview` 合法，从 `web_search` 定义剥离
+ *   （cliproxy 时代同款过滤，2026-10-15 上游复测确认报文）。
+ * - 上游不支持 `custom` 工具（400 "`custom` tools are not supported on this
+ *   endpoint"）：丢弃 custom 声明（含 namespace 内层；内层清空的 namespace 一并
+ *   丢弃）。custom 依赖 custom_tool_call 响应形状，转 function 会让模型产出
+ *   function_call 而客户端无法对应，故只丢弃不转换——代价是该模型上 Codex 的
+ *   custom 工具（如 node REPL 的 exec）不可用。
+ * - 工具 description 上游要求非空（实测 Codex 的 `functions` namespace 声明带空串
+ *   description，被 400 `tools[1].description` 拒绝）：缺失或空串以工具名占位，
+ *   namespace 内层工具同样处理。
+ */
+function sanitizeOpencodeZenMuseSparkResponsesBody(body: Record<string, unknown>): Record<string, unknown> {
+  const hoisted: unknown[] = [];
+  const input = Array.isArray(body.input)
+    ? body.input.filter((item) => {
+      if (!isRecord(item) || item.type !== "additional_tools") return true;
+      if (Array.isArray(item.tools)) hoisted.push(...item.tools);
+      return false;
+    })
+    : undefined;
+  let sanitized = body;
+  if (input !== undefined && hoisted.length > 0) {
+    const tools = [...(Array.isArray(body.tools) ? body.tools : [])];
+    const known = new Set(tools.filter(isRecord).map(museSparkToolKey));
+    for (const tool of hoisted) {
+      if (!isRecord(tool) || known.has(museSparkToolKey(tool))) continue;
+      known.add(museSparkToolKey(tool));
+      tools.push(tool);
+    }
+    sanitized = { ...body, input, tools };
+  } else if (input !== undefined) {
+    sanitized = { ...body, input };
+  }
+  if (!Array.isArray(sanitized.tools)) return sanitized;
+  const tools = sanitized.tools
+    .map(dropMuseSparkCustomTools)
+    .filter((tool) => tool !== undefined)
+    .map((tool) => fillMuseSparkToolDescription(stripMuseSparkWebSearchContentType(tool)));
+  if (!tools.some((tool, index) => tool !== (sanitized.tools as unknown[])[index])) return sanitized;
+  return { ...sanitized, tools };
+}
+
+/**
+ * 丢弃 custom 工具声明：顶层与 namespace 内层（清空的 namespace 一并丢弃）。
+ * 其余条目原引用返回；数组无变化时原引用返回。
+ */
+function dropMuseSparkCustomTools(tool: unknown): unknown {
+  if (!isRecord(tool)) return tool;
+  if (tool.type === "custom") return undefined;
+  if (Array.isArray(tool.tools)) {
+    const inner = tool.tools as unknown[];
+    const entries = inner.map(dropMuseSparkCustomTools).filter((entry) => entry !== undefined);
+    if (entries.length === 0) return undefined;
+    if (entries.length !== inner.length) return { ...tool, tools: entries };
+  }
+  return tool;
+}
+
+/** web_search 定义的 search_content_types 剥离（web_search_preview 保留）。 */
+function stripMuseSparkWebSearchContentType(tool: unknown): unknown {
+  if (!isRecord(tool) || tool.type !== "web_search" || !("search_content_types" in tool)) return tool;
+  const { search_content_types: _dropped, ...rest } = tool;
+  return rest;
+}
+
+/**
+ * 工具 description 缺失/空串时以工具名占位（无名的兜底 "tool"）；namespace 内层递归；
+ * 无变化时原引用返回。仅 function/custom/namespace 等携带 schema 的声明型工具处理——
+ * web_search 等服务端内置工具无 description 上游也接受（2026-10-15 探针实测）。
+ */
+function fillMuseSparkToolDescription(tool: unknown): unknown {
+  if (!isRecord(tool)) return tool;
+  let next = tool;
+  const declarative = tool.type === "function" || tool.type === "custom" || tool.type === "namespace";
+  if (declarative && (typeof tool.description !== "string" || !tool.description)) {
+    next = { ...tool, description: typeof tool.name === "string" && tool.name ? tool.name : "tool" };
+  }
+  if (Array.isArray(next.tools)) {
+    const entries = next.tools.map(fillMuseSparkToolDescription);
+    if (entries.some((entry, index) => entry !== (next.tools as unknown[])[index])) {
+      next = { ...next, tools: entries };
+    }
+  }
+  return next;
 }
 
 
@@ -317,9 +443,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
   const baseUrl = endpoint.replace(/\/+$/, "");
   const fetchImpl = dependencies.fetch ?? fetch;
   const projectId = dependencies.projectId ?? createOpencodeZenProjectId(os.hostname());
-  const sessionResolver = createOpenCodeSessionResolver(
-    dependencies.sessionCache ?? createSessionBindingCache(),
-  );
+  const sessionResolver = createOpenCodeSessionResolver();
 
   /** UA 版本动态获取：转发与探测统一读 current()，失败静默回退指纹快照。 */
   const userAgent = dependencies.userAgentStore ?? createOpencodeZenUserAgentStore({ fetch: fetchImpl });
@@ -681,13 +805,16 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
           return fail(safe.status, safe.message, safe.type);
         }
         if (protocol === "responses") {
-          // 直通：流式原样透传；非流式原样返回上游 JSON。
+          // 直通：流式原样透传；非流式客户端因上游强制流式（门禁拒非流式），聚合 SSE 回完整 JSON。
           if (!clientStreams) {
-            const text = await upstream.text();
-            const responseHeaders = new Headers({ "content-type": upstream.headers.get("content-type") ?? "application/json" });
-            log(200, text, responseHeaders);
+            const rendered = await renderOpencodeZenClientOutput("responses", "responses", upstream, {
+              model: String(input.model ?? upstreamModel), stream: false, tools: preparedTools,
+              signal: abort.signal, abort: () => { abort.abort(); cleanup(); },
+            });
+            const completion = await rendered.text();
+            log(200, completion, rendered.headers);
             cleanup();
-            return new Response(text, { status: 200, headers: responseHeaders });
+            return new Response(completion, { status: rendered.status, headers: rendered.headers });
           }
           const responseHeaders = new Headers({ "content-type": upstream.headers.get("content-type") ?? "text/event-stream" });
           const [toClient, toLog] = upstream.body.tee();

@@ -233,7 +233,7 @@ test("探针信号分类：协议不符/下线/门禁/被服务四类，地区�
   assert.equal(classifyOpencodeZenProbeSignal(503, '{"error":{"message":"Endpoint is unavailable."}}'), "served");
 });
 
-test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -free 后缀 + 探针兜底", () => {
+test("目录过滤：cost 免费判定 + deprecated 剔除 + jev 家族代码级屏蔽 + 无条目只认 -free 后缀 + 探针兜底", () => {
   const metadata: Record<string, OpencodeZenModelMetadata> = {
     "grok-code": { deprecated: false, free: true },
     "big-pickle": { deprecated: false, free: true },
@@ -250,17 +250,22 @@ test("目录过滤：cost 免费判定 + deprecated 剔除 + 无条目只认 -fr
     ),
     ["grok-code", "big-pickle", "muse-spark-free"],
   );
-  // 元数据无条目（刚轮换上线）：-free 后缀宽限 + 探针裁决；无后缀无法验证免费，剔除。
+  // 代码级屏蔽（jev- 家族）：网关无法服务（chat 400 协议不符、其余端点带不上门禁材料），
+  // 门禁抖动期探针保守保留的 chat-completions 裁决也不能让它进目录；对照组同批
+  // 无元数据的 -free 模型按宽限 + 裁决照常可见。
   assert.deepEqual(
-    filterOpencodeZenCatalogIds(["jev-1.13-free", "claude-fable-5"], metadata, {
+    filterOpencodeZenCatalogIds(["jev-1.13-free", "exo-2-free"], metadata, {
       "jev-1.13-free": { result: "chat-completions", at: 1 },
-      "claude-fable-5": { result: "chat-completions", at: 1 },
+      "exo-2-free": { result: "chat-completions", at: 1 },
     }),
-    ["jev-1.13-free"],
+    ["exo-2-free"],
   );
-  assert.deepEqual(filterOpencodeZenCatalogIds(["jev-1.13-free"], metadata, { "jev-1.13-free": { result: "drop", at: 1 } }), []);
-  // 元数据整体不可用：只信 -free 后缀（无后缀零计费模型暂不示，好过误示付费）。
-  assert.deepEqual(filterOpencodeZenCatalogIds(["exo-free", "grok-code", "claude-opus-5"], undefined, undefined), ["exo-free"]);
+  assert.deepEqual(filterOpencodeZenCatalogIds(["exo-2-free"], metadata, { "exo-2-free": { result: "drop", at: 1 } }), []);
+  // 元数据整体不可用：只信 -free 后缀（无后缀零计费模型暂不示，好过误示付费）；屏蔽家族同样剔除。
+  assert.deepEqual(
+    filterOpencodeZenCatalogIds(["exo-free", "grok-code", "jev-1.13-free", "claude-opus-5"], undefined, undefined),
+    ["exo-free"],
+  );
 });
 
 test("目录存储：动态 id + 元数据属性 + TTL 内不重复拉取 + 失败回退 last-good", async () => {
@@ -371,7 +376,7 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
       now: () => now,
       ttlMs: 60_000,
       fetchCatalog: async () => ({ data: [{ id: "exo-free" }, { id: "grok-code" }] }),
-      fetchMetadata: async () => ({ opencode: { api: "https://opencode.ai/zen/v1", models: {
+      fetchMetadata: async () => ({ opencode: { api: "https://opencode.ai/inference/v1", models: {
         "exo-free": freeMeta({ name: "Exo Free" }),
         "grok-code": freeMeta({ name: "Grok Code Fast 1" }),
         "claude-opus-5": paidMeta(),
@@ -383,7 +388,7 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
     const metadata = JSON.parse(fs.readFileSync(path.join(directory, "opencode-zen-metadata.json"), "utf8"));
     assert.deepEqual(metadata.ids, ["exo-free", "grok-code"]);
     assert.ok(metadata.metadata?.models, "元数据随原始数据落盘");
-    assert.equal(metadata.metadata.models["exo-free"].api, "https://opencode.ai/zen/v1", "provider.api 进入元数据");
+    assert.equal(metadata.metadata.models["exo-free"].api, "https://opencode.ai/inference/v1", "provider.api 进入元数据");
     assert.equal(metadata.models, undefined, "metadata.json 不再内嵌成品条目");
     const catalog = JSON.parse(fs.readFileSync(path.join(directory, "opencode-zen-catalog.json"), "utf8"));
     assert.ok(Array.isArray(catalog.models) && catalog.models.length === 2, "catalog.json 是成品目录");
@@ -396,8 +401,8 @@ test("目录存储：刷新同时写 metadata.json 与成品 catalog.json，serv
       assert.equal((entry.model_messages as { instructions_template?: string }).instructions_template, (base.model_messages as { instructions_template?: string }).instructions_template);
     }
     // 转发 endpoint 由元数据确认（provider.api）。
-    assert.equal(store.endpoint("exo-free"), "https://opencode.ai/zen/v1");
-    assert.equal(store.endpoint("claude-opus-5"), "https://opencode.ai/zen/v1", "provider 级 baseURL 全模型共享");
+    assert.equal(store.endpoint("exo-free"), "https://opencode.ai/inference/v1");
+    assert.equal(store.endpoint("claude-opus-5"), "https://opencode.ai/inference/v1", "provider 级 baseURL 全模型共享");
     assert.equal(store.endpoint("unknown-model"), undefined, "元数据缺失时由转发层回退缺省端点");
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
@@ -471,7 +476,7 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
   const probed: string[] = [];
   const fetchCatalog = async () => ({ data: [
     { id: "exo-free" }, { id: "space-bunny-free" },
-    { id: "muse-spark-1.3-contributor-free" }, { id: "jev-1.13-free" },
+    { id: "muse-spark-1.3-contributor-free" }, { id: "jev-1.13-free" }, { id: "exo-2-free" },
   ] });
   const fetchMetadata = async () => {
     metadataFetches++;
@@ -492,9 +497,10 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
     assert.ok(first.has("opencode-zen/space-bunny-free"));
     assert.ok(!first.has("opencode-zen/exo-free"), "deprecated 模型不暴露");
     assert.ok(first.has("opencode-zen/muse-spark-1.3-contributor-free"), "非 chat 协议模型保留（按协议路由）");
-    assert.ok(!first.has("opencode-zen/jev-1.13-free"), "探针 drop 的模型不暴露");
+    assert.ok(!first.has("opencode-zen/jev-1.13-free"), "代码级屏蔽的模型不暴露也不探测");
+    assert.ok(!first.has("opencode-zen/exo-2-free"), "探针 drop 的模型不暴露");
     assert.equal(metadataFetches, 1);
-    assert.deepEqual(probed, ["jev-1.13-free"]);
+    assert.deepEqual(probed, ["exo-2-free"]);
     // TTL 内二次取目录：不重拉元数据、不重探。
     now += 61_000;
     await store.catalog();
@@ -510,9 +516,10 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
       probeModel: async (id) => { probed.push(id); return "chat-completions"; },
     });
     const rereadCatalog = new Set((await reread.catalog()).map((entry) => entry.slug));
-    assert.ok(rereadCatalog.has("opencode-zen/jev-1.13-free"), "探针翻转为 chat 后重新暴露");
+    assert.ok(rereadCatalog.has("opencode-zen/exo-2-free"), "探针翻转为 chat 后重新暴露");
+    assert.ok(!rereadCatalog.has("opencode-zen/jev-1.13-free"), "代码级屏蔽的模型不受探针裁决翻转影响");
     assert.equal(metadataFetches, 1, "磁盘元数据在 TTL 内直接复用");
-    assert.deepEqual(probed, ["jev-1.13-free", "jev-1.13-free"]);
+    assert.deepEqual(probed, ["exo-2-free", "exo-2-free"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -526,7 +533,7 @@ test("目录存储：探针失败不记录裁决，保守保留并下轮重试",
     const store = createOpencodeZenCatalogStore({
       cacheDirectory: directory, now: () => now, ttlMs: 60_000,
       metadataTtlMs: 600_000, probeTtlMs: 600_000,
-      fetchCatalog: async () => ({ data: [{ id: "jev-1.13-free" }] }),
+      fetchCatalog: async () => ({ data: [{ id: "exo-2-free" }] }),
       fetchMetadata: async () => ({ opencode: { models: {} } }),
       probeModel: async () => {
         attempts++;
@@ -535,11 +542,11 @@ test("目录存储：探针失败不记录裁决，保守保留并下轮重试",
       },
     });
     const first = await store.catalog();
-    assert.ok(first.some((entry) => entry.slug === "opencode-zen/jev-1.13-free"), "探针失败保守保留");
+    assert.ok(first.some((entry) => entry.slug === "opencode-zen/exo-2-free"), "探针失败保守保留");
     assert.equal(attempts, 1);
     now += 61_000;
     const second = await store.catalog();
-    assert.ok(!second.some((entry) => entry.slug === "opencode-zen/jev-1.13-free"), "下轮重试成功后剔除");
+    assert.ok(!second.some((entry) => entry.slug === "opencode-zen/exo-2-free"), "下轮重试成功后剔除");
     assert.equal(attempts, 2);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

@@ -469,6 +469,14 @@ function responsesSourceToPrepared(body: Json, registry: ToolRegistry): Prepared
       registry.note(`已剥离 ${type} history 项（插件前处理负责回放或降级）`);
       continue;
     }
+    if (type === "additional_tools" || type === "compaction_trigger") {
+      // additional_tools 是客户端中途增补工具声明的信封项（Codex 实发，MCP 工具挂载
+      // 时进入 input 历史），compaction_trigger 是压缩请求标记：两者不是消息历史，
+      // 网关自身 Responses 路径同样剥离（gateway.ts 的 input 过滤），桥接按同语义
+      // 丢弃并记录；中途增补的工具声明不并入本轮 tools（与网关行为一致）。
+      registry.note(`已剥离 ${type} history 项（工具增补/压缩标记，不进入消息历史）`);
+      continue;
+    }
     fail(`不支持的 Responses history 项类型 ${type}`);
   }
 
@@ -848,11 +856,15 @@ function anthropicSourceToPrepared(body: Json, registry: ToolRegistry): Prepared
     }
   }
 
-  // 工具声明：input_schema → 同一身份映射（custom / 内置工具在此协议不存在）。
+  // 工具声明：input_schema → 同一身份映射（服务器内置工具在此协议不存在）。
+  // Anthropic 常规工具声明没有 type 字段（ZCode/Claude Code/MCP 客户端皆然），缺省
+  // 必须是 function：2026-10-15 实测缺省 custom 会把真实 input_schema 换成占位、
+  // 历史回放发射成 custom_tool_call 而输出仍是 function_call_output，上游按类型
+  // 配对直接 400。真正的 custom 工具（自由文本输入）显式声明 type:"custom"。
   const tools: EngineFunctionTool[] = [];
   for (const raw of asArray(body.tools)) {
     if (!isRecord(raw)) fail("tools 包含无效声明");
-    const type = typeof raw.type === "string" ? raw.type : "custom";
+    const type = typeof raw.type === "string" ? raw.type : "function";
     if (type !== "custom" && type !== "function") {
       registry.stripTool(type, `已剥离 Anthropic 服务器工具 ${type}（跨协议不可表达）`);
       continue;
@@ -1207,15 +1219,27 @@ function applyResponsesExtras(body: Json, prepared: PreparedRequest, registry: T
   if (Array.isArray(body.input)) {
     body.input = body.input.filter((item) => !(isRecord(item) && item.role === "assistant" && (item.content === "" || (Array.isArray(item.content) && item.content.length === 0))));
   }
-  // custom 工具历史：引擎统一写 function_call，按身份表还原 custom_tool_call。
+  // custom 工具历史：引擎统一写 function_call/function_call_output，按身份表还原
+  // custom_tool_call，其配对输出同步还原为 custom_tool_call_output——上游按类型
+  // 配对调用与输出，交叉配对会被拒（2026-10-15 muse-spark 实测 400
+  // "No function call found for function call output"）。
   if (Array.isArray(body.input)) {
-    body.input = body.input.map((item) => {
+    const items = body.input as unknown[];
+    const customCallIds = new Set<string>();
+    const calls = items.map((item) => {
       if (!isRecord(item) || item.type !== "function_call" || typeof item.name !== "string") return item;
       const identity = registry.map.get(item.name);
       if (!identity?.custom || typeof item.arguments !== "string") return item;
       const parsed = safeJsonParse(item.arguments, "custom_tool_call.arguments");
+      if (typeof item.call_id === "string") customCallIds.add(item.call_id);
       return { type: "custom_tool_call", call_id: item.call_id, name: item.name, input: typeof parsed.input === "string" ? parsed.input : JSON.stringify(parsed.input ?? "") };
     });
+    body.input = customCallIds.size > 0
+      ? calls.map((item) => {
+        if (!isRecord(item) || item.type !== "function_call_output" || typeof item.call_id !== "string" || !customCallIds.has(item.call_id)) return item;
+        return { type: "custom_tool_call_output", call_id: item.call_id, output: item.output };
+      })
+      : calls;
   }
   if (prepared.structured !== undefined) {
     body.text = { ...(isRecord(body.text) ? body.text : {}), format: structuredToJsonSchemaFormat(prepared.structured) };

@@ -234,10 +234,10 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
       projectId: "a".repeat(40),
       fetch: (async (url: string | URL | Request) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) {
+        if (target.endsWith("/inference/v1/models")) {
           return Response.json({ object: "list", data: [{ id: "nemotron-3.5-lightning-free" }, { id: "exo-free" }] });
         }
-        if (target.endsWith("/zen/v1/chat/completions")) {
+        if (target.endsWith("/inference/v1/chat/completions")) {
           opencodeZenInferCalls.push(target);
           return Response.json({ error: { message: "unexpected inference" } }, { status: 500 });
         }
