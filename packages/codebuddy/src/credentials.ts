@@ -82,20 +82,22 @@ export interface CodebuddyCredentialDependencies {
   now?: () => number;
   /** 每次实际解析 .info 成功的回调（测试统计读取次数）。 */
   onCredentialRead?: () => void;
-  /** 锁定的 .info 文件名（配置 codebuddyAccount）；"auto" 或缺省走全扫 + 最近刷新选取。 */
+  /** 锁定的账号选择值（配置 codebuddyAccount：`profile:uid` 钉住地域、裸 uid 跟随
+   * 该账号最新登录、历史 .info 文件名读取时换算）；"auto" 或缺省走全扫 + 最近刷新选取。 */
   preferredAccount?: string;
   /** 锁定文件缺失回落 auto 时的告警回调；缺省 console.warn（launchd 下进 gateway.log）。 */
   onAccountFallback?: (account: string) => void;
 }
 
 /**
- * codebuddyAccount 的合法形状：哨兵 `"auto"`，或认证目录内的 `.info` 纯文件名
- * （拒绝路径分隔符与空主干，防止把配置值拼成任意读取路径）。历史哨兵 "default"
- * 已在读取归一（migrateLegacyConfig）改写为 "auto"，这里不再接受。
+ * codebuddyAccount 的合法形状：哨兵 `"auto"`、账号 uid，或历史 `.info` 纯文件名
+ * （读取时按同账号最新登录解析）。拒绝路径分隔符与空串，防止把配置值拼成任意
+ * 读取路径。历史哨兵 "default" 已在读取归一（migrateLegacyConfig）改写为
+ * "auto"，这里不再特殊处理。
  */
-export function isCodebuddyAccountName(value: string): boolean {
+export function isCodebuddyAccountValue(value: string): boolean {
   return value === "auto"
-    || (value.endsWith(".info") && value.length > ".info".length && path.basename(value) === value);
+    || (value.length > 0 && !value.includes("/") && !value.includes("\\") && !value.includes("\u0000"));
 }
 
 function invalid(message: string): never {
@@ -239,9 +241,11 @@ const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 
 export interface CodebuddyCredentialCache {
   /**
-   * 按产品接口选取凭据。配置锁定账号（.info 文件名）时只读该文件：其 profile 决定
-   * region/product，请求 slug 地域与账号地域不匹配时直接报错，不跨地域回退；接口产品
-   * 不一致时沿用同账号换端点的产品适配。auto/未锁定时全扫 + 最近刷新选取：模型 slug
+   * 按产品接口选取凭据。配置锁定账号（账号 uid；历史 .info 文件名值选取时换算为
+   * 同账号 uid）时按「该账号最近刷新的登录」选取：命中凭据的 profile 决定
+   * region/product，请求 slug 地域与账号地域不匹配时直接报错，不跨地域回退；接口
+   * 产品不一致时沿用同账号换端点的产品适配——CLI 刷新换文件后自动跟随新快照。
+   * 账号不存在时告警一次并回落 auto。auto/未锁定时全扫 + 最近刷新选取：模型 slug
    * 中的地域是硬性路由（该地域没有任何凭据时直接报错），目录刷新没有 slug 可依据，
    * 走最近刷新登录的 auto 规则；同产品凭据优先，缺失时回退同地域另一产品登录。
    */
@@ -254,10 +258,27 @@ interface CacheState {
   byProfile: Map<CodebuddyProfile, CodebuddyCredential>;
   /** byProfile 中每份凭据来自的 .info 文件名（auto 标签解析与凭据选取同源）。 */
   fileByProfile: Map<CodebuddyProfile, string>;
+  /** 每个账号 uid（跨 profile）保留最近刷新的一份：裸 uid 锁定的选取来源。 */
+  byUid: Map<string, CodebuddyCredential>;
+  fileByUid: Map<string, string>;
+  /** 每个 (uid, profile) 保留最近刷新的一份：profile 作用域锁定的选取来源。 */
+  byAccount: Map<string, CodebuddyCredential>;
+  fileByAccount: Map<string, string>;
   failure: CodebuddyCredentialError | undefined;
 }
 
-/** 全量扫描认证目录：同 profile 多文件取最近刷新的一份，并记下其来源文件名。 */
+/** 「最新」判据（auto 选取、账号列表去重、uid 锁定共用）：lastRefreshTime 为主，
+ * 平手比文件 mtime；两者都平手时保持先到者（文件名序迭代）。 */
+function isFresherCredential(nextRefresh: number, nextMtime: number, currentRefresh: number, currentMtime: number): boolean {
+  return nextRefresh > currentRefresh || (nextRefresh === currentRefresh && nextMtime > currentMtime);
+}
+
+function fileMtimeMs(directory: string, file: string): number {
+  try { return fs.statSync(path.join(directory, file)).mtimeMs; } catch { return 0; }
+}
+
+/** 全量扫描认证目录：同 profile 多文件取最近刷新的一份，并记下其来源文件名；
+ * 同账号（uid，跨 profile）也各自保留最近刷新的一份（uid 锁定的选取来源）。 */
 function scanAuthDirectory(
   directory: string,
   readdir: typeof fs.readdirSync,
@@ -269,22 +290,53 @@ function scanAuthDirectory(
     return {
       byProfile: new Map(),
       fileByProfile: new Map(),
+      byUid: new Map(),
+      fileByUid: new Map(),
+      byAccount: new Map(),
+      fileByAccount: new Map(),
       failure: new CodebuddyCredentialError("无法读取 CodeBuddy/WorkBuddy 认证目录；请在桌面端或 CLI 登录后重试"),
     };
   }
   const byProfile = new Map<CodebuddyProfile, CodebuddyCredential>();
   const fileByProfile = new Map<CodebuddyProfile, string>();
+  const byUid = new Map<string, CodebuddyCredential>();
+  const fileByUid = new Map<string, string>();
+  const byAccount = new Map<string, CodebuddyCredential>();
+  const fileByAccount = new Map<string, string>();
   let firstFailure: CodebuddyCredentialError | undefined;
   for (const name of names.sort()) {
     if (!name.endsWith(".info")) continue;
     try {
       const credential = readCredential(path.join(directory, name));
       onCredentialRead?.();
+      const mtime = fileMtimeMs(directory, name);
       // 同 profile 多份文件（重复登录/多客户端）取最近刷新的。
       const existing = byProfile.get(credential.profile);
-      if (existing === undefined || (credential.lastRefreshTime ?? 0) > (existing.lastRefreshTime ?? 0)) {
+      const existingFile = fileByProfile.get(credential.profile);
+      if (existing === undefined || existingFile === undefined
+        || isFresherCredential(credential.lastRefreshTime ?? 0, mtime, existing.lastRefreshTime ?? 0, fileMtimeMs(directory, existingFile))) {
         byProfile.set(credential.profile, credential);
         fileByProfile.set(credential.profile, name);
+      }
+      // 同账号 uid 跨 profile 的多份文件（cn/intl 各一份登录）也取最近刷新的：
+      // 裸 uid 锁定跟随该账号最新登录；(uid, profile) 组合再各留一份，供
+      // profile 作用域锁定（`cn-cli:<uid>`）钉住地域/产品。
+      if (credential.accountUid) {
+        const existingUid = byUid.get(credential.accountUid);
+        const existingUidFile = fileByUid.get(credential.accountUid);
+        if (existingUid === undefined || existingUidFile === undefined
+          || isFresherCredential(credential.lastRefreshTime ?? 0, mtime, existingUid.lastRefreshTime ?? 0, fileMtimeMs(directory, existingUidFile))) {
+          byUid.set(credential.accountUid, credential);
+          fileByUid.set(credential.accountUid, name);
+        }
+        const accountKey = `${credential.accountUid}::${credential.profile}`;
+        const existingAccount = byAccount.get(accountKey);
+        const existingAccountFile = fileByAccount.get(accountKey);
+        if (existingAccount === undefined || existingAccountFile === undefined
+          || isFresherCredential(credential.lastRefreshTime ?? 0, mtime, existingAccount.lastRefreshTime ?? 0, fileMtimeMs(directory, existingAccountFile))) {
+          byAccount.set(accountKey, credential);
+          fileByAccount.set(accountKey, name);
+        }
       }
     } catch (error) {
       firstFailure ??= error instanceof CodebuddyCredentialError
@@ -296,10 +348,14 @@ function scanAuthDirectory(
     return {
       byProfile,
       fileByProfile,
+      byUid,
+      fileByUid,
+      byAccount,
+      fileByAccount,
       failure: firstFailure ?? new CodebuddyCredentialError("认证目录内没有可用的 CodeBuddy/WorkBuddy 登录凭据（.info）；请在桌面端或 CLI 登录后重试"),
     };
   }
-  return { byProfile, fileByProfile, failure: undefined };
+  return { byProfile, fileByProfile, byUid, fileByUid, byAccount, fileByAccount, failure: undefined };
 }
 
 /** auto 规则的核心：最近刷新的一份登录（活动地域即它的地域）。 */
@@ -322,11 +378,51 @@ function formatAccountLabel(credential: CodebuddyCredential, file: string): stri
   return `${primary}${email} / ${profileRegion(credential.profile)}`;
 }
 
+/** 账号选择器：uid 必有；profile 存在时为 profile 作用域锁定（钉住地域/产品），
+ * 缺失时为裸 uid 锁定（跟随该账号最近刷新的登录，地域随之）。 */
+interface AccountSelector {
+  uid: string;
+  profile?: CodebuddyProfile;
+}
+
+/** 配置锁定值 → 账号选择器。三种形态：`profile:uid`（如 `cn-cli:uid-x`，钉住
+ * 该地域/产品）、裸 uid（跟随该账号最新登录）、历史 `.info` 文件名（读该文件
+ * 换算为 `该文件的 profile + uid`，等同钉住其地域）。路径形状一律非法；文件
+ * 缺失/损坏/无 uid 返回 undefined（调用方按直读或回退处理）。网关选取与展示
+ * 解析共用，保证锁定语义在文件轮换（CLI 刷新另写新文件）下仍指向同一账号。 */
+function lockedAccountSelector(
+  directory: string,
+  account: string | undefined,
+  existsSync: typeof fs.existsSync = fs.existsSync,
+): AccountSelector | undefined {
+  if (typeof account !== "string" || !account || account === "auto") return undefined;
+  // 路径形状一律非法（防止拼接出任意读取路径）。
+  if (account.includes("/") || account.includes("\\") || path.basename(account) !== account) return undefined;
+  if (!account.endsWith(".info")) {
+    const separator = account.indexOf(":");
+    if (separator > 0) {
+      const prefix = account.slice(0, separator);
+      if (prefix === "cn-cli" || prefix === "cn-work" || prefix === "intl-cli" || prefix === "intl-work") {
+        const uid = account.slice(separator + 1);
+        return uid ? { uid, profile: prefix } : undefined;
+      }
+    }
+    // 无已知 profile 前缀：整个值按裸 uid 处理（跟随最新）。
+    return { uid: account };
+  }
+  if (!existsSync(path.join(directory, account))) return undefined;
+  try {
+    const credential = readCredential(path.join(directory, account));
+    return credential.accountUid ? { uid: credential.accountUid, profile: credential.profile } : undefined;
+  } catch { return undefined; }
+}
+
 /**
- * 只读账号解析的第一步：按 codebuddyAccount（.info 文件名 / "auto" / 缺省）解析出
- * 实际命中的 `.info` 文件名。auto 不是特殊分支——它等价于「由 auto 规则（最近刷新
- * 的登录）解析出的固定文件名」，与网关凭据选取共用同一 scanAuthDirectory/freshestCredential
- * 实现，保证展示等于网关真实命中。目录不存在或无有效凭据返回 undefined。
+ * 只读账号解析的第一步：按 codebuddyAccount（账号 uid / 历史 .info 文件名 /
+ * "auto" / 缺省）解析出实际命中的 `.info` 文件名。锁定账号命中「该 uid 最近刷新
+ * 的登录」（与网关选取同源，文件轮换后自动指向新快照）；账号不存在回落 auto；
+ * 无 uid 的旧客户端登录按文件名直读展示。auto 等价于「由 auto 规则（最近刷新的
+ * 登录）解析出的固定文件名」。目录不存在或无有效凭据返回 undefined。
  */
 export function resolveCodebuddyAccountFile(
   authDirectory: string,
@@ -335,13 +431,45 @@ export function resolveCodebuddyAccountFile(
 ): string | undefined {
   const directory = path.resolve(authDirectory);
   const existsSync = dependencies.existsSync ?? fs.existsSync;
-  if (typeof account === "string" && isCodebuddyAccountName(account) && account !== "auto") {
-    if (existsSync(path.join(directory, account))) return account;
-    // 锁定文件缺失：与网关运行期一致，回落 auto 解析真实命中的登录。
-  }
   const scan = scanAuthDirectory(directory, dependencies.readdir ?? fs.readdirSync);
   const freshest = scan.byProfile.size === 0 ? undefined : freshestCredential(scan.byProfile);
-  return freshest === undefined ? undefined : scan.fileByProfile.get(freshest.profile);
+  const fallback = freshest === undefined ? undefined : scan.fileByProfile.get(freshest.profile);
+  const selector = lockedAccountSelector(directory, account, existsSync);
+  if (selector !== undefined) {
+    // profile 作用域锁定只解析该地域/产品下的最新登录；裸 uid 跟随账号最新登录。
+    // 选择器无命中（账号或地域不存在）回落 auto，与运行期一致。
+    const file = selector.profile !== undefined
+      ? scan.fileByAccount.get(`${selector.uid}::${selector.profile}`)
+      : scan.fileByUid.get(selector.uid);
+    if (file !== undefined) return file;
+    return fallback;
+  }
+  // 无 uid 的旧客户端登录：锁定值即文件名，展示该文件本身。
+  if (typeof account === "string" && account.endsWith(".info")
+    && path.basename(account) === account && existsSync(path.join(directory, account))) {
+    return account;
+  }
+  return fallback;
+}
+
+/** 配置锁定值 → 下拉展示/提交用的规范值："auto"；profile 作用域值（`cn-cli:uid`）
+ * 命中登录时原样（地域钉住）；裸 uid 规范化为该账号当前命中行的 profile 作用域
+ * 值（下拉直接选中运行期实际使用的登录）；历史 `.info` 文件名换算为
+ * `该文件的 profile:uid`。无 uid 登录保持文件名；无命中（账号/地域不存在、文件
+ * 缺失/损坏）保留原值，前端按「登录不存在」占位。 */
+export function canonicalCodebuddyAccountValue(authDirectory: string, account?: string): string {
+  if (typeof account !== "string" || !account || account === "auto") return "auto";
+  const directory = path.resolve(authDirectory);
+  const selector = lockedAccountSelector(directory, account);
+  if (selector === undefined) return account;
+  const scan = scanAuthDirectory(directory, fs.readdirSync);
+  if (selector.profile !== undefined) {
+    return scan.byAccount.has(`${selector.uid}::${selector.profile}`)
+      ? `${selector.profile}:${selector.uid}`
+      : account;
+  }
+  const freshest = scan.byUid.get(selector.uid);
+  return freshest ? `${freshest.profile}:${selector.uid}` : account;
 }
 
 /**
@@ -386,6 +514,11 @@ export function getActiveAccount(): string | undefined {
 }
 
 export interface CodebuddyAccountEntry {
+  /** 选择控件的值：`profile:uid`（同账号跨地域多行时值唯一，且可钉住地域/产品）；
+   * 无 uid 的旧客户端登录为文件名。 */
+  value: string;
+  /** 账号 uid（无 uid 的旧客户端登录为空串）。 */
+  uid: string;
   file: string;
   /** `昵称 <邮箱> / 地域` 展示标签；损坏/未知域名的登录为带原因的说明。 */
   label: string;
@@ -393,28 +526,55 @@ export interface CodebuddyAccountEntry {
   broken: boolean;
 }
 
-/** 列出认证目录内全部 `.info` 登录（`--switch` 的选择列表）；按文件名排序。 */
+/** 列出认证目录内的登录账号（`--switch` 菜单与 Web UI 下拉共用）；按文件名排序。
+ * 本机 CLI 的 logout/刷新会把旧登录改名为带时间戳的 `.info` 备份保留，同一账号
+ * （相同 uid 与 profile）会积累多份文件——按 (uid, profile) 去重，只保留最新
+ * （lastRefreshTime 为主、平手比文件 mtime）的一份。同一 uid 在不同地域/产品
+ * （cn 与 intl、cli 与 work）是合法的不同登录，不合并；uid 缺失或损坏的文件无法
+ * 归并，逐个原样保留（损坏仍标不可选）。 */
 export function listCodebuddyAccounts(authDirectory: string = defaultAuthDirectory()): CodebuddyAccountEntry[] {
   const directory = path.resolve(authDirectory);
   let names: string[];
   try { names = fs.readdirSync(directory); }
   catch { return []; }
-  const entries: CodebuddyAccountEntry[] = [];
+  const freshest = new Map<string, { entry: CodebuddyAccountEntry; refresh: number; mtime: number }>();
+  const unmerged: CodebuddyAccountEntry[] = [];
   for (const name of names.sort()) {
     if (!name.endsWith(".info")) continue;
     try {
-      entries.push({ file: name, label: formatAccountLabel(readCredential(path.join(directory, name)), name), broken: false });
+      const credential = readCredential(path.join(directory, name));
+      const entry: CodebuddyAccountEntry = {
+        value: credential.accountUid ? `${credential.profile}:${credential.accountUid}` : name,
+        uid: credential.accountUid,
+        file: name,
+        label: formatAccountLabel(credential, name),
+        broken: false,
+      };
+      // uid 缺失（旧版客户端字段不全）无法归并，按独立登录保留。
+      if (!credential.accountUid) {
+        unmerged.push(entry);
+        continue;
+      }
+      const key = `${credential.accountUid}::${credential.profile}`;
+      const current = freshest.get(key);
+      const refresh = credential.lastRefreshTime ?? 0;
+      const mtime = fileMtimeMs(directory, name);
+      if (current === undefined || isFresherCredential(refresh, mtime, current.refresh, current.mtime)) {
+        freshest.set(key, { entry, refresh, mtime });
+      }
     } catch (error) {
       const reason = error instanceof CodebuddyCredentialError ? error.message : "无法读取";
-      entries.push({ file: name, label: `${name}（${reason}）`, broken: true });
+      unmerged.push({ value: name, uid: "", file: name, label: `${name}（${reason}）`, broken: true });
     }
   }
-  return entries;
+  return [...freshest.values()].map(({ entry }) => entry)
+    .concat(unmerged)
+    .sort((left, right) => (left.file < right.file ? -1 : left.file > right.file ? 1 : 0));
 }
 
-/** 锁定账号文件缺失时的缺省告警：console.warn 在 launchd 下随 stderr 落进 gateway.log。 */
+/** 锁定账号不存在时的缺省告警：console.warn 在 launchd 下随 stderr 落进 gateway.log。 */
 function defaultAccountFallbackWarning(account: string): void {
-  console.warn(`[codebuddy] 配置锁定的账号文件 ${account} 不存在，本次运行回退 auto 选取最近刷新的登录；配置未修改`);
+  console.warn(`[codebuddy] 配置锁定的账号 ${account} 不存在，本次运行回退 auto 选取最近刷新的登录；配置未修改`);
 }
 
 /**
@@ -432,13 +592,14 @@ export function createCodebuddyCredentialCache(
   const existsSync = dependencies.existsSync ?? fs.existsSync;
   const watch = dependencies.watch ?? fs.watch;
   const directory = path.resolve(authDirectory);
-  // 配置锁定的 .info 文件名；"auto"/缺省/非法形状一律 undefined（走全扫 + 最近刷新选取）。
-  const lockedAccount = typeof dependencies.preferredAccount === "string"
-    && isCodebuddyAccountName(dependencies.preferredAccount)
+  // 配置锁定的账号值（账号 uid，或历史 .info 文件名——选取时换算为同账号 uid）；
+  // "auto"/缺省/路径形状一律 undefined（走全扫 + 最近刷新选取）。
+  const lockedValue = typeof dependencies.preferredAccount === "string"
+    && isCodebuddyAccountValue(dependencies.preferredAccount)
     && dependencies.preferredAccount !== "auto"
     ? dependencies.preferredAccount
     : undefined;
-  let state: CacheState = { byProfile: new Map(), fileByProfile: new Map(), failure: undefined };
+  let state: CacheState = { byProfile: new Map(), fileByProfile: new Map(), byUid: new Map(), fileByUid: new Map(), byAccount: new Map(), fileByAccount: new Map(), failure: undefined };
   /** 锁定文件缺失的 fallback 告警只记一次，文件恢复存在后重新布防。 */
   let accountFallbackWarned = false;
   let identity = "";
@@ -455,9 +616,6 @@ export function createCodebuddyCredentialCache(
   }
 
   function schedule(): void {
-    // 锁定账号时 state 不参与选取（锁定命中的直读文件，缺失 fallback 也会在选取前
-    // 同步重扫），watch 触发的提前全扫只是无效读取，直接跳过。
-    if (lockedAccount !== undefined) return;
     clearTimeout(debounce);
     // 写入方（CLI 刷新）通常先写临时文件再 rename，短去抖合并同一轮事件。
     debounce = setTimeout(() => {
@@ -489,8 +647,8 @@ export function createCodebuddyCredentialCache(
       && [...state.byProfile].every(([profile, credential]) => previous.get(profile)?.accessToken === credential.accessToken);
   }
 
-  // 锁定账号时跳过初始全扫：选取路径直读该文件，首次缺失 fallback 才需要扫描结果。
-  if (lockedAccount === undefined) applyScan(new Map());
+  // uid 锁定与 auto 都依赖全扫结果；目录内只有少量几 KB 的 .info，初始扫描成本可忽略。
+  applyScan(new Map());
   reconcileWatcher();
 
   function expired(credential: CodebuddyCredential): boolean {
@@ -539,30 +697,44 @@ export function createCodebuddyCredentialCache(
     async forProduct(product, region) {
       if (closed) throw new CodebuddyCredentialError("CodeBuddy 凭据监听已关闭，请重启网关");
       reconcileWatcher();
-      // 锁定账号（codebuddyAccount 为具体 .info 文件名）：存在即只读该文件，跳过全扫；
-      // 文件缺失时记一次 fallback 告警并回落 auto，绝不改写配置。
-      if (lockedAccount !== undefined) {
-        const file = path.join(directory, lockedAccount);
-        if (existsSync(file)) {
-          accountFallbackWarned = false;
-          // 损坏/符号链接等读取失败直接抛出（readCredential 已包成带指引的错误）。
-          const credential = readCredential(file);
-          dependencies.onCredentialRead?.();
-          const credentialRegion = profileRegion(credential.profile);
-          if (region !== undefined && region !== credentialRegion) {
-            throw new CodebuddyCredentialError(`没有可用的 ${region === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
+      /** 锁定凭据的地域/产品适配：地域不匹配直接报错（不跨地域回退），接口产品
+       * 不一致时沿用同账号 token 只切换端点（对齐 auto 的同地域产品回退）。 */
+      const lockedCredential = (credential: CodebuddyCredential): CodebuddyCredential => {
+        const credentialRegion = profileRegion(credential.profile);
+        if (region !== undefined && region !== credentialRegion) {
+          throw new CodebuddyCredentialError(`没有可用的 ${region === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
+        }
+        const wanted = `${credentialRegion}-${product}` as CodebuddyProfile;
+        const adapted = credential.profile === wanted
+          ? credential
+          : { ...credential, profile: wanted, endpoint: codebuddyEndpoint(wanted) };
+        if (expired(adapted)) throw expiryError();
+        return adapted;
+      };
+      // 锁定账号（`profile:uid` 钉住地域/产品；裸 uid 或换算后的历史文件名值跟随
+      // 该账号最近刷新的登录）：同键取最新，文件轮换（CLI 刷新另写新文件）后自动
+      // 跟随；账号/地域不存在时告警一次并回落 auto，绝不改写配置。
+      if (lockedValue !== undefined) {
+        const selector = lockedAccountSelector(directory, lockedValue, existsSync);
+        if (selector !== undefined) {
+          applyScan(state.byProfile);
+          const credential = selector.profile !== undefined
+            ? state.byAccount.get(`${selector.uid}::${selector.profile}`)
+            : state.byUid.get(selector.uid);
+          if (credential !== undefined) {
+            accountFallbackWarned = false;
+            return lockedCredential(credential);
           }
-          // 接口产品不一致时沿用同账号的 token，只切换端点与身份（对齐 auto 的同地域产品回退）。
-          const wanted = `${credentialRegion}-${product}` as CodebuddyProfile;
-          const adapted = credential.profile === wanted
-            ? credential
-            : { ...credential, profile: wanted, endpoint: codebuddyEndpoint(wanted) };
-          if (expired(adapted)) throw expiryError();
-          return adapted;
+        } else if (lockedValue.endsWith(".info") && existsSync(path.join(directory, lockedValue))) {
+          // 无 uid 的旧客户端登录：无法归并到账号，保持文件级直读；
+          // 损坏/符号链接等读取失败直接抛出（readCredential 已包成带指引的错误）。
+          accountFallbackWarned = false;
+          dependencies.onCredentialRead?.();
+          return lockedCredential(readCredential(path.join(directory, lockedValue)));
         }
         if (!accountFallbackWarned) {
           accountFallbackWarned = true;
-          (dependencies.onAccountFallback ?? defaultAccountFallbackWarning)(lockedAccount);
+          (dependencies.onAccountFallback ?? defaultAccountFallbackWarning)(lockedValue);
         }
       }
       // auto 路径（含锁定文件缺失的运行期 fallback）。

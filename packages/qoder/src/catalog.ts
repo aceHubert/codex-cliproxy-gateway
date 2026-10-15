@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { getCodexModelSnapshot } from "@agent-proxy/models";
+import { getCodexBaselineEntry } from "@agent-proxy/models";
 import { invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
 import { QODER_AGENT_SYSTEM_PROMPT } from "./transport.ts";
 import { atomicWrite } from "@agent-proxy/plugin-api";
@@ -144,10 +144,9 @@ export function parseQoderCatalogData(value: unknown): QoderCatalogModel[] {
   return models;
 }
 
-/** Codex 行为字段使用现有快照基底，模型名与能力仅由当前账号目录决定；系统提示词在合成时替换为 Qoder CLI 内置提示词并随缓存落盘。 */
+/** Codex 行为字段使用快照基底（优先 gpt-5.5，缺失回退首条），模型名与能力仅由当前账号目录决定；系统提示词在合成时替换为 Qoder CLI 内置提示词并随缓存落盘。 */
 export function buildQoderCatalog(models: QoderCatalogModel[], region: QoderRegion = "intl"): ModelCatalog {
-  const BASE = getCodexModelSnapshot().models.find((entry) => entry.slug === "gpt-5.5");
-  if (!BASE) throw new Error("Codex 模型快照缺少 gpt-5.5 基底条目");
+  const BASE = getCodexBaselineEntry();
   const prefix = region === "cn" ? QODER_CN_PREFIX : QODER_INTL_PREFIX;
   const display = region === "cn" ? "Qoder-CN" : "Qoder-INTL";
   const label = QODER_REGION_LABELS[region];

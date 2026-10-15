@@ -135,9 +135,9 @@
       "default": true
     },
     "codebuddyAccount": {
-      "description": "CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 .info 文件名时锁定该账号登录（文件缺失时运行期回退 auto，不改写配置）；\"auto\" 或缺省按最近刷新的登录自动选取，并随客户端切换账号自动跟随。切换入口：codebuddy --switch。历史哨兵 \"default\" 读取时自动改写为 \"auto\"。",
+      "description": "CodeBuddy/WorkBuddy 凭据选择：值为 profile 作用域的账号 uid（如 cn-cli:<uid>）时锁定该账号在该地域/产品下的最新登录（CLI 刷新换文件后无需重选，地域钉住）；值为裸 uid 时跟随该账号最近刷新的登录；\"auto\" 或缺省按最近刷新的登录自动选取并随客户端切换跟随。历史 .info 文件名值读取时按同账号同 profile 最新登录解析。账号不存在时运行期回退 auto，不改写配置。切换入口：Web UI 配置页下拉或 codebuddy --switch。",
       "type": "string",
-      "pattern": "^(auto|[^/\\\\]+\\.info)$"
+      "pattern": "^(auto|[^/\\\\]+)$"
     },
     "codebuddyRegion": {
       "description": "(deprecated) 已由 codebuddyAccount 取代；读取时旧值自动迁移为 codebuddyAccount=\"auto\"，命令前置同步会移除该键。",

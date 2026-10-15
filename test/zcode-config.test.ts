@@ -67,14 +67,14 @@ test("CodeBuddy 账号 Schema：codebuddyAccount 为字符串，codebuddyRegion 
   assert.equal(schema.properties.codebuddyAccount.type, "string");
   assert.match(schema.properties.codebuddyAccount.description, /codebuddy --switch/);
   assert.equal(schema.properties.codebuddyRegion.deprecated, true);
-  // 合法形状不产生软告警；带路径或非字符串的账号值触发告警。
+  // 合法形状不产生软告警；账号 uid、历史 .info 文件名与带路径的账号值触发告警
+  // （uid 是任意无分隔符 token，schema 层不再区分哨兵——"default" 由读取归一
+  // 改写为 "auto"）。
   const config = validConfig(resolvePaths({ HOME: "/tmp/codex-codebuddy-schema" }));
   assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }), []);
+  assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "uid-1234" }), []);
   assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "auto" }), []);
-  // 历史哨兵 default 已改名：文件里残留的旧值由读取归一改写，schema 本身不再接受。
-  for (const bad of ["default", "../escape.info"]) {
-    assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: bad }), ["$.codebuddyAccount has an invalid format"], bad);
-  }
+  assert.deepEqual(gatewayConfigWarnings({ ...config, codebuddyAccount: "../escape.info" }), ["$.codebuddyAccount has an invalid format"]);
 });
 
 test("旧配置读取只提取合法 enabled，并优先保留新字段", () => {

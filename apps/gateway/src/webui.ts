@@ -22,7 +22,13 @@ import { instanceMarker, realPathOrResolve, resolvePaths, runWithInstancePaths }
 import { isRequestLogName, requestLogDir, safeLogPath } from "./request-log.ts";
 import { atomicWrite, readRootTomlString } from "./toml.ts";
 import { getActiveAccount, withInstanceContext as withCodebuddyInstanceContext } from "@agent-proxy/codebuddy";
-import { codebuddyCredentialsPresent, defaultAuthDirectory } from "@agent-proxy/codebuddy/credentials";
+import {
+  canonicalCodebuddyAccountValue,
+  codebuddyCredentialsPresent,
+  defaultAuthDirectory,
+  listCodebuddyAccounts,
+  resolveCodebuddyAccountFile,
+} from "@agent-proxy/codebuddy/credentials";
 import { agyCredentialsPresent, defaultAgyCredentialFile } from "@agent-proxy/agy/credentials";
 import { getActiveSources, withInstanceContext as withQoderInstanceContext } from "@agent-proxy/qoder";
 import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
@@ -53,9 +59,9 @@ export { webUiPort } from "./ui-port.ts";
  * - /ui/api/* 一律要求 x-ccp-ui-token 匹配实例目录中的 ui-token（0600）。
  *
  * 配置查询对 provider 侧只做本地存在性探测（zcodeConfigPresent /
- * codebuddyCredentialsPresent / qoderCredentialsPresent）与 CodeBuddy 账号标签的受限
- * 解析（codebuddyAccountLabel）：探测只看文件是否存在；标签解析按网关同一选取规则
- * 解析出实际命中的 .info 后只提取非敏感的账号标识（昵称、邮箱、uid）与地域，
+ * codebuddyCredentialsPresent / qoderCredentialsPresent）与 CodeBuddy 账号的受限解析
+ * （codebuddyAccountLabel / codebuddyAccounts）：探测只看文件是否存在；标签与账号
+ * 列表按网关同一选取规则解析，只含非敏感的账号标识（昵称、邮箱、uid）与地域，
  * token 绝不进入 UI 响应。
  */
 
@@ -418,6 +424,11 @@ function configResponse(
     getConfig: () => live,
     getHome: () => paths.home,
   }, () => getActiveAccount());
+  // 账号选择列表：auto 当前命中的登录标记 autoResolved（前端折叠进 auto 选项，与
+  // CLI --switch 菜单同一语义）；只含文件名与非敏感展示标签，token 绝不进响应。
+  const autoResolvedFile = resolveCodebuddyAccountFile(codebuddyAuthDir, "auto");
+  const codebuddyAccounts = listCodebuddyAccounts(codebuddyAuthDir)
+    .map((entry) => ({ ...entry, autoResolved: entry.file === autoResolvedFile }));
   const qoderSources = withQoderInstanceContext({
     getHome: () => paths.home,
     getSourceOptions: () => ({
@@ -438,6 +449,10 @@ function configResponse(
     editable: {
       zcode: agentConfigEnabled(live, "zcode"),
       codebuddy: agentConfigEnabled(live, "codebuddy"),
+      // 规范化后的凭据选择值："auto" 或账号 uid（历史 .info 文件名值换算为同账号
+      // uid，文件缺失/无 uid 保留原值）。前端 select 绑定与脏比较均以此为准，与
+      // 运行期「同账号取最新登录」同源；提交写回由 POST 的列表校验把关。
+      codebuddyAccount: canonicalCodebuddyAccountValue(codebuddyAuthDir, live.codebuddyAccount),
       qoder: agentConfigEnabled(live, "qoder"),
       agy: agentConfigEnabled(live, "agy"),
       opencodeZen: agentConfigEnabled(live, "opencodeZen"),
@@ -452,14 +467,16 @@ function configResponse(
       excludedOther,
     },
     // 本机 provider 配置的存在性探测：只返回布尔值，不读取也不解析凭据内容，
-    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。唯一例外是
-    // codebuddyAccountLabel：按网关同一选取规则实时解析当前实际命中的登录，
-    // 只提取非敏感的账号标识（昵称、邮箱、uid）与地域（auto 与锁定文件共用同一
-    // 流程），token 绝不进入响应；账号切换只在 CLI，UI 不提供也不接受该字段的写入。
+    // 前端据此显隐对应开关（开关已开启时仍显示，便于关回）。例外是 CodeBuddy 的
+    // 账号信息：codebuddyAccountLabel 按网关同一选取规则实时解析当前实际命中的登录，
+    // codebuddyAccounts 列出认证目录内全部登录供下拉切换——两者都只含非敏感的账号
+    // 标识（昵称、邮箱、uid）与地域（auto 与锁定文件共用同一流程），token 绝不进入
+    // 响应。
     detected: {
       zcode: zcodeConfigPresent(providerDeps?.zcodeHome ?? path.join(paths.home, ".zcode")),
       codebuddy: codebuddyCredentialsPresent(codebuddyAuthDir),
       codebuddyAccountLabel: accountLabel ?? null,
+      codebuddyAccounts,
       // 当前实际可加载任一地域凭据即显示开关；检测只看文件存在性，不读内容。
       qoder: qoderSources.length > 0,
       qoderSources,
@@ -694,6 +711,18 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
     try {
       const managesService = ctx.instanceOnly !== true;
       const { selectedModels, ...configPatch } = patch as Record<string, unknown>;
+      // codebuddyAccount 的取值必须对应当前登录列表中的账号（或 "auto"）：拼写
+      // 错误或已下线账号直接拒绝，不静默写成永远回退 auto 的死值。历史 .info
+      // 文件名不再接受（锁定语义已是账号 uid，旧值经 GET 规范化自然收敛）。
+      if (typeof configPatch.codebuddyAccount === "string" && configPatch.codebuddyAccount !== "auto") {
+        const authDir = ctx.providerDeps?.codebuddyAuthDir ?? defaultAuthDirectory(ctx.paths.home);
+        const listed = new Set(listCodebuddyAccounts(authDir)
+          .filter((entry) => !entry.broken)
+          .map((entry) => entry.value));
+        if (!listed.has(configPatch.codebuddyAccount)) {
+          return badRequest('codebuddyAccount expects "auto" or a login currently listed in the account selector');
+        }
+      }
       const current = readGatewayConfigFile(ctx.paths.gatewayConfig);
       const prepared = Object.keys(configPatch).length
         ? applyWebUiConfigPatch(ctx.paths, configPatch, managesService, { write: false })
@@ -723,8 +752,11 @@ async function handleWebUiRequestCore(request: Request, config: GatewayConfig, c
         next.selectedModels = selection.ordered;
       }
       const structural = applied.some((change) => change.field !== "excludedModels");
+      // codebuddyAccount 与 excludedModels 同级视为模型变更：切换账号可能改变本地适配器
+      // 可用模型（地域/产品不同），须重建目录并失效缓存（CLI --switch 即 invalidateModels）。
       const modelsChanged = selection !== undefined || applied.some((change) =>
         change.field === "excludedModels"
+        || change.field === "codebuddyAccount"
         || (next.upstreamOnly === true && ["zcode", "codebuddy", "qoder", "agy", "opencodeZen"].includes(change.field)));
       const restarting = structural && managesService && fs.existsSync(ctx.paths.launchAgent);
       if (restarting) {

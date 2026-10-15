@@ -550,13 +550,14 @@ test("validateCodebuddyConfig：环回与账号约束，过时 prefix 不影响�
   validateCodebuddyConfig({ ...base, codebuddy: true });
   validateConfiguredPlugins({ ...base, codebuddy: false, host: "0.0.0.0" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "auto" });
+  validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "uid-1234" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "Tencent-Cloud.coding-copilot.info" });
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0" }), /环回/);
   for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy-cn/", "workbuddy-cn/", "codebuddy-intl/", "workbuddy-intl/"]) {
     assert.doesNotThrow(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), prefix);
   }
   assert.throws(() => validateConfiguredPlugins({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
-  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: "us" } as unknown as GatewayConfig), /codebuddyAccount/);
+  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: "../escape.info" } as unknown as GatewayConfig), /codebuddyAccount/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: 42 } as unknown as GatewayConfig), /codebuddyAccount/);
   // 旧 codebuddyRegion 已过时：不再是校验或分派依据（读取路径会迁移为 codebuddyAccount）。
@@ -687,16 +688,16 @@ test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账
     writeLogin("beta.info", "Beta", 5_000);
     const pick = (keys: SelectKey[]) =>
       codebuddyCommand({ interactive: true, keySource: scriptedKeys(keys), authDirectory: authDir });
-    // auto 命中 beta → 菜单 = auto, alpha；↓ + Enter 锁定 alpha。
+    // auto 命中 beta → 菜单 = auto, alpha；↓ + Enter 锁定 alpha（锁定值 = 账号 uid）。
     await pick(["down", "enter"]);
-    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "alpha.info");
-    assert.equal((JSON.parse(fs.readFileSync(stateFile, "utf8")) as Json).config.codebuddyAccount, "alpha.info", "state.config 同步");
-    assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddyAccount: null -> "alpha\.info"/);
+    assert.equal((JSON.parse(fs.readFileSync(gatewayConfig, "utf8")) as Json).codebuddyAccount, "intl-cli:uid-Alpha");
+    assert.equal((JSON.parse(fs.readFileSync(stateFile, "utf8")) as Json).config.codebuddyAccount, "intl-cli:uid-Alpha", "state.config 同步");
+    assert.match(fs.readFileSync(path.join(runtimeHome, "gateway.log"), "utf8"), /codebuddyAccount: null -> "intl-cli:uid-Alpha"/);
 
     printed.length = 0;
     await runCli(["config"]);
     const accountStatus = JSON.parse(printed.join("\n")) as Json;
-    assert.equal(accountStatus.codebuddyAccount, "alpha.info");
+    assert.equal(accountStatus.codebuddyAccount, "intl-cli:uid-Alpha");
 
     // 首项 Enter 切回 auto；取消不改配置。
     await pick(["enter"]);
@@ -767,9 +768,9 @@ test("promptCodebuddyAccountSelection：箭头选择/取消；auto 置顶且不�
     fs.writeFileSync(path.join(directory, "broken.info"), "{ not json");
 
     assert.equal(await pick(["enter"]), "auto", "首项是 auto");
-    assert.equal(await pick(["down", "enter"]), "alpha.info");
+    assert.equal(await pick(["down", "enter"]), "intl-cli:uid-alpha", "选中项的值是 profile 作用域账号值");
     // broken 不可选且到底不环绕：第二次 down 仍停在 alpha。
-    assert.equal(await pick(["down", "down", "enter"]), "alpha.info");
+    assert.equal(await pick(["down", "down", "enter"]), "intl-cli:uid-alpha");
     assert.equal(await pick(["up", "enter"]), "auto", "到顶不环绕");
     assert.equal(await pick(["other", "enter"]), "auto", "无关按键忽略");
     assert.equal(await pick(["down", "cancel"]), undefined, "取消不返回任何选择");

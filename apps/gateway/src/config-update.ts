@@ -8,6 +8,7 @@ import { logConfigChange, type ConfigChange } from "./process-log.ts";
 import { requestLogDir } from "./request-log.ts";
 import { validateConfiguredPlugins } from "./plugin-config.ts";
 import { isZcodeModel, zcodeStaticModelPrefixes } from "@agent-proxy/zcode/catalog";
+import { isCodebuddyAccountValue } from "@agent-proxy/codebuddy/credentials";
 import { CODEBUDDY_PREFIX, isCodebuddyModel, WORKBUDDY_PREFIX, codebuddyModelPrefixes } from "@agent-proxy/codebuddy/catalog";
 import { isQoderModel, QODER_CN_PREFIX, QODER_INTL_PREFIX } from "@agent-proxy/qoder/catalog";
 import { isAgyModel } from "@agent-proxy/agy";
@@ -67,12 +68,15 @@ function writeGatewayConfigFile(file: string, value: GatewayConfig): void {
 }
 
 /** Web UI 表单可提交的字段；数值/大小字段按字符串提交，与服务端 CLI 解析规则一致。
- * 注意：CodeBuddy 账号选择只在 CLI（codebuddy --switch / config --codebuddy），UI 只读。
+ * 注意：CodeBuddy 账号选择（codebuddyAccount，"auto" / `profile:uid` / 裸 uid / 历史
+ * .info 文件名）在 Web UI 下拉与 CLI（codebuddy --switch）两个入口写同一字段，
+ * 共用同一形状校验与回退语义。
  * 排除模型：UI 按兼容端分组提交（excludedModelGroups，条目不带前缀，写盘时补全），
  * excludedModels 仍接受完整规则数组（CLI/编程式写入共用严格校验）。 */
 export interface WebUiConfigPatch {
   zcode?: unknown;
   codebuddy?: unknown;
+  codebuddyAccount?: unknown;
   qoder?: unknown;
   agy?: unknown;
   opencodeZen?: unknown;
@@ -86,6 +90,7 @@ export interface WebUiConfigPatch {
 const SUPPORTED_PATCH_FIELDS = new Set([
   "zcode",
   "codebuddy",
+  "codebuddyAccount",
   "qoder",
   "agy",
   "opencodeZen",
@@ -411,6 +416,21 @@ export function applyWebUiConfigPatch(
     if (typeof patch.codebuddy !== "boolean") throw new Error("codebuddy expects a boolean");
     if (config.codebuddy !== patch.codebuddy) change("codebuddy", patch.codebuddy);
     config.codebuddy = patch.codebuddy;
+  }
+  if (patch.codebuddyAccount !== undefined) {
+    // 形状校验与 CLI --switch 同源（isCodebuddyAccountValue）：接受 "auto"、账号
+    // uid 或历史 .info 文件名（运行期按同账号最新登录解析），拒绝路径注入。具体值
+    // 是否在登录列表中由 webui 路由按 provider 探测拒绝；不存在时运行期回退 auto
+    // 兜底（告警一次、不改配置），不锁死用户。
+    if (typeof patch.codebuddyAccount !== "string" || !isCodebuddyAccountValue(patch.codebuddyAccount)) {
+      throw new Error('codebuddyAccount expects "auto", an account uid, or a .info file name from the CodeBuddy auth directory');
+    }
+    // 归一比较：未设置与 "auto" 同值，语义相同不写盘（避免无变更地把 "auto" 显式
+    // 写进文件）；产生变更时 "auto" 显式落值，与 CLI --switch 的落盘行为一致。
+    if ((config.codebuddyAccount ?? "auto") !== patch.codebuddyAccount) {
+      change("codebuddyAccount", patch.codebuddyAccount);
+      config.codebuddyAccount = patch.codebuddyAccount;
+    }
   }
   if (patch.qoder !== undefined) {
     if (typeof patch.qoder !== "boolean") throw new Error("qoder expects a boolean");

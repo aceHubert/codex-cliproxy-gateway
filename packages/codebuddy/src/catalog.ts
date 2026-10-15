@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { atomicWrite } from "@agent-proxy/plugin-api";
-import { getCodexModelSnapshot } from "@agent-proxy/models";
+import { codexBaselineEntry, getCodexModelSnapshot } from "@agent-proxy/models";
 import { invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
@@ -135,7 +135,6 @@ export function displayNameWithCredits(name: string, credits: unknown, profile: 
 }
 
 const codexSnapshot = getCodexModelSnapshot;
-const BASE_SLUG = "gpt-5.5";
 const CATALOG_TTL_MS = 6 * 60 * 60 * 1000;
 /** 上游失败后的冷却窗口：请求驱动刷新在此期间复用 last-good，避免持续重打故障端点。 */
 const CATALOG_FAILURE_COOLDOWN_MS = 30 * 1000;
@@ -234,8 +233,8 @@ export function parseCodebuddyConfigData(data: unknown, product: "cli" | "workbu
 }
 
 function cloneCodexBase(id: string, priority: number): ModelEntry {
-  const base = codexSnapshot().models.find((model) => model.slug === BASE_SLUG);
-  if (!base) throw new CodebuddyCatalogError(`codex_client_models 快照缺少 ${BASE_SLUG} 基底条目`);
+  // 基底优先 gpt-5.5，缺失回退快照首条（CLIProxyAPI e240bd8 同款回退）。
+  const base = codexBaselineEntry(codexSnapshot().models);
   const model = structuredClone(base);
   model.slug = id;
   model.display_name = id;
@@ -243,7 +242,7 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
   // 对齐 synthesizeModelEntry 的兜底行为：解除基底条目的最低客户端版本限制。
   delete model.minimal_client_version;
   // CodeBuddy 上游只有 HTTP 接口，网关对它的 Responses WebSocket 升级一律回 426；
-  // 基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
+  // 旧基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
   model.prefer_websockets = false;
   model.priority = priority;
   // 系统提示词在合成时替换（含 model_messages 模板），随目录缓存落盘；workbuddy 条目沿用同一份主提示词。

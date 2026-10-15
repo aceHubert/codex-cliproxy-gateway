@@ -7,7 +7,7 @@ import {
   CodebuddyCredentialError,
   createCodebuddyCredentialCache,
   defaultAuthDirectory,
-  isCodebuddyAccountName,
+  isCodebuddyAccountValue,
 } from "./credentials.ts";
 import type { CodebuddyCredentialCache } from "./credentials.ts";
 import {
@@ -31,8 +31,9 @@ import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/p
 declare module "@agent-proxy/plugin-api" {
   interface AgentConfig {
     /**
-     * CodeBuddy/WorkBuddy 凭据选择：值为认证目录内的 `.info` 文件名时锁定该账号登录
-     * （文件缺失时运行期回退 auto，不改写配置）；值为 "auto" 或缺省时按最近刷新的
+     * CodeBuddy/WorkBuddy 凭据选择：值为账号 uid（`profile:uid` 钉住地域、裸 uid
+     * 跟随同账号最新登录）或认证目录内的历史 `.info` 文件名时锁定该账号登录（锁定
+     * 值运行期不可用时回退 auto，不改写配置）；值为 "auto" 或缺省时按最近刷新的
      * 登录自动选取并随客户端切换跟随。展示标签（昵称 <邮箱> / 地域）由 Web UI 实时
      * 解析，不落配置。历史哨兵 "default" 读取时归一为 "auto"。
      */
@@ -71,12 +72,13 @@ export interface CodebuddyDependencies {
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 16 * 60 * 1000;
 
 export function validateCodebuddyAccount(account: unknown): void {
-  if (account !== undefined && (typeof account !== "string" || !isCodebuddyAccountName(account))) {
-    throw new Error("codebuddyAccount 必须是认证目录内的 .info 文件名或 auto");
+  if (account !== undefined && (typeof account !== "string" || !isCodebuddyAccountValue(account))) {
+    throw new Error("codebuddyAccount 必须是账号 uid、认证目录内的 .info 文件名或 auto");
   }
 }
 
 export function validateCodebuddyConfig(config: AgentConfig): void {
+  if (config.codebuddy !== undefined && typeof config.codebuddy !== "boolean") throw new Error("codebuddy 必须为 boolean");
   validateCodebuddyAccount(config.codebuddyAccount);
   const host = config.host;
   if (!(host === "localhost" || host === "::1" || host === "[::1]" || (isIP(host) === 4 && host.startsWith("127.")))) {

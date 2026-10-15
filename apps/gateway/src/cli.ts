@@ -1824,7 +1824,8 @@ interface AccountMenuItem {
  * 箭头菜单选择 CodeBuddy/WorkBuddy 账号（顶层 `codebuddy --switch` 的交互部分；
  * config 只管开关）。auto 置顶并标出它此刻命中的登录；该登录不再单独列出
  * （选它与选 auto 等价，而 auto 还能随客户端切换账号自动跟随）。返回 `"auto"` 或
- * 选中的 `.info` 文件名；Esc/q/Ctrl-C/EOF 取消返回 undefined，绝不写配置。
+ * 选中的账号选择值（`profile:uid`，无 uid 登录为文件名）；Esc/q/Ctrl-C/EOF 取消
+ * 返回 undefined，绝不写配置。
  * 非交互终端抛错；不做选择时网关缺省即 auto。
  */
 export async function promptCodebuddyAccountSelection(
@@ -1854,7 +1855,9 @@ export async function promptCodebuddyAccountSelection(
     ...entries
       .filter((entry) => entry.file !== resolved)
       .map((entry) => ({
-        value: entry.file,
+        // 锁定值 = profile 作用域的账号值（`cn-cli:<uid>`）：同账号跨地域多行时值
+        // 唯一且可钉住地域；无 uid 的旧客户端登录退回文件名。
+        value: entry.value,
         label: entry.broken ? `${entry.label} (unusable)` : entry.label,
         selectable: !entry.broken,
       })),

@@ -257,6 +257,21 @@ test("网关未运行时保留通知且不启动服务", async () => {
   } finally { f.cleanup(); }
 });
 
+test("Bun fetch 的连接拒绝码（ConnectionRefused）同样按未运行处理，不误判健康失败", async () => {
+  const f = fixture();
+  try {
+    // Bun 1.3.x 的 fetch 连接被拒抛 Error("Unable to connect...")，错误码为
+    // "ConnectionRefused"、无 cause —— 重启窗口期（kickstart 杀旧进程、新进程
+    // 未绑定端口）必经此形状，不得按「无法确认网关健康状态」硬失败回滚保存。
+    const loaded = await reloadGatewayModels(f.paths, f.config, {
+      fetch: (async () => { throw Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), { code: "ConnectionRefused" }); }) as ModelReloadFetch,
+    });
+    assert.equal(loaded.loaded, false);
+    assert.equal(JSON.parse(fs.readFileSync(modelReloadRequestFile(f.paths), "utf8")).revision, loaded.revision);
+    assert.equal(fs.existsSync(modelReloadResultFile(f.paths)), false);
+  } finally { f.cleanup(); }
+});
+
 test("模式切换等待新网关，旧模式的成功重载结果不能提前确认就绪", async () => {
   const f = fixture();
   let calls = 0;

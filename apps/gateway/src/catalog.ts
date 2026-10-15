@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { codexBaselineEntry, CODEX_BASELINE_SLUG } from "@agent-proxy/models";
 import { atomicWrite } from "./toml.ts";
 import type { ModelOverrideRule } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry, UpstreamType } from "./types.ts";
@@ -195,12 +196,6 @@ export async function fetchCliProxyCatalog(
 }
 
 /**
- * 未知模型合成时使用的基底条目（CLIProxyAPI 同款做法：克隆 Codex 目录快照中的
- * gpt-5.5 条目，仅替换标识字段），保证字段集与真实 Codex catalog 完全一致。
- */
-export const NEWAPI_FALLBACK_BASE_SLUG = "gpt-5.5";
-
-/**
  * 校验 Codex 目录格式的快照（{"models":[...]}），用于上游目录和模型包的 Codex 快照。
  */
 export function parseCodexCatalog(value: unknown): ModelCatalog {
@@ -255,8 +250,8 @@ const EMPTY_RULES: ModelOverrideRule[] = [];
  *    models.json 同构）规则命中 → 极简基底 + 官方条目字段，不继承任何 GPT 专属配置；
  * 2. Codex 目录快照（packages/models/codex_client_models.json）精确命中 → 沿用真实条目；
  * 3. 网关 models.json 覆盖规则命中 → 极简基底 + 规则字段；
- * 4. 均未命中 → 克隆 {@link NEWAPI_FALLBACK_BASE_SLUG} 条目并替换标识字段、解除最小
- *    客户端版本限制（CLIProxyAPI 的兜底做法）。
+ * 4. 均未命中 → 克隆 {@link CODEX_BASELINE_SLUG} 条目并替换标识字段、解除最小
+ *    客户端版本限制（CLIProxyAPI 的兜底做法）；该条目缺失时回退快照首条。
  * 大小写不敏感匹配；priority 一律按序重排；syncCatalog 落盘时覆盖规则仍会再套用一遍。
  */
 export function synthesizeModelEntry(
@@ -265,7 +260,7 @@ export function synthesizeModelEntry(
   snapshot: ModelCatalog,
   vendors: ModelOverrideRule[] = EMPTY_RULES,
   overrides: ModelOverrideRule[] = EMPTY_RULES,
-  baseSlug = NEWAPI_FALLBACK_BASE_SLUG,
+  baseSlug: string = CODEX_BASELINE_SLUG,
 ): ModelEntry {
   const vendorRule = findMatchingRule(id, vendors);
   if (vendorRule) {
@@ -281,16 +276,16 @@ export function synthesizeModelEntry(
   if (findMatchingRule(id, overrides)) {
     return applyModelOverrides(minimalModelEntry(id, priority), overrides);
   }
-  const base = snapshot.models.find((model) => model.slug === baseSlug);
-  if (!base) {
-    throw new Error(`codex_client_models snapshot does not contain the "${baseSlug}" base entry`);
-  }
+  const base = codexBaselineEntry(snapshot.models, baseSlug);
   const model = structuredClone(base);
   model.slug = id;
   model.display_name = id;
   model.description = `OpenAI-compatible model "${id}" served by the configured upstream.`;
   delete model.minimal_client_version;
   model.priority = priority;
+  // new-api 上游只有 HTTP 接口，未知模型不随基底声明 WS 优先（旧 gpt-5.5 基底的
+  // true 会诱导 Codex 先试探 WS 再降级）；显式固化，快照字段集换代不再静默翻转此行为。
+  model.prefer_websockets = false;
   return model;
 }
 

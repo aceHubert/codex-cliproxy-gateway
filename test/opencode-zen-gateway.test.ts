@@ -11,7 +11,7 @@ import {
   OPENCODE_ZEN_CLIENT_USER_AGENT,
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
 } from "@agent-proxy/opencode-zen/fingerprint";
-import { getCodexModelSnapshot } from "@agent-proxy/models";
+import { getCodexBaselineEntry } from "@agent-proxy/models";
 import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
 import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
 import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
@@ -1020,8 +1020,7 @@ test("目录条目提示词回落：保留官方 Codex 提示词，不再替换�
     const raw = await response.json() as Json;
     const zen = (raw.models as Json[]).filter((entry) => String(entry.slug).startsWith("opencode-zen/"));
     assert.ok(zen.length > 0, "Codex 形状目录应含 zen 条目");
-    const base = getCodexModelSnapshot().models.find((entry) => entry.slug === "gpt-5.5");
-    assert.ok(base, "Codex 模型快照缺少 gpt-5.5 基底条目");
+    const base = getCodexBaselineEntry();
     for (const entry of zen) {
       assert.equal(entry.base_instructions, base.base_instructions, `${entry.slug} 保留快照基底官方提示词`);
       assert.notEqual(entry.base_instructions, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, `${entry.slug} 不再下发 OpenCode 提示词`);
