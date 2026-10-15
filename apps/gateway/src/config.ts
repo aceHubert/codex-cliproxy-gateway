@@ -36,7 +36,7 @@ interface JsonSchema {
 }
 
 const CONFIG_SCHEMA = JSON.parse(fs.readFileSync(
-  path.resolve(import.meta.dir, "../schemas/gateway-config.schema.json"),
+  path.resolve(import.meta.dir, "../config.schema.json"),
   "utf8",
 )) as JsonSchema;
 const PACKAGE_JSON = JSON.parse(fs.readFileSync(
@@ -44,9 +44,15 @@ const PACKAGE_JSON = JSON.parse(fs.readFileSync(
   "utf8",
 )) as { version?: unknown };
 
+const packageVersion = PACKAGE_JSON.version;
+// 版本缺失或非法时回落 "latest"：与 Release 资产口径一致，引用方至少解析到最新版而不是失联。
+export const GATEWAY_CONFIG_VERSION =
+  typeof packageVersion === "string" && /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(packageVersion)
+    ? packageVersion
+    : "latest";
+// 固定指向最新 Release 的 schema 资产：地址稳定可解析，install 时覆盖进用户配置。
 export const GATEWAY_CONFIG_SCHEMA_URL =
-  "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/schemas/gateway-config.schema.json";
-export const GATEWAY_CONFIG_VERSION = String(PACKAGE_JSON.version ?? "unknown");
+  "https://github.com/aceHubert/codex-cliproxy-gateway/releases/latest/download/config.schema.json";
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);

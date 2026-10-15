@@ -40,7 +40,7 @@ test("Qoder 配置只使用可选布尔开关，发布 schema 声明默认开启
     assert.deepEqual(gatewayConfigWarnings({ ...config, qoder }), ["$.qoder should be boolean"]);
   }
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("qoder"), false);
   assert.equal(schema.properties.qoder.type, "boolean");

@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import bundledModelOverrides from "../models.json";
 import {
   compileModelOverrides,
   fetchUpstreamCatalog,
@@ -25,7 +24,7 @@ import type { GatewayConfig, ModelCatalog, ResolvedPaths, UpstreamType } from ".
 /**
  * newapi 目录合成的两份内联数据源（均随构建打进 dist/index.js）：
  * codex_client_models.json 是 OpenAI 官方模型快照，vendor_models.json 是官方支持 Codex 的
- * 厂商预设（z.ai/deepseek/moonshotai 分组，与网关 models.json 同构）。惰性编译：
+ * 厂商预设（z.ai/deepseek/moonshotai 分组，与仓库根的 models.json 覆盖文件同构）。惰性编译：
  * cliproxy 上游完全不触碰它们。
  */
 let codexClientModels: ModelCatalog | undefined;
@@ -75,7 +74,7 @@ export function upstreamClientVersion(paths: ResolvedPaths, type: UpstreamType):
 
 /**
  * 解析 models.json 来源（缓存优先，--model-merge-json 传入时强制刷新）并加载覆盖规则。
- * 无缓存时使用构建内联的网关自有规则，不写入运行目录缓存。
+ * 个人覆盖规则不随构建内联：无缓存时不套用任何覆盖，也不写入运行目录缓存。
  * newapi 合成在拉取阶段就要用规则区分已知厂商，所以提前到 fetch 前执行。
  */
 export async function loadModelOverrideRules(
@@ -91,9 +90,7 @@ export async function loadModelOverrideRules(
   );
   return {
     modelsConfigFile,
-    rules: modelsConfigFile === undefined
-      ? compileModelOverrides(bundledModelOverrides, "bundled models.json")
-      : loadModelOverrides(modelsConfigFile),
+    rules: modelsConfigFile === undefined ? [] : loadModelOverrides(modelsConfigFile),
   };
 }
 
@@ -145,7 +142,7 @@ export async function rebuildCatalog(
     catalogFile: configuredCatalogFile(paths, config),
     proxyModels,
     ...(modelsConfigFile === undefined
-      ? { overrides: compileModelOverrides(bundledModelOverrides, "bundled models.json") }
+      ? { overrides: [] }
       : { modelsConfigFile }),
   });
   fs.rmSync(path.join(paths.runtimeHome, "catalog-metadata.json"), { force: true });

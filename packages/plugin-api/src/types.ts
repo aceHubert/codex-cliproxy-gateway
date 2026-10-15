@@ -93,7 +93,7 @@ export interface HostServices<Config extends object = object> {
  * 插件读取的有效配置及扩展入口。
  *
  * agent 开关的判断由网关装配层完成，插件通过模块增强声明专属配置字段。
- * 配置文件的读取与持久化由应用负责，运行时规范由 gateway-config.schema.json 定义。
+ * 配置文件的读取与持久化由应用负责，运行时规范由 config.schema.json 定义。
  */
 export interface AgentConfig {
   configVersion?: string;

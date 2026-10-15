@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/schemas/gateway-config.schema.json",
+  "$id": "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/config.schema.json",
   "title": "codex-cliproxy gateway config",
   "type": "object",
   "required": [

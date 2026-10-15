@@ -41,18 +41,18 @@ test("ZCode 配置为可选布尔值，拒绝对象等非法类型", () => {
   }
 });
 
-test("配置 schema 地址指向网关包内的唯一规范文件", () => {
+test("配置 schema 地址指向最新 Release 资产，$id 保持仓库规范位置", () => {
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
   ));
-  assert.equal(GATEWAY_CONFIG_SCHEMA_URL, "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/schemas/gateway-config.schema.json");
-  assert.equal(schema.$id, GATEWAY_CONFIG_SCHEMA_URL);
+  assert.equal(GATEWAY_CONFIG_SCHEMA_URL, "https://github.com/aceHubert/codex-cliproxy-gateway/releases/latest/download/config.schema.json");
+  assert.equal(schema.$id, "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/config.schema.json");
   assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
 });
 
 test("ZCode 发布的 JSON Schema 声明默认开启且移除旧属性", () => {
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("zcode"), false);
   assert.equal(schema.properties.zcode.type, "boolean");
@@ -62,7 +62,7 @@ test("ZCode 发布的 JSON Schema 声明默认开启且移除旧属性", () => {
 
 test("CodeBuddy 账号 Schema：codebuddyAccount 为字符串，codebuddyRegion 标 deprecated", () => {
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
   ));
   assert.equal(schema.properties.codebuddyAccount.type, "string");
   assert.match(schema.properties.codebuddyAccount.description, /codebuddy --switch/);

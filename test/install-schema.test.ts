@@ -154,6 +154,7 @@ const installTestOptions = { timeout: 60_000, skip: process.platform !== "darwin
 
 for (const [name, schema] of [
   ["旧地址", "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/schemas/gateway-config.schema.json"],
+  ["schemas 目录时代的规范地址", "https://raw.githubusercontent.com/aceHubert/codex-cliproxy-gateway/main/apps/gateway/schemas/gateway-config.schema.json"],
   ["用户自定义地址", "https://custom.invalid/gateway-config.schema.json"],
   ["缺失地址", undefined],
 ] as const) {
