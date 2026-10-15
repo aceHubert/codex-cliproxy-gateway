@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -195,6 +196,44 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
       assert.equal((await adapter.reloadCatalog()).models[0]!.slug, MODEL);
       assert.equal(fetches, 2);
     } finally { release(); adapter.close(); }
+  });
+});
+
+test("Zen 启动刷新强制重拉元数据：重启即手动更新窗口，不受元数据 TTL 限制", TIMEOUT, async () => {
+  await fixture(async ({ config, directory }) => {
+    // 预置「新鲜」磁盘缓存：ids 已含新上线模型，元数据（TTL 内新鲜）缺它的条目——
+    // 若启动刷新不强制重拉元数据，目录会直接复用磁盘元数据，新模型继续无窗口字段。
+    const ids = ["space-bunny-free", "deepseek-v4.1-flash-free"];
+    fs.writeFileSync(path.join(directory, "opencode-zen-metadata.json"), `${JSON.stringify({
+      fetched_at: Date.now(),
+      content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
+      ids,
+      metadata: { fetched_at: Date.now(), models: { "space-bunny-free": { deprecated: false, free: true } } },
+    }, null, 2)}\n`);
+    let catalogFetches = 0;
+    let metadataFetches = 0;
+    const adapter = createOpencodeZenAdapter(config, {
+      cacheDirectory: directory,
+      projectId: "a".repeat(40),
+      fetch: async () => { catalogFetches++; return Response.json({ data: ids.map((id) => ({ id })) }); },
+      fetchMetadata: async () => {
+        metadataFetches++;
+        return { opencode: { models: {
+          "space-bunny-free": { cost: { input: 0, output: 0 }, limit: { context: 1_048_576 } },
+          "deepseek-v4.1-flash-free": { cost: { input: 0, output: 0 }, limit: { context: 200_000 } },
+        } } };
+      },
+      userAgentStore: { current: () => OPENCODE_ZEN_CLIENT_USER_AGENT, refresh: async () => {} },
+      setInterval: (() => ({ unref() {} })) as unknown as typeof setInterval,
+      clearInterval: (() => {}) as typeof clearInterval,
+    });
+    try {
+      const catalog = await adapter.catalog();
+      assert.equal(catalogFetches, 1, "启动强制拉模型列表");
+      assert.equal(metadataFetches, 1, "启动强制重拉元数据（绕过 6 小时 TTL）");
+      const deepseek = catalog.models.find((model) => model.slug === "opencode-zen/deepseek-v4.1-flash-free");
+      assert.equal(deepseek?.context_window, 200_000, "新模型窗口随启动强制刷新就位");
+    } finally { adapter.close(); }
   });
 });
 
