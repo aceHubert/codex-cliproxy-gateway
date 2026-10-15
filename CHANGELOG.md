@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.0 (2026-10-15)
+
+#### :bug: Bug Fix
+* `agy`, `codebuddy`, `models`, `opencode-zen`, `qoder`
+  * [#18](https://github.com/aceHubert/codex-cliproxy-gateway/pull/18) feat(codebuddy): web UI 账号下拉切换与 uid 级账号锁定 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.11.4 (2026-10-14)
 
 #### :bug: Bug Fix
