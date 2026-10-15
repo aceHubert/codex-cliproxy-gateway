@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.12.3 (2026-10-15)
+
+#### :bug: Bug Fix
+* `opencode-zen`
+  * [#20](https://github.com/aceHubert/codex-cliproxy-gateway/pull/20) fix(opencode-zen): 启动刷新强制重拉元数据 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.12.1 (2026-10-15)
 
 #### :rocket: New Feature
