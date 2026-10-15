@@ -40,7 +40,8 @@
     "bun": ">=1.2.0"
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "timeout": 30000
   },
   "license": "MIT",
   "repository": {

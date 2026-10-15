@@ -26,7 +26,8 @@
     "prepack": "bun ../../scripts/verify-package.ts ."
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "timeout": 30000
   },
   "license": "MIT",
   "repository": {
