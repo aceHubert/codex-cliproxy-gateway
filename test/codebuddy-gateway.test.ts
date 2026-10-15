@@ -3,8 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "./host-test.ts";
-import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { codebuddyEnabled, createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
+import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
+import { createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
 import fingerprintData from "@agent-proxy/codebuddy/fingerprint-data.json";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "@agent-proxy/codebuddy/request-context";
 import { CodebuddyCredentialError } from "@agent-proxy/codebuddy/credentials";
@@ -71,11 +73,12 @@ test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求�
 
 test("CodeBuddy manual 显式刷新无缓存失败会报错", { timeout: 60_000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-manual-fail-"));
-  const adapter = createCodebuddyAdapter({
+  const adapterConfig: GatewayConfig = {
     zcode: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", codebuddy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
-  }, {
+  };
+  const adapter = createCodebuddyAdapter(adapterConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
     credentialCache: { forProduct: async () => credential(), close: () => {} },
     fetch: async () => { throw new Error("network down"); },
@@ -538,31 +541,33 @@ test("compaction 触发时走压缩请求路径并返回摘要", async () => {
   });
 });
 
-test("validateCodebuddyConfig：环回与保留前缀约束", () => {
+test("validateCodebuddyConfig：环回与账号约束，过时 prefix 不影响校验", () => {
   const base: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
   validateCodebuddyConfig({ ...base, codebuddy: true });
-  validateCodebuddyConfig({ ...base, codebuddy: false, host: "0.0.0.0" });
+  validateConfiguredPlugins({ ...base, codebuddy: false, host: "0.0.0.0" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "auto" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "uid-1234" });
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyAccount: "Tencent-Cloud.coding-copilot.info" });
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0" }), /环回/);
   for (const prefix of ["codebuddy/", "workbuddy/", "codebuddy-cn/", "workbuddy-cn/", "codebuddy-intl/", "workbuddy-intl/"]) {
-    assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), /前缀保留/, prefix);
+    assert.doesNotThrow(() => validateCodebuddyConfig({ ...base, codebuddy: true, prefix }), prefix);
   }
+  assert.throws(() => validateConfiguredPlugins({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: "on" } as unknown as GatewayConfig), /boolean/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: "../escape.info" } as unknown as GatewayConfig), /codebuddyAccount/);
   assert.throws(() => validateCodebuddyConfig({ ...base, codebuddyAccount: 42 } as unknown as GatewayConfig), /codebuddyAccount/);
   // 旧 codebuddyRegion 已过时：不再是校验或分派依据（读取路径会迁移为 codebuddyAccount）。
   validateCodebuddyConfig({ ...base, codebuddy: true, codebuddyRegion: "cn" });
   // default 模式不豁免插件凭据的环回安全边界。
-  assert.throws(() => validateCodebuddyConfig({ ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true }), /环回/);
+  const cbLoopback = { ...base, codebuddy: true, host: "0.0.0.0", upstreamOnly: true };
+  assert.throws(() => validateCodebuddyConfig(cbLoopback), /环回/);
 });
 
-test("适配器目录投影与未启用时的空目录", async () => {  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-adapter-"));
+test("适配器目录投影与网关关闭时不装配插件", async () => {  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-adapter-"));
   try {
     const base: GatewayConfig = {
       zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
@@ -581,11 +586,12 @@ test("适配器目录投影与未启用时的空目录", async () => {  const di
     const catalog = await enabled.catalog();
     assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/gpt-5.6-luna"]);
     enabled.close();
-    const disabled = createCodebuddyAdapter({ ...base, codebuddy: false }, {});
-    assert.deepEqual((await disabled.catalog()).models, []);
-    disabled.close();
-    assert.equal(codebuddyEnabled({ ...base, codebuddy: true, upstreamOnly: true }), true);
-    assert.equal(codebuddyEnabled({ ...base, codebuddy: true }), true);
+    const disabled = createConfiguredPluginRegistry({ ...base, codebuddy: false });
+    assert.deepEqual(disabled.plugins, []);
+    await disabled.close();
+    const cbUpstreamOnly = { ...base, codebuddy: true, upstreamOnly: true };
+    assert.equal(agentConfigEnabled(cbUpstreamOnly, "codebuddy"), true);
+    assert.equal(agentConfigEnabled({ ...base, codebuddy: true }, "codebuddy"), true);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }
@@ -634,7 +640,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
   }
 });
 
-test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账号选择的唯一入口", { skip: process.platform !== "darwin", timeout: 30_000 }, async () => {
+test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账号选择的唯一入口", { skip: process.platform !== "darwin", timeout: 60_000 }, async () => {
   const { runCli, codebuddyCommand } = await import("../apps/gateway/src/cli.ts");
   const { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } = await import("../apps/gateway/src/config.ts");
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cli-"));

@@ -1,4 +1,5 @@
-import { parseAnthropicStream } from "@agent-proxy/llm-bridge";
+import { createClientResponse } from "@agent-proxy/llm-bridge";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { encodeZcodeThinking, isZcodeRecord, type ZcodeToolMap } from "./wire.ts";
 import { gatewayToolCallNarration, gatewayToolResultNarration, type ZcodeGatewayCall } from "./vision.ts";
 
@@ -128,26 +129,73 @@ async function* readFrames(reader: ReadableStreamDefaultReader<Uint8Array>): Asy
   }
 }
 
-/** 库只保存一个工具上下文；按帧补入对应块，使交错的块仍通过库正确归一化。 */
+/**
+ * anthropic 帧级归一化（工具事件抽取）。库的 parseAnthropicStream 只保存一个工具
+ * 上下文，交错块会串扰；这里直接从帧结构提取 tool_call_start/delta 事件，不依赖
+ * npm llm-bridge（桥接包不再转发库原语）。
+ */
 async function normalize(frame: Json, block?: Block): Promise<Json[]> {
-  const frames: Json[] = [];
-  if (block?.source.type === "tool_use" && (frame.type === "content_block_delta" || frame.type === "content_block_stop")) {
-    frames.push({ type: "content_block_start", index: frame.index, content_block: block.source });
+  const events: Json[] = [];
+  if (frame.type === "message_start") {
+    // 驱动器以事件存在性校验 message_start 的可归一化；保持该合同。
+    return [{ type: "message_start" }];
   }
-  frames.push(frame);
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(frames.map((value) => `event: ${value.type}\ndata: ${JSON.stringify(value)}\n\n`).join("")));
-      controller.close();
-    },
+  if (frame.type === "error") {
+    // 错误帧透传原始字段（request_id 等），并把 anthropic 的 type 映射为 code
+    //（驱动器按 code 生成 failed 终态的错误标识）。
+    const original = record(frame.error, "error");
+    return [{ type: "error", error: { ...original, ...(original.code === undefined && typeof original.type === "string" ? { code: original.type } : {}) } }];
+  }
+  if (frame.type === "content_block_start") {
+    const source = record(frame.content_block, "content_block");
+    if (source.type === "tool_use") {
+      events.push({ type: "tool_call_start", tool_call: { id: source.id ?? "", name: source.name ?? "" } });
+    }
+    return events;
+  }
+  if (frame.type === "content_block_delta") {
+    const delta = record(frame.delta, "delta");
+    if (block?.source.type === "tool_use") {
+      if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        events.push({ type: "tool_call_delta", tool_call: { id: block.source.id ?? "", arguments_delta: delta.partial_json } });
+      }
+      return events;
+    }
+    // 文本/思考增量保持 content_delta 事件形状，驱动器按块类型取对应字段。
+    if (delta.type === "text_delta" && typeof delta.text === "string") {
+      events.push({ type: "content_delta", delta: { text: delta.text } });
+    } else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
+      events.push({ type: "content_delta", delta: { thinking: delta.thinking } });
+    }
+    return events;
+  }
+  if (frame.type === "content_block_stop" && block?.source.type === "tool_use") {
+    events.push({ type: "tool_call_end", tool_call: { id: block.source.id ?? "" } });
+    return events;
+  }
+  return events;
+}
+
+/**
+ * 四种客户端协议的统一入口：zcode 始终以帧级驱动器合成 Responses 事件（多腿、
+ * server tool 折叠与 thinking 信封都在该层），chat-completions / anthropic / gemini
+ * 客户端由 @agent-proxy/llm-bridge 从同一事件流渲染，语义与 Responses 输出一致。
+ */
+/** to 为路由端点（客户端入口）协议：上游 anthropic → to。 */
+export async function createZcodeClientResponse(to: ClientProtocol, upstream: Response, options: ZcodeResponseOptions): Promise<Response> {
+  const responsesOutput = await createZcodeResponse(upstream, options);
+  if (to === "responses") return responsesOutput;
+  const result = await createClientResponse(to, responsesOutput, {
+    upstreamProtocol: "responses",
+    model: options.model,
+    stream: options.stream,
+    signal: options.signal,
+    abort: options.abort,
+    onChunk: options.onChunk,
+    sanitizeError: options.sanitizeError,
+    // Responses 输出已由 zcode 驱动器还原原始工具名，无需再做身份映射。
   });
-  const result: Json[] = [];
-  let skipContext = frames.length > 1;
-  for await (const value of parseAnthropicStream(stream)) {
-    if (skipContext) { skipContext = false; continue; }
-    result.push(value as unknown as Json);
-  }
-  return result;
+  return result.response;
 }
 
 export async function createZcodeResponse(upstream: Response, options: ZcodeResponseOptions): Promise<Response> {

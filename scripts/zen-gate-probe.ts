@@ -1,16 +1,22 @@
 #!/usr/bin/env bun
 // OpenCode Zen 免费层门禁诊断探针：逐项隔离实测当前门禁画像，供指纹失效时单点重测。
 //
-// 背景：2026-10-08 mitm 实证的三层门禁（标头 + 请求体模板/工具 + 流式）在 2026-10-14
-// 复测已部分失效——system 模板不再被检查、两段式 UA 放行，工具名单成为唯一实锤的
-// 请求体闸（必须同时含 `read` 与 `bash`/`shell` 之名，schema 不查）。门禁会漂移，
+// 背景：门禁持续漂移——2026-10-08 三层画像（标头 + 请求体模板/工具 + 流式）、
+// 2026-10-14 名单制画像（read/bash 之名、空 schema 可过、模板不查）均已被推翻。
+// 2026-10-15 终版画像（抓包 + 逐项隔离实测 + linux.do 2912664 同结论）：
+//   ① 端点迁至 https://opencode.ai/inference/v1（旧 /zen/v1 一律 403）；
+//   ② 标头最小集（最小头实验四件：Authorization + User-Agent + x-opencode-session-id +
+//      x-session-affinity）；完整指纹集下单缺 affinity 亦放行（标头互备），UA 版本不校验；
+//   ③ tools 仅 `read` 必须：schema 须非空（空 properties 403；官方完整定义与
+//      {path:{}} 最小形均过闸），其它工具（bash/shell 及数量）无关；system 内容
+//      不检查；无 tools 仅官方标题模板放行（不走）。
 // 出现批量 403 `zen_free_tier_error` 时先跑本脚本定位漂移层，再按
 // docs/fingerprint-data.md「更新方法」处理。
 //
 // 用法：
 //   bun scripts/zen-gate-probe.ts                     # 默认 10 个探针，5s 间隔
 //   bun scripts/zen-gate-probe.ts --model nemotron-3.5-lightning-free
-//   bun scripts/zen-gate-probe.ts --base https://opencode.ai/zen/v1
+//   bun scripts/zen-gate-probe.ts --base https://opencode.ai/inference/v1
 //
 // 输出：每个探针一行（PASS/FAIL 相对当前已知画像），末尾汇总画像漂移项。
 // 退出码：0 = 画像与实现一致；1 = 有漂移（对照失败优先看 fingerprint-data.json）；
@@ -20,12 +26,12 @@
 import {
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
+  mergeOpencodeZenGateTools,
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
   OPENCODE_ZEN_CLIENT_TOOLS,
   OPENCODE_ZEN_CLIENT_USER_AGENT,
-  padOpencodeZenGateTools,
 } from "../packages/opencode-zen/src/fingerprint.ts";
-import { createOpenCodeSessionId } from "../packages/opencode-zen/src/session.ts";
+import { createOpenCodeSessionId, deriveOpenCodeSessionId } from "../packages/opencode-zen/src/session.ts";
 
 interface Options {
   model: string;
@@ -33,7 +39,7 @@ interface Options {
 }
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { model: "space-bunny-free", base: "https://opencode.ai/zen/v1" };
+  const options: Options = { model: "space-bunny-free", base: "https://opencode.ai/inference/v1" };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--model") options.model = argv[++i] ?? "";
@@ -51,7 +57,6 @@ function parseArgs(argv: string[]): Options {
 }
 
 const PLAIN_SYSTEM = "You are a precise coding agent. Answer concisely.";
-const LEGACY_UA_FALLBACK = "1.19.0";
 
 /** Codex 工具按 convert.ts 的降级形状（exec_command 原生 + apply_patch 包一层 input）。 */
 const CODEX_TOOLS: Array<Record<string, unknown>> = [
@@ -67,13 +72,10 @@ const CODEX_TOOLS: Array<Record<string, unknown>> = [
   } },
 ];
 
-/** dsh 式无参占位工具：名字命中门禁、schema 为空、描述声明不可执行。 */
-function placeholderTool(name: string): Record<string, unknown> {
-  return { type: "function", function: {
-    name,
-    description: "Requirement placeholder: this harness cannot execute it. Use the harness tools instead.",
-    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
-  } };
+function officialTool(name: string): Record<string, unknown> | undefined {
+  return (OPENCODE_ZEN_CLIENT_TOOLS as Array<Record<string, unknown>>).find(
+    (tool) => (tool.function as { name?: unknown } | undefined)?.name === name,
+  );
 }
 
 interface Probe {
@@ -83,16 +85,12 @@ interface Probe {
   tools: unknown[];
   expectPass: boolean;
   rule: string;
-}
-
-async function resolveLegacyUserAgent(): Promise<string> {
-  try {
-    const response = await fetch("https://unpkg.com/opencode-ai@latest/package.json", { signal: AbortSignal.timeout(10_000) });
-    const payload = await response.json() as { version?: string };
-    return typeof payload.version === "string" && payload.version ? `opencode/${payload.version}` : `opencode/${LEGACY_UA_FALLBACK}`;
-  } catch {
-    return `opencode/${LEGACY_UA_FALLBACK}`;
-  }
+  /** 探针级 base 覆盖（默认取 options.base）。 */
+  base?: string;
+  /** 探针级会话 id 覆盖（默认每次铸新 id）。 */
+  session?: string;
+  /** 追加/剔除标头（相对 buildOpencodeZenUpstreamHeaders 的产物）。 */
+  mutateHeaders?: (headers: Record<string, string>) => void;
 }
 
 interface ProbeResult {
@@ -102,8 +100,9 @@ interface ProbeResult {
 }
 
 async function runProbe(options: Options, projectId: string, probe: Probe): Promise<ProbeResult> {
-  const session = createOpenCodeSessionId();
+  const session = probe.session ?? createOpenCodeSessionId();
   const headers = buildOpencodeZenUpstreamHeaders(session, "public", projectId, probe.ua);
+  probe.mutateHeaders?.(headers);
   const body = {
     model: options.model,
     stream: true,
@@ -117,7 +116,7 @@ async function runProbe(options: Options, projectId: string, probe: Probe): Prom
     tools: probe.tools,
   };
   try {
-    const response = await fetch(`${options.base}/chat/completions`, {
+    const response = await fetch(`${probe.base ?? options.base}/chat/completions`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -148,25 +147,32 @@ async function runProbe(options: Options, projectId: string, probe: Probe): Prom
 async function main(): Promise<number> {
   const options = parseArgs(process.argv.slice(2));
   const projectId = createOpencodeZenProjectId("zen-gate-probe");
-  const legacyUserAgent = await resolveLegacyUserAgent();
-  const officialTools = OPENCODE_ZEN_CLIENT_TOOLS as Array<Record<string, unknown>>;
+  const read = officialTool("read");
+  const shell = officialTool("shell");
+  if (!read) {
+    console.error("fingerprint-data.json 缺少 read 官方定义，先按 docs/fingerprint-data.md 更新数据文件。");
+    return 2;
+  }
 
   // expectPass = 当前已知画像下的预期；实测翻转即画像漂移。
   const probes: Probe[] = [
-    { id: "control-gateway", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: padOpencodeZenGateTools(CODEX_TOOLS), expectPass: true, rule: "对照：网关现行注入形态（垫补 read+bash 占位）应放行" },
+    { id: "control-gateway", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: mergeOpencodeZenGateTools(CODEX_TOOLS), expectPass: true, rule: "对照：网关现行注入形态（合并官方 read 定义）应放行" },
     { id: "fallback-official", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: OPENCODE_ZEN_CLIENT_TOOLS, expectPass: true, rule: "回退形态（官方模板+官方工具全量）应放行：回退材料有效" },
-    { id: "codex-tools-only", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: CODEX_TOOLS, expectPass: false, rule: "仅 Codex 工具（无 read/bash 名）应被拒：工具名单闸在场" },
-    { id: "pad-read-bash", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, placeholderTool("read"), placeholderTool("bash")], expectPass: true, rule: "read+bash 空 schema 占位应放行：最小垫补可行" },
-    { id: "pad-shell-read", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, placeholderTool("shell"), placeholderTool("read")], expectPass: true, rule: "shell 可替代 bash（官方 GA 工具名同样有效）" },
-    { id: "pad-read-only", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, placeholderTool("read")], expectPass: false, rule: "仅 read（无 bash/shell）应被拒：两名都要" },
-    { id: "pad-bash-only", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, placeholderTool("bash")], expectPass: false, rule: "仅 bash（无 read）应被拒：read 硬性" },
-    { id: "no-template-official-tools", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: officialTools, expectPass: true, rule: "无官方模板 + 官方工具全量应放行：system 模板不检查" },
-    { id: "legacy-ua-pad", ua: legacyUserAgent, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, placeholderTool("read"), placeholderTool("bash")], expectPass: true, rule: "两段式 UA + 最小垫补应放行：UA 格式已放宽" },
-    { id: "no-tools-plain", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [], expectPass: false, rule: "无工具裸发应被拒：名单闸不分有无工具" },
-    { id: "no-tools-pad", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: padOpencodeZenGateTools([]), expectPass: true, rule: "无工具 + 垫补占位应放行：标题生成等场景的保活路径" },
+    { id: "codex-tools-only", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: CODEX_TOOLS, expectPass: false, rule: "仅 Codex 工具（无 read）应被拒：read 实名闸在场" },
+    { id: "minimal-read", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [read], expectPass: true, rule: "仅官方 read 定义即放行：read 唯一必须（linux.do 2912664 同结论）" },
+    { id: "minimal-read-schema", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { path: {} } } } }], expectPass: true, rule: "read 的最小非空 schema（{path:{}}）应放行：不要求官方完整定义" },
+    { id: "read-empty-schema", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [{ type: "function", function: { name: "read", parameters: { type: "object", properties: {}, required: [] } } }], expectPass: false, rule: "read 空 properties 应被拒：schema 非空被检查" },
+    { id: "shell-without-read", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [shell].filter(Boolean), expectPass: false, rule: "仅 shell（无 read）应被拒：其它官方名不替代 read" },
+    { id: "client-plus-official", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [...CODEX_TOOLS, read], expectPass: true, rule: "客户端工具与官方 read 并存应放行：同名客户端定义优先" },
+    { id: "no-session-id-header", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [read], expectPass: false, rule: "缺 x-opencode-session-id 应被拒：标头最小集在场", mutateHeaders: (h) => { delete h["x-opencode-session-id"]; } },
+    { id: "no-affinity-header", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [read], expectPass: true, rule: "完整指纹集下单缺 x-session-affinity 放行（最小集实验中必需——标头存在互备，网关发全集不受影响）", mutateHeaders: (h) => { delete h["x-session-affinity"]; } },
+    { id: "derived-session-id", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [read], expectPass: true, rule: "外部会话确定性派生的 id 应放行：counter 位为官方形状（哈希前缀被拒，服务端解码时间段）", session: deriveOpenCodeSessionId("zen-gate-probe-conversation") },
+    { id: "stale-ua-version", ua: "opencode/latest/2.0.26/cli", system: PLAIN_SYSTEM, tools: [read], expectPass: true, rule: "旧版本号 UA 应放行：UA 版本不校验" },
+    { id: "no-tools-plain", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [], expectPass: false, rule: "无工具裸发应被拒：官方标题模板例外网关不走" },
+    { id: "legacy-zen-endpoint", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: PLAIN_SYSTEM, tools: [read], expectPass: false, rule: "旧 /zen/v1 端点应被拒：上游已迁 /inference/v1", base: "https://opencode.ai/zen/v1" },
   ];
 
-  console.log(`model=${options.model}  base=${options.base}  snapshotUA=${OPENCODE_ZEN_CLIENT_USER_AGENT}  legacyUA=${legacyUserAgent}\n`);
+  console.log(`model=${options.model}  base=${options.base}  snapshotUA=${OPENCODE_ZEN_CLIENT_USER_AGENT}\n`);
   const results: ProbeResult[] = [];
   for (const probe of probes) {
     const result = await runProbe(options, projectId, probe);
@@ -184,7 +190,7 @@ async function main(): Promise<number> {
   if (controlFailed) {
     console.log("结论：对照探针被拒——现行注入形态失效，先用 fallback-official 探针判别回退形态是否仍有效，再按 docs/fingerprint-data.md「更新方法」重估注入面。");
   } else if (drift.length === 0) {
-    console.log("结论：门禁画像与 2026-10-14 复测一致（read+bash/shell 名单闸，不分有无工具；模板与 UA 格式不检查）。");
+    console.log("结论：门禁画像与 2026-10-15 终版一致（/inference/v1 端点、x-opencode-session-id 硬性、read 唯一必须且 schema 非空、UA 版本不校验、/zen/v1 死透）。");
   } else {
     console.log(`结论：画像漂移 ${drift.length} 项——${drift.map((result) => result.probe.id).join("、")}；按 docs/fingerprint-data.md 与 docs/exec-plans/active/ 计划重新评估注入面。`);
   }

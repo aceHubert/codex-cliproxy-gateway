@@ -37,6 +37,7 @@
     "@agent-proxy/models": "workspace:*"
   },
   "dependencies": {
+    "@agent-proxy/llm-bridge": "workspace:*",
     "@agent-proxy/plugin-api": "workspace:*"
   }
 }

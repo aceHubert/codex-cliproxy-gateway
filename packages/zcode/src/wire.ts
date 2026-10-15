@@ -1,8 +1,7 @@
+import type { ToolIdentity } from "@agent-proxy/llm-bridge";
+
 /** ZCode 协议共享类型；元数据不包含授权凭据。 */
-export interface ZcodeToolDefinition {
-  name: string;
-  custom: boolean;
-  namespace?: string;
+export interface ZcodeToolDefinition extends ToolIdentity {
   /** 网关代执行标记：该工具由网关在上游续跑中执行并吸收，不回传客户端。 */
   gateway?: "analyze_image";
 }

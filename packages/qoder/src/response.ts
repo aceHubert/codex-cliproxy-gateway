@@ -1,21 +1,42 @@
-import { createCodebuddyResponse, type CodebuddyResponseOptions } from "@agent-proxy/codebuddy/response";
+import { createClientResponse } from "@agent-proxy/llm-bridge";
+import type { ClientOutputResult, ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { asObject, readFrames, parseQueueStatus, parseJsonObject, encoder } from "./sse.ts";
 import type { Json } from "./sse.ts";
 
-export type QoderResponseOptions = CodebuddyResponseOptions;
+/**
+ * Qoder 私有 infer 信封 → 标准 Chat Completions 流 → 客户端协议输出。
+ * 解信封、排队识别、计费提取与私有 tool index 修复留在本模块；标准事件合成、
+ * SSE/JSON、usage 与终态由 @agent-proxy/llm-bridge 完成。
+ */
+
+export interface QoderResponseOptions {
+  model: string;
+  tools: ToolIdentityMap;
+  stream: boolean;
+  signal?: AbortSignal;
+  abort?: () => void;
+  onComplete?: (response: Record<string, unknown>) => void;
+  onChunk?: (chunk: string) => void;
+  sanitizeError?: (error: Record<string, unknown>) => Record<string, unknown>;
+}
 
 /** 拆开多层 {code,message} JSON 字符串，取最内层信息用于错误分类。 */
 function unwrapNested(value: Json): Json {
-  let current: Json = value;
+  let current = value;
   for (let depth = 0; depth < 4; depth++) {
     const message = current.message;
     if (typeof message !== "string" || !message.startsWith("{")) return current;
-    try { current = parseJsonObject(message, "错误信封 message"); } catch { return current; }
+    try {
+      current = parseJsonObject(message, "错误信封 message");
+    } catch {
+      return current;
+    }
   }
   return current;
 }
 
-/** 将 Qoder 明文信封转为标准 Chat SSE，复用仓库现有的 Responses 事件合成器。 */
+/** 将 Qoder 明文信封转为标准 Chat SSE；计费字段随 billing 增补进标准 usage。 */
 function unwrap(upstream: ReadableStream<Uint8Array>, billing: Json): { body: ReadableStream<Uint8Array>; abort: () => void } {
   const reader = upstream.getReader();
   const calls = new Map<string, number>();
@@ -25,7 +46,11 @@ function unwrap(upstream: ReadableStream<Uint8Array>, billing: Json): { body: Re
     try {
       for await (const frame of readFrames(reader)) {
         // 内层 [DONE] 不是权威结束标识，必须等到独立 finish 事件。
-        if (frame.event === "finish") { terminal = true; yield encoder.encode("data: [DONE]\n\n"); return; }
+        if (frame.event === "finish") {
+          terminal = true;
+          yield encoder.encode("data: [DONE]\n\n");
+          return;
+        }
         if (!frame.data) continue;
         const envelope = parseJsonObject(frame.data, "SSE 信封");
         // 排队信封（statusCodeValue=403 + 10605）不是错误：转换层继续等真实推理帧。
@@ -39,9 +64,9 @@ function unwrap(upstream: ReadableStream<Uint8Array>, billing: Json): { body: Re
               : typeof inner.code === "string" || typeof inner.code === "number" ? String(inner.code) : "upstream_error",
             message: typeof details.message === "string" && !details.message.startsWith("{") ? details.message
               : typeof details.msg === "string" ? details.msg
-              : typeof inner.message === "string" ? inner.message
-              : typeof inner.msg === "string" ? inner.msg
-              : `Qoder 上游状态 ${String(envelope.statusCodeValue)}`,
+                : typeof inner.message === "string" ? inner.message
+                  : typeof inner.msg === "string" ? inner.msg
+                    : `Qoder 上游状态 ${String(envelope.statusCodeValue)}`,
             status: envelope.statusCodeValue,
           };
           terminal = true;
@@ -100,7 +125,9 @@ function unwrap(upstream: ReadableStream<Uint8Array>, billing: Json): { body: Re
           controller.enqueue(next.value);
           if (terminal) controller.close();
         }
-      } catch (error) { controller.error(error); }
+      } catch (error) {
+        controller.error(error);
+      }
     },
     async cancel() {
       await reader.cancel().catch(() => undefined);
@@ -110,72 +137,64 @@ function unwrap(upstream: ReadableStream<Uint8Array>, billing: Json): { body: Re
   return { body, abort: () => { void reader.cancel().catch(() => undefined); } };
 }
 
-function augment(response: Json, billing: Json): Json {
-  if (response.usage !== null && response.usage !== undefined) {
-    response.usage = { ...asObject(response.usage, "Responses usage"), ...billing };
-  }
-  if (response.error !== null && response.error !== undefined) {
-    const error = asObject(response.error, "Responses error");
-    if (typeof error.message === "string") error.message = error.message.replaceAll("CodeBuddy", "Qoder");
-  }
-  return response;
+function isRecord(value: unknown): value is Json {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function safely(callback: (() => void) | undefined): void {
-  try { callback?.(); } catch { /* 观测回调不能中断协议转换。 */ }
+  try {
+    callback?.();
+  } catch {
+    /* 观测回调不能中断协议转换。 */
+  }
 }
 
-export async function translateQoderResponse(upstream: Response, options: QoderResponseOptions): Promise<Response> {
+/** 把计费字段并入 message_end 事件的 usage（各客户端协议的标准 usage 保持原样）。 */
+function augmentUsageWithBilling(events: AsyncGenerator<import("@agent-proxy/llm-bridge").BridgeStreamEvent>, billing: Json) {
+  return (async function* () {
+    for await (const event of events) {
+      if (event.type === "message_end" && Object.keys(billing).length > 0) {
+        yield { ...event, usage: { ...(event.usage ?? {}), billing: { ...billing } } };
+        continue;
+      }
+      yield event;
+    }
+  })();
+}
+
+export async function translateQoderResponse(
+  to: ClientProtocol,
+  upstream: Response,
+  options: QoderResponseOptions,
+): Promise<ClientOutputResult["response"]> {
   if (!upstream.body) throw new Error("Qoder 上游响应缺少 body");
   const billing: Json = {};
-  let completed: Json | undefined;
   const normalized = unwrap(upstream.body, billing);
-  const converted = await createCodebuddyResponse(new Response(normalized.body, {
-    headers: { "content-type": "text/event-stream" },
-  }), {
-    ...options,
+  const chatUpstream = new Response(normalized.body, { headers: { "content-type": "text/event-stream" } });
+  const result = await createClientResponse(to, chatUpstream, {
+    upstreamProtocol: "chat-completions",
+    model: options.model,
+    stream: options.stream,
+    signal: options.signal,
     // 直接唤醒原始流的在途读取；仅靠等待转换迭代器结束会卡住客户端取消。
-    abort: () => { normalized.abort(); safely(options.abort); },
-    onComplete: (response) => {
-      completed = augment(response, billing);
-      safely(() => options.onComplete?.(completed!));
+    abort: () => {
+      normalized.abort();
+      safely(options.abort);
     },
-    onChunk: undefined,
+    onChunk: options.onChunk,
+    onComplete: (response) => {
+      // 非流式聚合结果同步增补计费字段。
+      if (isRecord(response.usage) && Object.keys(billing).length > 0) {
+        Object.assign(response.usage, billing);
+      }
+      safely(() => options.onComplete?.(response));
+    },
     sanitizeError: (error) => {
       const value = { ...error, ...(typeof error.message === "string" ? { message: error.message.replaceAll("CodeBuddy", "Qoder") } : {}) };
       return options.sanitizeError ? options.sanitizeError(value) : value;
     },
+    toolIdentities: options.tools,
+    transform: (events) => augmentUsageWithBilling(events as AsyncGenerator<import("@agent-proxy/llm-bridge").BridgeStreamEvent>, billing),
   });
-  if (!options.stream) {
-    const payload = augment(parseJsonObject(JSON.stringify(await converted.json()), "响应"), billing);
-    safely(() => options.onChunk?.(JSON.stringify(payload)));
-    return Response.json(payload, { status: converted.status });
-  }
-  // 通用合成器每个读取块对应一个完整事件；仅为终态快照补充原始计费字段。
-  let terminalSent = false;
-  let sequence = 0;
-  const transformed = converted.body!.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(bytes, controller) {
-      const text = new TextDecoder().decode(bytes);
-      const marker = text.indexOf("\ndata: ");
-      const event = parseJsonObject(text.slice(marker + 7).trimEnd(), "Responses 事件");
-      if (typeof event.sequence_number === "number") sequence = event.sequence_number + 1;
-      if (["response.completed", "response.incomplete", "response.failed"].includes(String(event.type))) terminalSent = true;
-      // 就地增补计费字段：深拷贝会丢失与被序列化事件对象的关联。
-      if (event.response !== undefined) augment(asObject(event.response, "Responses 快照"), billing);
-      const rewritten = `${text.slice(0, marker)}\ndata: ${JSON.stringify(event)}\n\n`;
-      safely(() => options.onChunk?.(rewritten));
-      controller.enqueue(encoder.encode(rewritten));
-    },
-    flush(controller) {
-      // 通用转换器在 AbortSignal 中止时关闭流；仍连接的调用方需要明确失败终态。
-      if (!terminalSent && completed?.status === "failed") {
-        const event = { type: "response.failed", sequence_number: sequence, response: completed };
-        const chunk = `event: response.failed\ndata: ${JSON.stringify(event)}\n\n`;
-        safely(() => options.onChunk?.(chunk));
-        controller.enqueue(encoder.encode(chunk));
-      }
-    },
-  }));
-  return new Response(transformed, { status: converted.status, headers: converted.headers });
+  return result.response;
 }

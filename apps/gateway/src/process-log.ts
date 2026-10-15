@@ -1,10 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { ErrorEntry, RequestSummary } from "@agent-proxy/plugin-api";
 import { fileStamp, localTime } from "./request-log.ts";
 import type { ProcessLogTarget } from "./types.ts";
 
 export type { ProcessLogTarget };
+
+/**
+ * 进程日志条目的单一来源在 @agent-proxy/plugin-api，网关侧只再导出，调用点不变。
+ * RequestSummary.upstreamUrl：本次请求实际打到哪个上游；未记录时不输出该字段。
+ * ErrorEntry 在契约包 extends RequestSummary（本文件历史上为平铺同字段集）。
+ */
+export type { ErrorEntry, RequestSummary };
 
 /**
  * 网关进程日志 gateway.log 的全部写入。
@@ -120,18 +128,6 @@ export function logConfigChange(
   appendProcessLog({ file: logFile, maxBytes }, lines.join("\n"));
 }
 
-export interface ErrorEntry {
-  requestTime: string;
-  method: string;
-  url: string;
-  status: number;
-  message: string;
-  errorName?: string;
-  upstreamUrl?: string;
-  durationMs?: number;
-  stack?: string;
-}
-
 function errorLines(entry: ErrorEntry): string[] {
   return [
     `--${entry.requestTime}--`,
@@ -154,16 +150,6 @@ function errorLines(entry: ErrorEntry): string[] {
  */
 export function logGatewayError(target: ProcessLogTarget | undefined, entry: ErrorEntry): void {
   appendProcessLog(target, errorLines(entry).join("\n"));
-}
-
-export interface RequestSummary {
-  requestTime: string;
-  method: string;
-  url: string;
-  status: number;
-  durationMs?: number;
-  /** 本次请求实际打到哪个上游；未记录时不输出该字段。 */
-  upstreamUrl?: string;
 }
 
 /**

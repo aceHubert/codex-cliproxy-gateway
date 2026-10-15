@@ -4,19 +4,25 @@ import fingerprintData from "./fingerprint-data.json";
 /**
  * OpenCode Zen 免费层门禁指纹。
  *
- * 门禁画像（2026-10-14 探针复测，`scripts/zen-gate-probe.ts` 8 项隔离实证；10-08 的
- * 「模板逐字符匹配」画像已失效，漂移轨迹见调研报告修正段与 docs/fingerprint-data.md）：
- * 1. **标头层**：官方 UA（四段式快照；两段式 `opencode/<semver>` 亦放行）、合规
+ * 门禁画像（2026-10-15 抓包+逐项隔离实测；10-14 的「空 schema 名单占位」画像已被
+ * 收紧否决，漂移轨迹见 docs/fingerprint-data.md 与 scripts/zen-gate-probe.ts）：
+ * 1. **标头层**（最小集四件：Authorization + User-Agent + `x-opencode-session-id` +
+ *    `x-session-affinity`，缺一即 403）：UA 版本不校验（快照/动态值均可）、合规
  *    `x-opencode-session`（见 session.ts）与同值回填、稳定 `x-opencode-project`；
- *    追踪头保留（零成本，免疫收紧）。
- * 2. **请求体层（名单制）**：tools 必须同时含 `read` 与 `bash`/`shell` 之一的**名字**，
- *    schema 不做任何检查（空对象占位可过）；system 消息内容不检查（官方模板无需在场）。
- *    名单闸不分有无工具——无 tools 的请求同样 403，必须垫补占位。
+ *    b3/traceparent 追踪头保留（非必需）。
+ * 2. **请求体层（实名制，read 唯一必须）**：tools 必须含 `read` 且 schema 非空
+ *    （空 properties 403；官方完整定义与 `{path:{}}` 最小形均过闸）；其它工具
+ *    （bash/shell 及数量）无关，客户端工具可并存、同名定义优先。system 消息内容
+ *    不检查（官方模板无需在场）；无 tools 的请求只有携带官方标题生成器模板才
+ *    放行，网关一律保证 tools 在场，不走该例外。
  * 3. **传输层**：仅接受 `stream: true`；非流式一律 403 FreeTierError，适配器对非流式
  *    客户端必须上游强制流式并在网关侧聚合 SSE 为完整 JSON。
+ * 4. **端点层**：上游 base 已从 `https://opencode.ai/zen/v1` 迁至
+ *    `https://opencode.ai/inference/v1`（旧端点一律 403），缺省值与元数据
+ *    provider.api 同步（见 index.ts 的 OPENCODE_ZEN_DEFAULT_ENDPOINT）。
  *
- * 官方模板与工具定义保留在 `fingerprint-data.json` 作回退材料（门禁再收紧时按
- * docs/fingerprint-data.md「更新方法」重取并以探针脚本验证），生产路径不再注入。
+ * 官方模板与完整工具定义保留在 `fingerprint-data.json`（模板作回退材料，门禁再收紧
+ * 时按 docs/fingerprint-data.md「更新方法」重取并以探针脚本验证）。
  * UA 的版本段不写死：运行时按 npm dist-tag 取当前版本（见 user-agent.ts），失败回退快照。
  */
 
@@ -42,8 +48,14 @@ export const OPENCODE_ZEN_CLIENT_NAME = CLIENT.clientName;
 export const OPENCODE_ZEN_AGENT_SYSTEM_PROMPT = CLIENT.agentSystemPrompt;
 /** 官方标题生成器模板（回退材料，同上）。 */
 export const OPENCODE_ZEN_TITLE_SYSTEM_PROMPT = CLIENT.titleSystemPrompt;
-/** 官方工具定义（回退材料：当前门禁只查名单，生产路径只垫占位不并入官方定义）。 */
+/** 官方工具定义（2026-10-15 终版画像：仅 read 的真实定义在场合闸，最小非空 schema 亦可）。 */
 export const OPENCODE_ZEN_CLIENT_TOOLS = CLIENT.tools;
+
+/** 门禁要求在场的官方工具名（2026-10-15 实测 + linux.do 2912664 同结论：仅 read 必须）。 */
+const GATE_REQUIRED_TOOL_NAMES = new Set(["read"]);
+
+/** 顺序化名单（合并顺序稳定）。 */
+const GATE_REQUIRED_TOOL_ORDER = ["read"] as const;
 
 /** 稳定的 40-hex 项目标识：官方客户端对项目目录做哈希，服务端不校验注册，任意稳定值即可。 */
 export function createOpencodeZenProjectId(seed: string): string {
@@ -58,7 +70,8 @@ function traceHeaders(): { b3: string; traceparent: string } {
 
 /**
  * 构造发往 Zen 的完整标头集。除 content-type/accept 外全部替换为官方指纹，
- * 客户端原始标头（含任何鉴权）一律不透传。
+ * 客户端原始标头（含任何鉴权）一律不透传。`x-opencode-session-id` 与
+ * `x-opencode-session` 同值（官方 2.0.29 起上行，缺失实测 403）。
  */
 export function buildOpencodeZenUpstreamHeaders(
   session: string,
@@ -77,6 +90,7 @@ export function buildOpencodeZenUpstreamHeaders(
     "x-opencode-client": CLIENT.clientName,
     "x-opencode-project": projectId,
     "x-opencode-session": session,
+    "x-opencode-session-id": session,
     "x-session-affinity": session,
     "x-session-id": session,
   };
@@ -101,34 +115,57 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * 名单闸占位工具：只占门禁要求的名字，schema 为空对象（模型带不出任何参数，调用
- * 必然落空），描述明写不可执行并指回 harness 工具。模型误调时由客户端以
- * `unsupported call` 兜底，真机实测一轮自纠。
+ * 名单闸官方定义合并：确保 `read` 的**官方真实定义**（含 schema）在场——客户端已有
+ * 同名定义优先、原样保留；缺失时并入官方定义（fingerprint-data.json）。空工具列表
+ * 同样合并（无 tools 的请求只有官方标题生成器模板才放行，不走该例外）。
+ * 2026-10-15 终版画像（探针 + linux.do 2912664 同结论）：read 是唯一必须的工具名，
+ * 其 schema 须非空（空 properties 403；官方完整定义与 `{path:{}}` 最小形均过闸），
+ * 其它工具（bash/shell 及数量）无关。
  */
-function gatePlaceholderTool(name: "read" | "bash"): Record<string, unknown> {
-  return { type: "function", function: {
-    name,
-    description: "Requirement placeholder for the upstream gate: this harness cannot execute it. Use the harness tools instead.",
-    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
-  } };
-}
-
-/**
- * 按名单闸垫补工具名：缺 `read` 垫 read，缺 `bash` 与 `shell` 才垫 bash（官方 GA 用
- * `shell` 之名，客户端自带任一即满足）。客户端同名定义优先、原样保留；空工具列表
- * 同样垫补（名单闸不分有无工具，实测无 tools 直接 403）。
- */
-export function padOpencodeZenGateTools(clientTools: unknown): unknown[] {
+export function mergeOpencodeZenGateTools(clientTools: unknown): unknown[] {
   const tools = Array.isArray(clientTools) ? clientTools : [];
   const names = new Set<string>();
   for (const tool of tools) {
     const name = isPlainObject(tool) ? toolName(tool) : undefined;
     if (name) names.add(name);
   }
-  const padded = [...tools];
-  if (!names.has("read")) padded.push(gatePlaceholderTool("read"));
-  if (!names.has("bash") && !names.has("shell")) padded.push(gatePlaceholderTool("bash"));
-  return padded;
+  const merged = [...tools];
+  for (const tool of OPENCODE_ZEN_CLIENT_TOOLS) {
+    const name = toolName(tool);
+    if (name !== undefined && GATE_REQUIRED_TOOL_NAMES.has(name) && !names.has(name)) merged.push(tool);
+  }
+  return merged;
+}
+
+/** Responses 协议工具的扁平名（{type:"function", name, …}，无 function 包裹）。 */
+function flatToolName(tool: Record<string, unknown>): string | undefined {
+  return typeof tool.name === "string" ? tool.name : undefined;
+}
+
+/**
+ * Responses 端点的名单闸合并（与 mergeOpencodeZenGateTools 同规则、扁平形状）：
+ * `/responses` 端点执行同一门禁（2026-10-15 实测：缺 read 403、在场 200），官方
+ * 定义转为 Responses 扁平形状（type/name/description/parameters/strict）。
+ */
+export function mergeOpencodeZenGateToolsResponses(clientTools: unknown): unknown[] {
+  const tools = Array.isArray(clientTools) ? clientTools : [];
+  const names = new Set<string>();
+  for (const tool of tools) {
+    if (!isPlainObject(tool)) continue;
+    const name = flatToolName(tool) ?? toolName(tool);
+    if (name) names.add(name);
+  }
+  const merged = [...tools];
+  for (const gateName of GATE_REQUIRED_TOOL_ORDER) {
+    if (names.has(gateName)) continue;
+    const official = (OPENCODE_ZEN_CLIENT_TOOLS as Array<Record<string, unknown>>)
+      .map((tool) => isPlainObject(tool.function) ? tool.function as Record<string, unknown> : undefined)
+      .find((fn) => fn !== undefined && fn.name === gateName);
+    if (official && typeof official.description === "string" && isPlainObject(official.parameters)) {
+      merged.push({ type: "function", name: gateName, description: official.description, parameters: official.parameters, strict: false });
+    }
+  }
+  return merged;
 }
 
 export interface OpencodeZenBodyInjection {
@@ -142,8 +179,9 @@ export interface OpencodeZenBodyInjection {
  * 请求体门禁注入：
  * - 强制 `stream: true` + `stream_options.include_usage`（非流式上游必拒）；
  * - `prompt_cache_key` 固定为会话 id（对齐官方行为，最大化上游 KV 缓存亲和）；
- * - tools 垫补名单闸要求的 `read`/`bash` 之名（见 padOpencodeZenGateTools）；
- *   system 消息与工具定义原样透传（2026-10-14 实测门禁不检查 system 内容与 schema）；
+ * - tools 经 `mergeOpencodeZenGateTools` 保证官方 `read`/`shell` 真实定义在场
+ *   （2026-10-15 实测：空 schema 占位失效）；system 消息与工具定义原样透传
+ *   （门禁不检查 system 内容）；
  * - reasoning effort 归一化为上游 `reasoning_effort`（见 normalizeOpencodeZenEffort），
  *   `effortLevels` 为调用方从实时元数据取的该模型档位值域（空数组=不校验）。
  */
@@ -164,7 +202,7 @@ export function injectOpencodeZenFingerprintBody(
   return {
     body: {
       ...rest,
-      tools: padOpencodeZenGateTools(input.tools),
+      tools: mergeOpencodeZenGateTools(input.tools),
       ...(effort ? { reasoning_effort: effort } : {}),
       stream: true,
       stream_options: streamOptions,

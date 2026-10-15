@@ -37,7 +37,7 @@
     "@agent-proxy/models": "workspace:*"
   },
   "dependencies": {
-    "@agent-proxy/codebuddy": "workspace:*",
+    "@agent-proxy/llm-bridge": "workspace:*",
     "@agent-proxy/plugin-api": "workspace:*"
   }
 }

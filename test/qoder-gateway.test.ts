@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "./host-test.ts";
-import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { createQoderAdapter, qoderEnabled, safeQoderUpstreamError, validateQoderConfig } from "@agent-proxy/qoder";
+import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { createQoderAdapter, safeQoderUpstreamError, validateQoderConfig } from "@agent-proxy/qoder";
 import type { QoderDependencies } from "@agent-proxy/qoder";
 import { QoderCredentialError } from "@agent-proxy/qoder/credentials";
 import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
@@ -316,21 +317,24 @@ test("Qoder 国内版使用独立授权与端点生成 Qoder-CN 目录并完成�
   });
 });
 
-test("Qoder 禁用时不读授权、不拉目录、不注册定时刷新", TIMEOUT, async () => {
+test("网关禁用 Qoder 时不创建插件、不读授权、不发请求或注册定时刷新", TIMEOUT, async () => {
   await fixture(async ({ config, directory }) => {
     for (const overrides of [{ qoder: false }, { qoder: false, upstreamOnly: true }]) {
       let operations = 0;
       const current = { ...config, ...overrides };
-      const adapter = createQoderAdapter(current, {
-        cacheDirectory: directory,
-        credentials: async () => { operations++; return credential(); },
-        transport: { fetchCatalog: async () => { operations++; return catalogData(); }, infer: async () => { operations++; return upstream(); } },
-        setInterval: (() => { operations++; throw new Error("禁用适配器不应启动 timer"); }) as typeof setInterval,
+      const registry = createConfiguredPluginRegistry(current, {
+        qoder: {
+          cacheDirectory: directory,
+          credentials: async () => { operations++; return credential(); },
+          transport: { fetchCatalog: async () => { operations++; return catalogData(); }, infer: async () => { operations++; return upstream(); } },
+          setInterval: (() => { operations++; throw new Error("禁用插件不应启动 timer"); }) as typeof setInterval,
+        },
       });
-      assert.equal(qoderEnabled(current), false);
-      assert.deepEqual(await adapter.catalog(), { models: [] });
-      assert.equal((await adapter.forward(request(), { model: MODEL, input: "你好" })).status, 404);
-      adapter.close();
+      try {
+        assert.equal(agentConfigEnabled(current, "qoder"), false);
+        assert.deepEqual(registry.plugins, []);
+        assert.equal(registry.match(MODEL), undefined);
+      } finally { await registry.close(); }
       assert.equal(operations, 0);
     }
   });
@@ -353,14 +357,15 @@ test("Qoder 手动目录保留启动一次刷新并等待结果，显式刷新�
     let fetches = 0;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const adapter = createQoderAdapter({ ...config, upstreamOnly: true }, {
+    const upstreamOnlyConfig = { ...config, upstreamOnly: true };
+    const adapter = createQoderAdapter(upstreamOnlyConfig, {
       catalogMode: "manual", cacheDirectory: directory, credentials: async () => credential(),
       cn: { credentials: async () => null },
       setInterval: (() => { throw new Error("手动目录不得注册模型 timer"); }) as typeof setInterval,
       transport: { fetchCatalog: async () => { fetches++; await gate; return catalogData(); }, infer: async () => upstream() },
     });
     try {
-      assert.equal(qoderEnabled({ ...config, upstreamOnly: true }), true);
+      assert.equal(agentConfigEnabled(upstreamOnlyConfig, "qoder"), true);
       const listed = adapter.catalog();
       const explicit = adapter.refreshCatalog();
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -667,12 +672,13 @@ test("Qoder WebSocket 握手与所有地域帧均拒绝进入上游桥", TIMEOUT
   });
 });
 
-test("Qoder 启用时仅允许环回监听并保留各地域模型前缀", TIMEOUT, async () => {
+test("Qoder 启用时仅允许环回监听，过时 prefix 不影响校验", TIMEOUT, async () => {
   await fixture(async ({ config }) => {
     for (const host of ["localhost", "::1", "[::1]", "127.0.0.2"]) validateQoderConfig({ ...config, host });
     assert.throws(() => validateQoderConfig({ ...config, host: "0.0.0.0" }), /环回/);
-    for (const prefix of ["qoder/", "qoder-intl/", "qoder-cn/"]) assert.throws(() => validateQoderConfig({ ...config, prefix }), /前缀保留/);
-    assert.throws(() => validateQoderConfig({ ...config, host: "0.0.0.0", upstreamOnly: true }), /环回/);
+    for (const prefix of ["qoder/", "qoder-intl/", "qoder-cn/"]) assert.doesNotThrow(() => validateQoderConfig({ ...config, prefix }));
+    const wideHost = { ...config, host: "0.0.0.0", upstreamOnly: true };
+    assert.throws(() => validateQoderConfig(wideHost), /环回/);
   });
 });
 

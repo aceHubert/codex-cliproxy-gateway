@@ -74,7 +74,7 @@
       "minLength": 1,
       "deprecated": true
     },
-    "model_merge_json": {
+    "modelMergeJson": {
       "type": "string",
       "format": "uri"
     },

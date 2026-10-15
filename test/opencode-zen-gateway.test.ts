@@ -4,14 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "./host-test.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { collectCompatibleModels } from "../apps/gateway/src/cli.ts";
 import {
   OPENCODE_ZEN_CLIENT_USER_AGENT,
   OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
 } from "@agent-proxy/opencode-zen/fingerprint";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
-import { createSessionBindingCache, OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
-import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, opencodeZenEnabled } from "@agent-proxy/opencode-zen";
+import { OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
+import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
 import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
@@ -78,14 +80,14 @@ async function fixture(
       create(overrides = {}, dependencies = {}) {
         const defaultFetch = async (url: string, init?: RequestInit): Promise<Response> => {
           const target = String(url);
-          if (target.endsWith("/zen/v1/models")) {
+          if (target.endsWith("/inference/v1/models")) {
             return Response.json({ object: "list", data: [
               { id: "nemotron-3.5-lightning-free" },
               { id: "exo-free" },
               { id: "claude-opus-5" },
             ] });
           }
-          if (target.endsWith("/zen/v1/chat/completions")) {
+          if (target.endsWith("/inference/v1/chat/completions")) {
             upstream = {
               url: target,
               headers: headersToObject(new Headers(init?.headers)),
@@ -151,7 +153,7 @@ test("普通兼容模型列表与排除选择器都包含 Zen", TIMEOUT, async (
     const dependencies = { opencodeZen: {
       cacheDirectory: directory, refreshCatalogOnStart: false,
       fetch: async () => Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }),
-      fetchMetadata: async () => ({}), probeModel: async () => "chat" as const,
+      fetchMetadata: async () => ({}), probeModel: async () => "chat-completions" as const,
     } };
     const listed = await collectCompatibleModels(config, dependencies);
     assert.ok(listed.entries.some((model) => model.slug === MODEL));
@@ -167,7 +169,8 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
     let callback!: () => void;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
-    const adapter = createOpencodeZenAdapter({ ...config, upstreamOnly: true }, {
+    const zenUpstreamOnly = { ...config, upstreamOnly: true };
+    const adapter = createOpencodeZenAdapter(zenUpstreamOnly, {
       catalogMode: "manual", cacheDirectory: directory,
       fetch: async () => { fetches++; await gate; return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }); },
       fetchMetadata: async () => ({}),
@@ -195,19 +198,21 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
   });
 });
 
-test("zen 配置校验：类型、环回监听与前缀保留", () => {
+test("zen 配置校验：检查类型和环回监听，过时 prefix 不影响校验", () => {
   const base: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: "/tmp/catalog.json",
   };
-  assert.equal(opencodeZenEnabled(base), false);
-  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true }), true);
-  assert.equal(opencodeZenEnabled({ ...base, opencodeZen: true, upstreamOnly: true }), true);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
+  assert.equal(agentConfigEnabled(base, "opencodeZen"), false);
+  assert.equal(agentConfigEnabled({ ...base, opencodeZen: true }, "opencodeZen"), true);
+  const upstreamOnlyView = { ...base, opencodeZen: true, upstreamOnly: true };
+  assert.equal(agentConfigEnabled(upstreamOnlyView, "opencodeZen"), true);
+  assert.throws(() => validateConfiguredPlugins({ ...base, opencodeZen: 1 as unknown as boolean }), /opencodeZen 必须为 boolean/);
   assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true }), /环回/);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }), /前缀保留/);
-  assert.throws(() => validateOpencodeZenConfig({ ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true }), /环回/);
+  assert.doesNotThrow(() => validateOpencodeZenConfig({ ...base, prefix: "opencode-zen/", opencodeZen: true }));
+  const loopbackView = { ...base, host: "0.0.0.0", opencodeZen: true, upstreamOnly: true };
+  assert.throws(() => validateOpencodeZenConfig(loopbackView), /环回/);
 });
 
 test("上游错误归一化：分类为 zen_* 并原样透传上游描述", () => {
@@ -291,7 +296,7 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补
     assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
     assert.match(await response.text(), /TIME_WAIT/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/zen/v1/chat/completions");
+    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
     assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.equal(up.headers.authorization, "Bearer public");
     assert.equal(up.headers["x-opencode-client"], "cli");
@@ -299,17 +304,18 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补
     assert.match(up.headers.traceparent, /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     const session = up.headers["x-opencode-session"];
     assert.match(session, OPENCODE_SESSION_PATTERN);
+    assert.equal(up.headers["x-opencode-session-id"], session, "门禁硬性要求（缺失 403）");
     assert.equal(up.headers["x-session-affinity"], session);
     assert.equal(up.headers["x-session-id"], session);
-    // 请求体：剥前缀、强制流式、消息原样透传（无工具也垫占位）、缓存键对齐会话。
+    // 请求体：剥前缀、强制流式、消息原样透传（无工具也合并官方定义）、缓存键对齐会话。
     assert.equal(up.body.model, "nemotron-3.5-lightning-free");
     assert.equal(up.body.stream, true);
     assert.equal(up.body.prompt_cache_key, session);
     assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "不注入模板，客户端消息原样在最前");
     assert.deepEqual(
       (up.body.tools as Json[]).map((tool) => tool.function.name),
-      ["read", "bash"],
-      "无工具流量同样垫补名单闸占位",
+      ["read"],
+      "无工具流量同样合并官方 read 定义",
     );
   });
 });
@@ -336,29 +342,36 @@ test("OPENCODE_API_KEY 环境变量覆盖公共鉴权，未设置时回落 Beare
   });
 });
 
-test("会话连续性：相同 X-Session-Id 复用同一上游会话，已带合规头原样透传", TIMEOUT, async () => {
+test("会话连续性：Codex 的 session-id 头确定性复用同一上游会话，已带合规头原样透传", TIMEOUT, async () => {
   await fixture(async ({ create }) => {
     const captured: string[] = [];
     const handler = create(undefined, {      fetch: async (url, init) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/zen/v1/chat/completions")) {
-          captured.push(new Headers(init?.headers).get("x-opencode-session") ?? "");
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
+        if (target.endsWith("/inference/v1/chat/completions")) {
+          const headers = new Headers(init?.headers);
+          captured.push(headers.get("x-opencode-session") ?? "");
+          assert.equal(headers.get("x-opencode-session-id"), headers.get("x-opencode-session"), "四件套镜像同一会话");
           return sse([chunkFrame({ content: "ok" }), chunkFrame({}, "stop")]);
         }
         throw new Error(`未模拟调用 ${target}`);
       },
     });
-    await handler(chatRequest(MODEL, { stream: true }, { "X-Session-Id": "test-conv-1" }));
-    await handler(chatRequest(MODEL, { stream: true }, { "X-Session-Id": "test-conv-1" }));
-    await handler(chatRequest(MODEL, { stream: true }, { "X-Session-Id": "test-conv-2" }));
-    assert.equal(captured.length, 3);
-    assert.equal(captured[0], captured[1], "同一外部会话必须稳定复用同一 Zen 会话");
-    assert.notEqual(captured[1], captured[2], "不同外部会话必须映射到不同 Zen 会话");
+    // Codex 实发形态：session-id 与 thread-id 同值（另带 originator 等）。
+    const codexHeaders = { "session-id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45", "thread-id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45", originator: "codex_exec" };
+    await handler(chatRequest(MODEL, { stream: true }, codexHeaders));
+    // 旧契约形态 x-session-id 与无 thread-id 的兜底同样稳定。
+    await handler(chatRequest(MODEL, { stream: true }, { "X-Session-Id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45" }));
+    await handler(chatRequest(MODEL, { stream: true }, { "session-id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45" }));
+    await handler(chatRequest(MODEL, { stream: true }, { "thread-id": "another-conv" }));
+    assert.equal(captured.length, 4);
+    assert.equal(captured[0], captured[1], "同一外部会话（不同标头来源）必须派生同一 Zen 会话");
+    assert.equal(captured[1], captured[2], "派生跨请求稳定（无进程内状态依赖）");
+    assert.notEqual(captured[2], captured[3], "不同外部会话必须派生不同 Zen 会话");
     assert.match(captured[0], OPENCODE_SESSION_PATTERN);
     // 已带合法 x-opencode-session 的请求原样透传，不做转换。
-    await handler(chatRequest(MODEL, { stream: true }, { "x-opencode-session": "ses_3a4ee6335ffedFB8f76BPU1Eb3", "X-Session-Id": "ignored" }));
-    assert.equal(captured[3], "ses_3a4ee6335ffedFB8f76BPU1Eb3");
+    await handler(chatRequest(MODEL, { stream: true }, { "x-opencode-session": "ses_3a4ee6335ffedFB8f76BPU1Eb3", "session-id": "ignored" }));
+    assert.equal(captured[4], "ses_3a4ee6335ffedFB8f76BPU1Eb3");
   });
 });
 
@@ -367,8 +380,8 @@ test("非流式客户端：上游强制流式、网关聚合为完整 chat.compl
     const handler = fixture.create(undefined, {
       fetch: async (url, init) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/zen/v1/chat/completions")) {
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
+        if (target.endsWith("/inference/v1/chat/completions")) {
           return sse([
             chunkFrame({ role: "assistant", content: "TIME_WAIT " }),
             chunkFrame({ content: "是主动关闭方等待 2MSL 的状态" }),
@@ -397,8 +410,8 @@ test("工具调用：客户端工具与官方工具集合并转发，SSE 聚合�
     const handler = fixture.create(undefined, {
       fetch: async (url, init) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/zen/v1/chat/completions")) {
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
+        if (target.endsWith("/inference/v1/chat/completions")) {
           fixture.upstream = {
             url: target,
             headers: headersToObject(new Headers(init?.headers)),
@@ -429,8 +442,8 @@ test("工具调用：客户端工具与官方工具集合并转发，SSE 聚合�
     const tools = up.body.tools as Json[];
     const names = tools.map((tool) => tool.function.name);
     assert.ok(names.includes("lookup_issue"));
-    assert.ok(names.includes("read") && names.includes("bash"), "名单闸占位（read+bash）必须垫补");
-    assert.equal(names.length, 3, "只垫占位，不并入官方工具定义");
+    assert.ok(names.includes("read"), "门禁要求合并官方 read 定义");
+    assert.equal(names.length, 2, "最小合并面：只补 read，不并入其余官方工具");
     assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "system 内容不注入模板（首条就是客户端消息）");
   });
 });
@@ -439,7 +452,7 @@ test("上游 403/429 归一化为带指引的错误；网络故障 502", TIMEOUT
   await fixture(async ({ create }) => {
     const forbidden = create(undefined, {
       fetch: async (url) => {
-        if (String(url).endsWith("/zen/v1/models")) return Response.json({ data: [] });
+        if (String(url).endsWith("/inference/v1/models")) return Response.json({ data: [] });
         return new Response(JSON.stringify({ error: { type: "FreeTierError", message: "OpenCode's free tier can only be used from within OpenCode" } }), { status: 403, headers: { "content-type": "application/json" } });
       },
     });
@@ -451,7 +464,7 @@ test("上游 403/429 归一化为带指引的错误；网络故障 502", TIMEOUT
 
     const limited = create(undefined, {
       fetch: async (url) => {
-        if (String(url).endsWith("/zen/v1/models")) return Response.json({ data: [] });
+        if (String(url).endsWith("/inference/v1/models")) return Response.json({ data: [] });
         return new Response(JSON.stringify({ error: { type: "FreeUsageLimitError", message: "too many" } }), { status: 429 });
       },
     });
@@ -461,7 +474,7 @@ test("上游 403/429 归一化为带指引的错误；网络故障 502", TIMEOUT
 
     const broken = create(undefined, {
       fetch: async (url) => {
-        if (String(url).endsWith("/zen/v1/models")) return Response.json({ data: [] });
+        if (String(url).endsWith("/inference/v1/models")) return Response.json({ data: [] });
         throw new Error("connection reset");
       },
     });
@@ -479,24 +492,24 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
     const handler = fixture.create(undefined, {
       fetch: async (url, init) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "muse-spark-1.3-contributor-free" }] });
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "echo-responses-free" }] });
         if (target === "https://models.opencode.ai/api.json") {
-          return Response.json({ opencode: { models: { "muse-spark-1.3-contributor-free": { provider: { npm: "@ai-sdk/openai" } } } } });
+          return Response.json({ opencode: { models: { "echo-responses-free": { provider: { npm: "@ai-sdk/openai" } } } } });
         }
-        if (target.endsWith("/zen/v1/responses")) {
+        if (target.endsWith("/inference/v1/responses")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
         throw new Error(`未模拟调用 ${target}`);
       },
-      probeModel: async () => "chat",
+      probeModel: async () => "chat-completions",
     });
     // 协议路由依赖元数据：先触发一次目录刷新（/v1/models）再发 responses 请求。
     await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
       method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        model: "opencode-zen/muse-spark-1.3-contributor-free",
+        model: "opencode-zen/echo-responses-free",
         input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
         tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
         stream: true,
@@ -506,12 +519,111 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
     const text = await response.text();
     assert.equal(text, nativeStream, "原生 Responses 的 custom 调用应原样直通");
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/zen/v1/responses");
-    assert.equal(up.body.model, "muse-spark-1.3-contributor-free");
+    assert.equal(up.url, "https://opencode.ai/inference/v1/responses");
+    assert.equal(up.body.model, "echo-responses-free");
     assert.deepEqual((up.body.tools as Json[]).find((tool) => tool.name === "apply_patch"), { type: "custom", name: "apply_patch", format: { type: "text" } });
     assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.match(up.headers["x-opencode-session"] ?? "", OPENCODE_SESSION_PATTERN);
     assert.match(up.body.prompt_cache_key ?? "", OPENCODE_SESSION_PATTERN);
+  });
+});
+
+test("Responses 入口：muse-spark 剥离 additional_tools 信封并原样提升工具声明，剥离 web_search 参数", TIMEOUT, async () => {
+  const nativeStream = "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\",\"status\":\"in_progress\"}}\n\n"
+    + "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n";
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "muse-spark-1.3-contributor-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          return Response.json({ opencode: { models: { "muse-spark-1.3-contributor-free": { provider: { npm: "@ai-sdk/openai" } } } } });
+        }
+        if (target.endsWith("/inference/v1/responses")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+      probeModel: async () => "chat-completions",
+    });
+    // 协议路由依赖元数据：先触发一次目录刷新（/v1/models）再发 responses 请求。
+    await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    // Codex 0.162 线格式：全部工具声明在 input[0] 的 additional_tools 信封项里。
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/muse-spark-1.3-contributor-free",
+        input: [
+          { type: "additional_tools", role: "developer", tools: [
+            { type: "namespace", name: "functions", tools: [
+              { type: "function", name: "send_user_message_async", description: "send", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false }, strict: false },
+              { type: "custom", name: "exec", format: { type: "text" } },
+            ] },
+            { type: "namespace", name: "repl", tools: [{ type: "custom", name: "js", format: { type: "text" } }] },
+            { type: "web_search", search_content_types: ["news"] },
+          ] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        ],
+        tools: [{ type: "web_search_preview", search_content_types: ["news"] }],
+        stream: true,
+      }),
+    }));
+    assert.equal(response.status, 200);
+    await response.text();
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    const input = up.body.input as Json[];
+    assert.equal(input.length, 1, "additional_tools 信封项应从 input 剥离");
+    assert.equal(input[0]!.type, "message");
+    const tools = up.body.tools as Json[];
+    const namespaced = tools.find((tool) => tool.type === "namespace")!;
+    assert.deepEqual(namespaced, { type: "namespace", name: "functions", description: "functions", tools: [
+      { type: "function", name: "send_user_message_async", description: "send", parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"], additionalProperties: false }, strict: false },
+    ] }, "namespace 声明原样提升（空 description 以名字占位、custom 工具丢弃），不展平不改名");
+    assert.equal(tools.some((tool) => tool.type === "namespace" && tool.name === "repl"), false, "内层只剩 custom 的 namespace 应整体丢弃");
+    assert.equal(tools.some((tool) => tool.type === "custom"), false, "custom 工具声明应被丢弃");
+    assert.equal(tools.some((tool) => tool.type === "function" && tool.name === "read"), true, "门禁 read 工具应仍在场");
+    assert.equal("search_content_types" in (tools.find((tool) => tool.type === "web_search") ?? {}), false, "web_search 的 search_content_types 应剥离");
+    assert.deepEqual(tools.find((tool) => tool.type === "web_search_preview"), { type: "web_search_preview", search_content_types: ["news"] }, "web_search_preview 的参数应保留");
+  });
+});
+
+test("Responses 入口：非 muse-spark 的 responses 协议模型不受净化影响", TIMEOUT, async () => {
+  const nativeStream = "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\"}}\n\n";
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "gpt-echo-responses" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          return Response.json({ opencode: { models: { "gpt-echo-responses": { provider: { npm: "@ai-sdk/openai" } } } } });
+        }
+        if (target.endsWith("/inference/v1/responses")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+      probeModel: async () => "chat-completions",
+    });
+    await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/gpt-echo-responses",
+        input: [
+          { type: "additional_tools", role: "developer", tools: [{ type: "web_search", search_content_types: ["news"] }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        ],
+        stream: true,
+      }),
+    }));
+    assert.equal(response.status, 200);
+    await response.text();
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    const input = up.body.input as Json[];
+    assert.equal(input.length, 2, "非 muse-spark 模型不剥离 additional_tools");
+    assert.deepEqual(input[0]!.tools, [{ type: "web_search", search_content_types: ["news"] }], "信封项内容原样保留（含 web_search 参数）");
   });
 });
 
@@ -520,11 +632,11 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
     const handler = fixture.create(undefined, {
       fetch: async (url, init) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
         }
-        if (target.endsWith("/zen/v1/chat/completions")) {
+        if (target.endsWith("/inference/v1/chat/completions")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return sse([
             chunkFrame({ role: "assistant", content: "issue 42 done" }),
@@ -553,7 +665,7 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
     assert.match(text, /response\.output_text\.delta/);
     assert.match(text, /issue 42 done/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/zen/v1/chat/completions");
+    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
     const messages = up.body.messages as Json[];
     assert.ok(String(messages[0]!.content).startsWith("SYS-INSTR"), "客户端 instructions 原样成为首条 system（不注入模板）");
     assert.ok(messages.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls[0].id === "call_1"));
@@ -562,6 +674,96 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
   });
 });
 
+test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，anthropic 协议模型直通", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
+        }
+        if (target.endsWith("/inference/v1/chat/completions")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return sse([
+            chunkFrame({ role: "assistant", content: "chat 源回答" }),
+            chunkFrame({}, "stop"),
+          ]);
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    // /v1/messages：chat 协议模型 → 单跳转换 + Anthropic 事件渲染。
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/nemotron-3.5-lightning-free",
+        system: "SYS-INSTR",
+        max_tokens: 512,
+        messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+        stream: true,
+      }),
+    }));
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+    const body = await response.text();
+    assert.match(body, /message_start/);
+    assert.match(body, /chat 源回答/);
+    assert.match(body, /message_stop/);
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
+    const messages = up.body.messages as Json[];
+    assert.ok(messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("你好")));
+  });
+
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据 provider.npm 决定模型端点协议（@ai-sdk/anthropic → /messages 直通）；
+          // 元数据存在的模型不进入探针，协议由 npm 映射而来。
+          return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": { provider: { npm: "@ai-sdk/anthropic" } } } } });
+        }
+        if (target.endsWith("/inference/v1/messages")) {
+          upstreamSeen = true;
+          return new Response(anthropicSse, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    let upstreamSeen = false;
+    // anthropic 协议模型直通：原协议请求体替换模型 id 后原样返回；handler 消费
+    // dependencies.fetch，直通 mock 与目录 mock 走同一注入点。
+    const anthropicSse = [
+      "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"up\",\"role\":\"assistant\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}",
+      "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+      "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"直通回答\"}}",
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}",
+      "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}",
+      "event: message_stop\ndata: {\"type\":\"message_stop\"}",
+    ].join("\n\n") + "\n\n";
+    // protocol() 同步读目录缓存：先用 /v1/models 预热（内部等待目录刷新完成），
+    // 探针裁决为 anthropic 后转发才走直通分支。
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    const passthrough = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-zen/nemotron-3.5-lightning-free",
+        max_tokens: 64,
+        messages: [{ role: "user", content: [{ type: "text", text: "直通" }] }],
+        stream: true,
+      }),
+    }));
+    assert.equal(passthrough.status, 200);
+    const text = await passthrough.text();
+    assert.match(text, /直通回答/);
+    assert.match(text, /message_stop/);
+    assert.ok(upstreamSeen, "anthropic 协议模型必须直通上游 /messages");
+  });
+});
 for (const stream of [true, false]) {
   test(`Responses 入口：chat 上游的 custom 与 function 调用按客户端声明还原（stream=${stream}）`, TIMEOUT, async () => {
     const patch = "*** Begin Patch\n*** Update File: 中文.txt\n@@\n-旧内容\n+包含\\路径与\"引号\"的新内容\n*** End Patch";
@@ -640,9 +842,135 @@ for (const stream of [true, false]) {
         assert.equal(tool?.type, "function");
         assert.deepEqual(tool?.function.parameters.required, ["input"]);
       }
-      assert.ok(tools.some((tool) => tool.function.name === "read") && tools.some((tool) => tool.function.name === "bash"), "垫补名单闸要求的 read+bash 占位");
+      assert.ok(tools.some((tool) => tool.function.name === "read"), "合并门禁要求的官方 read 定义");
       assert.equal(upstream.body.stream, true);
     }, () => sse(frames));
+  });
+}
+
+for (const stream of [true, false]) {
+  test(`Responses 入口：无原 tools 时合并的官方 read 定义保持 function 调用（stream=${stream}）`, TIMEOUT, async () => {
+    const arguments_ = "{}";
+    await fixture(async (fixture) => {
+      const handler = fixture.create();
+      const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, input: "查询工作目录", stream }),
+      }));
+      assert.equal(response.status, 200);
+      let output: Json[];
+      if (stream) {
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "response.completed"));
+        output = events.filter((event) => event.type === "response.output_item.done").map((event) => event.item as Json);
+      } else {
+        const result = await response.json() as Json;
+        assert.equal(result.status, "completed");
+        output = result.output as Json[];
+      }
+      assert.equal(output.length, 1);
+      const call = output.find((item) => item.name === "read");
+      assert.ok(call);
+      assert.equal(call.type, "function_call");
+      assert.equal(call.call_id, `call_gate_read`);
+      assert.equal(call.arguments, arguments_);
+      assert.ok(!("input" in call));
+      const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      const tools = upstream.body.tools as Json[];
+      assert.deepEqual(tools.map((tool) => tool.function.name), ["read"]);
+      for (const tool of tools) {
+        assert.ok(Object.keys(tool.function.parameters ?? {}).length > 0, "合并的是官方真实定义（空 schema 占位已被门禁拒绝）");
+      }
+    }, () => sse([
+      chunkFrame({ tool_calls: [{ index: 0, id: "call_gate_read", type: "function", function: { name: "read", arguments: arguments_ } }] }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+
+  test(`Responses 入口：不在客户端或门禁合并中的名称仍然失败（stream=${stream}）`, TIMEOUT, async () => {
+    await fixture(async ({ create }) => {
+      const response = await create()(new Request("http://127.0.0.1:8327/v1/responses", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, input: "测试", stream,
+          tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
+        }),
+      }));
+      if (stream) {
+        assert.equal(response.status, 200);
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "response.failed"));
+        assert.equal(events.some((event) => event.type === "response.completed"), false);
+      } else {
+        assert.equal(response.status, 502);
+        const result = await response.json() as Json;
+        assert.equal(result.status, "failed");
+      }
+    }, () => sse([
+      chunkFrame({ tool_calls: [{ index: 0, id: "call_unknown", type: "function", function: { name: "not_an_injected_tool", arguments: "{}" } }] }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+}
+
+for (const stream of [true, false]) {
+  test(`Messages 入口：chat 上游合并的官方 read 调用返回 Anthropic 工具条目（stream=${stream}）`, TIMEOUT, async () => {
+    await fixture(async (fixture) => {
+      const response = await fixture.create()(new Request("http://127.0.0.1:8327/v1/messages", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, system: "客户端系统指令", max_tokens: 512,
+          messages: [{ role: "user", content: "测试占位调用" }], stream,
+        }),
+      }));
+      assert.equal(response.status, 200);
+      let content: Json[];
+      if (stream) {
+        const events = (await response.text()).split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => JSON.parse(line.slice(5)) as Json);
+        assert.ok(events.some((event) => event.type === "message_stop"));
+        content = events.filter((event) => event.type === "content_block_start").map((event) => event.content_block as Json);
+        assert.ok(events.some((event) => event.type === "message_delta" && event.delta.stop_reason === "tool_use"));
+      } else {
+        const message = await response.json() as Json;
+        assert.equal(message.stop_reason, "tool_use");
+        content = message.content as Json[];
+      }
+      const call = content.find((item) => item.type === "tool_use" && item.name === "read");
+      assert.ok(call);
+      assert.equal(call.id, `call_message_read`);
+      assert.deepEqual(call.input, {});
+      const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      assert.deepEqual((upstream.body.tools as Json[]).map((tool) => tool.function.name), ["read"]);
+      assert.equal(upstream.body.messages[0].content, "客户端系统指令", "不注入 OpenCode 模板");
+      assert.equal(upstream.body.stream, true);
+    }, () => sse([
+      chunkFrame({ tool_calls: [{ index: 0, id: "call_message_read", type: "function", function: { name: "read", arguments: "{}" } }] }),
+      chunkFrame({}, "tool_calls"),
+    ]));
+  });
+
+  test(`Messages 入口：上游门禁错误保留原始描述（stream=${stream}）`, TIMEOUT, async () => {
+    const message = "OpenCode's free tier can only be used from within OpenCode";
+    await fixture(async ({ create }) => {
+      const handler = create(undefined, {
+        fetch: async (url) => {
+          if (String(url).endsWith("/inference/v1/models")) return Response.json({ data: [] });
+          return Response.json({ error: { type: "FreeTierError", message } }, { status: 403 });
+        },
+      });
+      const response = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: MODEL, max_tokens: 512, messages: [{ role: "user", content: "测试" }], stream }),
+      }));
+      assert.equal(response.status, 403);
+      const payload = await response.json() as Json;
+      assert.equal(payload.error.type, "zen_free_tier_error");
+      assert.equal(payload.error.message, message);
+    });
   });
 }
 
@@ -702,7 +1030,7 @@ test("zen 目录过滤：下线/非 chat 协议/探针剔除的模型不暴露",
     const handler = create(undefined, {
       fetch: async (url) => {
         const target = String(url);
-        if (target.endsWith("/zen/v1/models")) {
+        if (target.endsWith("/inference/v1/models")) {
           return Response.json({ data: [
             { id: "nemotron-3.5-lightning-free" },
             { id: "muse-spark-1.3-contributor-free" },
@@ -719,7 +1047,7 @@ test("zen 目录过滤：下线/非 chat 协议/探针剔除的模型不暴露",
         }
         throw new Error(`未模拟调用 ${target}`);
       },
-      probeModel: async (id) => (id === "jev-1.13-free" ? "drop" : "chat"),
+      probeModel: async (id) => (id === "jev-1.13-free" ? "drop" : "chat-completions"),
     });
     const response = await handler(new Request("http://127.0.0.1:8327/v1/models"));
     const data = (await response.json() as Json).data as Json[];
@@ -800,5 +1128,82 @@ test("目录条目提示词回落：保留官方 Codex 提示词，不再替换�
       const messages = entry.model_messages as { instructions_template?: string } | undefined;
       assert.equal(messages?.instructions_template, (base.model_messages as { instructions_template?: string }).instructions_template, `${entry.slug} 的 instructions_template 同步回落（只改 base_instructions 无效）`);
     }
+  });
+});
+
+
+test("gemini 客户端入口：URL 携带模型与流式，gemini 协议模型直通上游", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "exo-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据 provider.npm 映射 @ai-sdk/google → gemini 端点协议。
+          return Response.json({ opencode: { models: { "exo-free": { provider: { npm: "@ai-sdk/google" } } } } });
+        }
+        if (target.includes("/inference/v1/models/") && target.includes(":streamGenerateContent")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return new Response([
+            `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "gemini 直通回答" }], role: "model" } }] })}`,
+            `data: ${JSON.stringify({ candidates: [{ content: { role: "model" }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 1, candidatesTokenCount: 1, totalTokenCount: 2 } })}`,
+          ].join("\n\n") + "\n\n", { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    // 目录预热：protocol() 同步读缓存后 gemini 转发走直通分支。
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    // gemini 客户端入口：model 与流式均由 URL 路径表达。
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/models/opencode-zen%2Fexo-free:streamGenerateContent", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "你好" }] }] }),
+    }));
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.match(body, /gemini 直通回答/);
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    assert.match(up.url, /\/inference\/v1\/models\/exo-free:streamGenerateContent\?alt=sse$/);
+    assert.equal((up.body.contents as Json[])[0]?.role, "user");
+  });
+});
+
+test("gemini 客户端入口：chat 协议模型单跳转换并渲染回 Gemini SSE", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "exo-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          // 元数据缺失时探针裁决协议；直接给出 chat 探针结果。
+          return Response.json({ opencode: { models: {} } });
+        }
+        if (target.endsWith("/inference/v1/chat/completions")) {
+          fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
+          return sse([
+            chunkFrame({ role: "assistant", content: "chat 转 gemini 回答" }),
+            chunkFrame({}, "stop"),
+          ]);
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    const warmup = await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    await warmup.text();
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/models/opencode-zen%2Fexo-free:generateContent", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "你好" }] }], systemInstruction: "sys" }),
+    }));
+    assert.equal(response.status, 200);
+    const completion = await response.json() as Json;
+    const candidate = (completion.candidates as Json[])[0]!;
+    const parts = (candidate.content as Json).parts as Json[];
+    assert.equal(parts.map((part) => part.text ?? "").join(""), "chat 转 gemini 回答");
+    assert.equal(candidate.finishReason, "STOP");
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    const messages = up.body.messages as Json[];
+    assert.ok(messages.some((message) => message.role === "system" && String(message.content).includes("sys")));
+    assert.ok(messages.some((message) => JSON.stringify(message.content).includes("你好")));
   });
 });

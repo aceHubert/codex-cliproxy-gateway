@@ -31,7 +31,7 @@ import {
   localTime,
   maskedHeaders,
 } from "./request-log.ts";
-import type { RequestLogSink, LogNamespace } from "./request-log.ts";
+import type { RequestLogSink } from "./request-log.ts";
 import { logGatewayError, logRequestSummary } from "./process-log.ts";
 import { webUiPort } from "./ui-port.ts";
 import type { ProcessLogTarget } from "./types.ts";
@@ -1102,7 +1102,7 @@ export function createPluginGatewayHandler(
     }
 
     const endpoint = identifyClientEndpoint(incomingUrl.pathname, mountPath);
-    const responsePath = endpoint?.from === "responses" && endpoint.operation === "generate";
+    const responsePath = endpoint?.to === "responses" && endpoint.operation === "generate";
     const compactPath = endpoint?.operation === "compact";
     const hintedModel = modelFromRoutingHint(request);
     if (endpoint && request.headers.get("upgrade")?.toLowerCase() === "websocket" && hintedModel) {
@@ -1124,7 +1124,7 @@ export function createPluginGatewayHandler(
         }
       }
       preparedBodies.set(request, { bytes, json });
-      const model = typeof json?.model === "string" ? json.model : hintedModel;
+      const model = typeof json?.model === "string" ? json.model : endpoint.pathModel ?? hintedModel;
       if (model && ownsLocalModel(model) && modelExclusion.isExcluded(model)) {
         pluginRequests.add(request);
         logGatewayError(processLog, {
@@ -1390,7 +1390,7 @@ export function createPluginGatewayHandler(
         resHeaders: response.headers,
         resBody,
         durationMs,
-      }, (pluginNegotiation?.replace(/[^a-zA-Z0-9_-]/g, "_") ?? "cliproxy") as LogNamespace);
+      }, pluginNegotiation?.replace(/[^a-zA-Z0-9_-]/g, "_") ?? "cliproxy");
       // 进程日志里每条请求恰好一行：426 是协议协商（客户端会改用 HTTPS/SSE 重试），
       // 不算故障，但仍是完成的一次请求，因此走摘要而不是错误摘要。
       if (response.status >= 400 && response.status !== 426) {

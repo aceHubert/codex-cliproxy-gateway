@@ -4,7 +4,7 @@
 
 本计划按当时的 agent 插件与 default 分层，让 upstream-only 模式保留所有显式启用的 agent 请求通道。`upstreamOnly` 是已保存配置中的只读路由输入，仅由 default 解释；agent 插件不因该标记改变注册、启用、转换或认证行为。
 
-状态：已完成并归档，bun run check 通过（类型检查、885 项测试、UI/CLI 构建）。本轮沿现有分派顺序落实插件/default 的语义边界，未实现新注册器。旧协议抽离计划已由两份现行计划按职责取代：网关插件接口与生命周期见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)，协议转换封装与 agent 适配见 [llm-bridge 计划](../active/llm-bridge-conversion-compatibility.md)。本文件保留已完成工作的历史结果，不要求重新实施。命令、模型热加载与 Codex 配置由 [独立执行计划](model-config-reload-and-cli-ownership.md) 承担。
+状态：已完成并归档，bun run check 通过（类型检查、885 项测试、UI/CLI 构建）。本轮沿现有分派顺序落实插件/default 的语义边界，未实现新注册器。旧协议抽离计划已由两份现行计划按职责取代：网关插件接口与生命周期见 [monorepo 计划 S2](codex-gateway-monorepo.md#s2网关插件接口与-default)，协议转换封装与 agent 适配见 [llm-bridge 计划](../completed/llm-bridge-conversion-compatibility.md)。本文件保留已完成工作的历史结果，不要求重新实施。命令、模型热加载与 Codex 配置由 [独立执行计划](model-config-reload-and-cli-ownership.md) 承担。
 
 ## 范围
 
@@ -19,7 +19,7 @@
 - 本计划实施时的设计草案采用 agent 前缀注册表与 default：agent 优先匹配，default 内部选择第三方代理或官方；这段背景记录不代表当前 monorepo 插件或转换架构已实施。
 - 当前 upstream-only 通用分支可直接转发第三方上游。解除 agent 启用限制后，必须确保插件先处理自己的入口，错误和拒绝不能再次落入 default。
 - 相关代码：`src/gateway.ts`、各 agent 的 `src/*/index.ts` 与对应请求路由测试。
-- 相关计划：[网关插件接口与生命周期（monorepo 计划 S2）](codex-gateway-monorepo.md#s2网关插件接口与-default)、[llm-bridge 封装与协议兼容](../active/llm-bridge-conversion-compatibility.md)、[命令职责与配置热加载](model-config-reload-and-cli-ownership.md)。
+- 相关计划：[网关插件接口与生命周期（monorepo 计划 S2）](codex-gateway-monorepo.md#s2网关插件接口与-default)、[llm-bridge 封装与协议兼容](../completed/llm-bridge-conversion-compatibility.md)、[命令职责与配置热加载](model-config-reload-and-cli-ownership.md)。
 
 ## 行为约定
 

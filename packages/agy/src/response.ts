@@ -1,3 +1,4 @@
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { AgyToolMap } from "./request.ts";
 
 /**
@@ -118,6 +119,337 @@ function finishDisposition(finishReason: string | undefined): { status: "complet
   if (SAFETY_FINISH.has(finishReason)) return { status: "incomplete", incompleteReason: "content_filter" };
   if (finishReason === "MALFORMED_FUNCTION_CALL") return { status: "failed", failure: "Antigravity 上游报告函数调用格式无效，请检查工具声明后重试" };
   return { status: "failed", failure: `Antigravity 上游返回不支持的 finishReason：${finishReason}` };
+}
+
+/* ====================== 四种客户端协议的独立渲染层 ====================== */
+
+interface ClientRenderState {
+  model: string;
+  stream: boolean;
+  onChunk?: (chunk: string) => void;
+}
+
+/**
+ * AGY 自产 Responses SSE → Chat Completions chunks（含 [DONE]）。本渲染器属于
+ * agy 插件包（不依赖桥接包）：解析自身产出的受信事件流并重组为客户端协议外壳。
+ */
+async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
+  const id = `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
+  const created = Math.floor(Date.now() / 1000);
+  let usage: Json | undefined;
+  let finish = "stop";
+  let model = state.model;
+  const frames: string[] = [];
+  const push = (delta: Json): void => {
+    frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+  };
+  let contentStarted = false;
+  for await (const frame of iterateOwnSse(responsesSse)) {
+    if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+      contentStarted = true;
+      push({ content: frame.delta, role: contentStarted && !frames.length ? "assistant" : undefined });
+    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+      push({ reasoning_content: frame.delta });
+    } else if (frame.type === "response.refusal.delta" && typeof frame.delta === "string") {
+      push({ refusal: frame.delta });
+    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+      const item = record(frame.item, "item");
+      push({ role: "assistant", tool_calls: [{ index: Number(frame.output_index ?? 0), id: item.call_id ?? "", type: "function", function: { name: item.name ?? "", arguments: "" } }] });
+    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+      push({ tool_calls: [{ index: Number(frame.output_index ?? 0), function: { arguments: frame.delta } }] });
+    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+      const response = record(frame.response, "response");
+      if (typeof response.model === "string") model = state.model;
+      const output = Array.isArray(response.output) ? response.output : [];
+      finish = response.status === "incomplete" ? "length" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_calls" : "stop";
+      if (record(response.usage ?? {}, "usage") && response.usage !== null) {
+        const value = record(response.usage, "usage");
+        usage = value;
+      }
+    }
+  }
+  frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] })}\n\n`);
+  if (usage) {
+    frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage })}\n\n`);
+  }
+  frames.push("data: [DONE]\n\n");
+  const text = frames.join("");
+  safely(() => state.onChunk?.(text));
+  if (!state.stream) {
+    // 非流式：聚合为完整 completion JSON。
+    let content = "";
+    const toolCalls = new Map<number, { id: string; function: { name: string; arguments: string } }>();
+    let reasoning = "";
+    let refusal = "";
+    for (const frame of frames) {
+      if (!frame.startsWith("data: ") || frame.includes("[DONE]")) continue;
+      let parsed: Json;
+      try { parsed = JSON.parse(frame.slice(6)); } catch { continue; }
+      const choice = Array.isArray(parsed.choices) ? record(parsed.choices[0] ?? {}, "choice") : {};
+      const delta = record(choice.delta ?? {}, "delta");
+      if (typeof delta.content === "string") content += delta.content;
+      if (typeof delta.reasoning_content === "string") reasoning += delta.reasoning_content;
+      if (typeof delta.refusal === "string") refusal += delta.refusal;
+      if (Array.isArray(delta.tool_calls)) {
+        for (const raw of delta.tool_calls) {
+          const call = record(raw, "tool_call");
+          const index = typeof call.index === "number" ? call.index : 0;
+          const existing = toolCalls.get(index) ?? { id: "", function: { name: "", arguments: "" } };
+          if (typeof call.id === "string" && call.id) existing.id = call.id;
+          const fn = record(call.function ?? {}, "function");
+          if (typeof fn.name === "string" && fn.name) existing.function.name = fn.name;
+          if (typeof fn.arguments === "string") existing.function.arguments += fn.arguments;
+          toolCalls.set(index, existing);
+        }
+      }
+    }
+    const completion: Json = {
+      id, object: "chat.completion", created, model,
+      choices: [{ index: 0, message: { role: "assistant", ...(content === "" && toolCalls.size ? { content: null } : { content }), ...(reasoning ? { reasoning_content: reasoning } : {}), ...(refusal ? { refusal } : {}), ...(toolCalls.size ? { tool_calls: [...toolCalls.entries()].sort(([a], [b]) => a - b).map(([, call]) => ({ id: call.id, type: "function", function: call.function })) } : {}) }, finish_reason: finish }],
+      ...(usage ? { usage } : {}),
+    };
+    return Response.json(completion);
+  }
+  return new Response(strBytes(text), { headers: sseHeaders() });
+}
+
+/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON（零桥接依赖）。 */
+async function renderGeminiClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
+  let finish = "STOP";
+  let model = state.model;
+  const parts: Json[] = [];
+  const toolArgs = new Map<string, string>();
+  const toolNames = new Map<string, string>();
+  let toolCalled = false;
+  let usage: Json | undefined;
+  for await (const frame of iterateOwnSse(responsesSse)) {
+    if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+      parts.push({ text: frame.delta });
+    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+      parts.push({ text: frame.delta, thought: true });
+    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+      const item = record(frame.item, "item");
+      const callId = typeof item.call_id === "string" ? item.call_id : "";
+      toolArgs.set(callId, "");
+      toolNames.set(callId, typeof item.name === "string" ? item.name : "");
+    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+      const callId = [...toolArgs.keys()].at(-1) ?? "";
+      toolArgs.set(callId, (toolArgs.get(callId) ?? "") + frame.delta);
+    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+      const response = record(frame.response, "response");
+      if (typeof response.model === "string") model = state.model;
+      const output = Array.isArray(response.output) ? response.output : [];
+      finish = response.status === "incomplete" ? "MAX_TOKENS" : "STOP";
+      if (response.status === "failed") finish = "OTHER";
+      if (record(response.usage ?? {}, "usage") && response.usage !== null) usage = record(response.usage, "usage");
+      void output;
+    }
+  }
+  // functionCall parts 依到达顺序附加在正文之后（Gemini 的候选内容是单序列）。
+  for (const [callId, argsText] of toolArgs) {
+    let args: Json = {};
+    try {
+      args = record(JSON.parse(argsText || "{}"), "args");
+    } catch { args = {}; }
+    parts.push({ functionCall: { name: toolNames.get(callId) ?? "", args } });
+    toolCalled = true;
+  }
+  void toolCalled;
+  const inputTokens = typeof usage?.input_tokens === "number" ? usage.input_tokens : 0;
+  const outputTokens = typeof usage?.output_tokens === "number" ? usage.output_tokens : 0;
+  const usageMetadata: Json | undefined = usage
+    ? {
+      promptTokenCount: inputTokens,
+      candidatesTokenCount: outputTokens,
+      totalTokenCount: typeof usage.total_tokens === "number" ? usage.total_tokens : inputTokens + outputTokens,
+    }
+    : undefined;
+  if (state.stream) {
+    const frames: string[] = [];
+    for (const part of parts) {
+      const chunk: Json = { candidates: [{ content: { parts: [part], role: "model" } }], modelVersion: model };
+      frames.push(`data: ${JSON.stringify(chunk)}\n\n`);
+    }
+    const terminal: Json = { candidates: [{ content: { role: "model" }, finishReason: finish }], modelVersion: model, ...(usageMetadata ? { usageMetadata } : {}) };
+    frames.push(`data: ${JSON.stringify(terminal)}\n\n`);
+    const text = frames.join("");
+    safely(() => state.onChunk?.(text));
+    return new Response(strBytes(text), { headers: sseHeaders() });
+  }
+  const completion: Json = {
+    candidates: [{ content: { ...(parts.length > 0 ? { parts } : { parts: [{ text: "" }] }), role: "model" }, finishReason: finish }],
+    modelVersion: model,
+    ...(usageMetadata ? { usageMetadata } : {}),
+  };
+  safely(() => state.onChunk?.(JSON.stringify(completion)));
+  return Response.json(completion);
+}
+
+/** AGY 自产 Responses SSE → Anthropic Messages 事件（message_start/块生命周期/终态）。 */
+async function renderAnthropicClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
+  const id = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
+  let model = state.model;
+  const frames: string[] = [];
+  let started = false;
+  let blockIndex = -1;
+  let blockKind: "text" | "thinking" | "tool" | undefined;
+  let textValue = "";
+  let thinkingValue = "";
+  const openTool = (): void => {
+    blockIndex += 1;
+    blockKind = "tool";
+    frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: "", name: "", input: {} } })}\n\n`);
+  };
+  const closeBlock = (): void => {
+    if (blockKind === undefined) return;
+    frames.push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: blockIndex })}\n\n`);
+    blockKind = undefined;
+  };
+  let usage: Json = {};
+  let stopReason = "end_turn";
+  for await (const frame of iterateOwnSse(responsesSse)) {
+    if (frame.type === "response.created" || frame.type === "response.in_progress") {
+      if (started) continue;
+      started = true;
+      const response = record(frame.response, "response");
+      if (typeof response.model === "string") model = state.model;
+      frames.push(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`);
+      frames.push('event: ping\ndata: {"type": "ping"}\n\n');
+    } else if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+      if (blockKind !== "text") {
+        closeBlock();
+        blockIndex += 1;
+        blockKind = "text";
+        textValue = "";
+        frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } })}\n\n`);
+      }
+      textValue += frame.delta;
+      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: frame.delta } })}\n\n`);
+    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+      if (blockKind !== "thinking") {
+        closeBlock();
+        blockIndex += 1;
+        blockKind = "thinking";
+        thinkingValue = "";
+        frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "thinking", thinking: "" } })}\n\n`);
+      }
+      thinkingValue += frame.delta;
+      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "thinking_delta", thinking: frame.delta } })}\n\n`);
+    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+      closeBlock();
+      openTool();
+      const item = record(frame.item, "item");
+      frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input: {} } })}\n\n`);
+    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "input_json_delta", partial_json: frame.delta } })}\n\n`);
+    } else if (frame.type === "response.output_item.done" && record(frame.item, "item").type === "function_call") {
+      closeBlock();
+    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+      const response = record(frame.response, "response");
+      closeBlock();
+      if (record(response.usage ?? {}, "usage") && response.usage !== null) {
+        const value = record(response.usage, "usage");
+        usage = { input_tokens: typeof value.input_tokens === "number" ? value.input_tokens : 0, output_tokens: typeof value.output_tokens === "number" ? value.output_tokens : 0 };
+      }
+      const output = Array.isArray(response.output) ? response.output : [];
+      stopReason = response.status === "incomplete" ? "max_tokens" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_use" : "end_turn";
+    }
+  }
+  frames.push(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0 } })}\n\n`);
+  frames.push('event: message_stop\ndata: {"type": "message_stop"}\n\n');
+  const text = frames.join("");
+  safely(() => state.onChunk?.(text));
+  if (!state.stream) {
+    // 非流式：聚合为完整 Message JSON。
+    const content: Json[] = [];
+    let current: Json | undefined;
+    for (const frame of frames) {
+      if (!frame.startsWith("event: content_block_start")) continue;
+      const data = JSON.parse(frame.split("\ndata: ")[1]!) as Json;
+      const block = record(data.content_block, "content_block");
+      if (block.type === "text") current = { type: "text", text: "" };
+      else if (block.type === "thinking") current = { type: "thinking", thinking: "", signature: "" };
+      else current = { type: "tool_use", id: block.id ?? "", name: block.name ?? "", input: {} };
+      content.push(current);
+    }
+    for (const frame of frames) {
+      if (!frame.startsWith("event: content_block_delta")) continue;
+      const data = JSON.parse(frame.split("\ndata: ")[1]!) as Json;
+      const index = typeof data.index === "number" ? data.index : 0;
+      const delta = record(data.delta, "delta");
+      const target = content[index];
+      if (!target) continue;
+      if (delta.type === "text_delta" && typeof delta.text === "string") target.text = `${target.text}${delta.text}`;
+      else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") target.thinking = `${target.thinking}${delta.thinking}`;
+      else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
+        // 参数按块整段缓存后一次性解析（上游 functionCall 本就整帧到达）。
+        try {
+          const parsed: unknown = JSON.parse(delta.partial_json);
+          if (record(parsed, "tool input")) target.input = parsed;
+        } catch { target.input = {}; }
+      }
+    }
+    const message: Json = {
+      id, type: "message", role: "assistant", model,
+      content: content.length ? content : [{ type: "text", text: "" }],
+      stop_reason: stopReason, stop_sequence: null,
+      usage: { input_tokens: typeof usage.input_tokens === "number" ? usage.input_tokens : 0, output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0 },
+    };
+    return Response.json(message);
+  }
+  return new Response(strBytes(text), { headers: sseHeaders() });
+}
+
+/** 解析 AGY 自产的 Responses SSE（受信输入：严格 JSON，忽略 event 行）。 */
+async function* iterateOwnSse(body: ReadableStream<Uint8Array>): AsyncGenerator<Json> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        const frame = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const data = frame.split("\n").filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).join("\n");
+        if (!data || data === "[DONE]") continue;
+        try { yield JSON.parse(data) as Json; } catch { /* 自产流不应出现坏帧；忽略。 */ }
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* 读取已由取消收尾。 */ }
+  }
+}
+
+function strBytes(text: string): ArrayBuffer {
+  const bytes = encoder.encode(text);
+  const buffer = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(buffer).set(bytes);
+  return buffer;
+}
+
+function sseHeaders(): Headers {
+  return new Headers({ "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" });
+}
+
+/**
+ * 四种客户端协议统一入口：responses 源沿用既有 Responses 输出；chat-completions /
+ * anthropic / gemini 源由 AGY 自产 Responses SSE 独立渲染为对应协议外壳（零桥接依赖）。
+ */
+export async function createAgyClientResponse(to: ClientProtocol, upstream: Response, options: AgyResponseOptions): Promise<Response> {
+  if (to === "responses") return createAgyResponse(upstream, options);
+  // 非 responses 客户端始终先取 Responses SSE 流（非流式客户端由渲染器聚合），
+  // 否则非流式时 createAgyResponse 直接返回聚合 JSON，渲染层无帧可解。
+  const responsesOutput = await createAgyResponse(upstream, { ...options, stream: true });
+  if (!responsesOutput.body) throw new Error("Antigravity 响应缺少 body");
+  const state: ClientRenderState = { model: options.model, stream: options.stream, onChunk: options.onChunk };
+  if (to === "chat-completions") return renderChatClient(responsesOutput.body, state);
+  if (to === "gemini") return renderGeminiClient(responsesOutput.body, state);
+  return renderAnthropicClient(responsesOutput.body, state);
 }
 
 export async function createAgyResponse(upstream: Response, options: AgyResponseOptions): Promise<Response> {

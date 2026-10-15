@@ -6,16 +6,12 @@ import { readGatewayConfigFile } from "./config-read.ts";
 export { readGatewayConfigFile } from "./config-read.ts";
 import { logConfigChange, type ConfigChange } from "./process-log.ts";
 import { requestLogDir } from "./request-log.ts";
-import { agentConfigView } from "./host-services.ts";
-import { validateZcodeConfig } from "@agent-proxy/zcode";
+import { validateConfiguredPlugins } from "./plugin-config.ts";
 import { isZcodeModel, zcodeStaticModelPrefixes } from "@agent-proxy/zcode/catalog";
-import { validateCodebuddyConfig } from "@agent-proxy/codebuddy";
 import { isCodebuddyAccountValue } from "@agent-proxy/codebuddy/credentials";
 import { CODEBUDDY_PREFIX, isCodebuddyModel, WORKBUDDY_PREFIX, codebuddyModelPrefixes } from "@agent-proxy/codebuddy/catalog";
-import { validateQoderConfig } from "@agent-proxy/qoder";
 import { isQoderModel, QODER_CN_PREFIX, QODER_INTL_PREFIX } from "@agent-proxy/qoder/catalog";
-import { validateAgyConfig, isAgyModel } from "@agent-proxy/agy";
-import { validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
+import { isAgyModel } from "@agent-proxy/agy";
 import { isOpencodeZenModel, OPENCODE_ZEN_PREFIX } from "@agent-proxy/opencode-zen/catalog";
 import type { GatewayConfig, ResolvedPaths } from "./types.ts";
 
@@ -373,12 +369,7 @@ export function applySelectedModelsPatch(
     return { applied: [] };
   }
   config.selectedModels = selectedModels;
-  const agentConfig = agentConfigView(config);
-  validateZcodeConfig(agentConfig);
-  validateCodebuddyConfig(agentConfig);
-  validateQoderConfig(agentConfig);
-  validateAgyConfig(agentConfig);
-  validateOpencodeZenConfig(agentConfig);
+  validateConfiguredPlugins(config);
   writeGatewayConfigFile(paths.gatewayConfig, config);
   if (syncState && fs.existsSync(paths.stateFile)) {
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config?: unknown };
@@ -505,14 +496,9 @@ export function applyWebUiConfigPatch(
     // 所有字段的值都未变化：不写盘也不落审计，直接返回当前配置。
     return { config, applied };
   }
-  // 组合校验先于写盘：保留前缀冲突、非回环监听等组合会被新进程的 validate*Config
+  // 组合校验先于写盘：非回环监听等非法组合会被新进程的 validate*Config
   // 拒绝启动——在这里挡下并保留原配置，避免"保存成功但重启后网关与管理页一起死亡"。
-  const agentConfig = agentConfigView(config);
-  validateZcodeConfig(agentConfig);
-  validateCodebuddyConfig(agentConfig);
-  validateQoderConfig(agentConfig);
-  validateAgyConfig(agentConfig);
-  validateOpencodeZenConfig(agentConfig);
+  validateConfiguredPlugins(config);
   // 组合保存先校验最终配置，再拉取和校验模型；准备阶段不写配置或审计。
   if (!write) return { config, applied };
   writeGatewayConfigFile(paths.gatewayConfig, config);

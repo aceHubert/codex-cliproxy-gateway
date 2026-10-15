@@ -463,10 +463,11 @@ test("ZCode HTTP 错误脱敏且两渠道共用 zcode 日志命名", async () =>
       assert.equal(response.status, 429);
       assert.ok(!(await response.text()).includes(FAKE_KEY));
     }
-    const names = fs.readdirSync(config.logDir!);
+    const logsDir = path.join(directory, "logs");
+    const names = fs.readdirSync(logsDir);
     assert.ok(names.some((name) => name.startsWith("zcode-")));
     assert.ok(!names.some((name) => name.startsWith("bigmodel-")));
-    const logs = names.map((name) => fs.readFileSync(path.join(config.logDir!, name), "utf8")).join("\n");
+    const logs = names.map((name) => fs.readFileSync(path.join(logsDir, name), "utf8")).join("\n");
     for (const value of [FAKE_KEY, FAKE_OAUTH, "incoming-key"]) assert.ok(!logs.includes(value));
     assert.ok(!names.some((name) => name.startsWith("codex-")));
   });
@@ -666,7 +667,7 @@ test("ZCode SSE 上游错误中的普通及含引号密钥在客户端和最终�
       });
       assertSecretAbsent(events, apiKey);
       assert.equal(events.at(-1)!.type, "response.failed");
-      const logs = fs.readdirSync(config.logDir!).map((name) => fs.readFileSync(path.join(config.logDir!, name), "utf8")).join("\n");
+      const logs = fs.readdirSync(path.join(directory, "logs")).map((name) => fs.readFileSync(path.join(directory, "logs", name), "utf8")).join("\n");
       assertSecretAbsent(logs, apiKey);
       assert.match(logs, /"status":"failed"/);
       assert.match(logs, /authentication_error/);
@@ -707,7 +708,7 @@ test("ZCode 历史 function 与 custom 调用在压缩移除 tools 后仍可生�
     }
     const normal = await handler(request("zcode/glm-5.3", { stream: true }));
     await decoded(normal);
-    const logs = fs.readdirSync(config.logDir!).map((name) => fs.readFileSync(path.join(config.logDir!, name), "utf8")).join("\n");
+    const logs = fs.readdirSync(path.join(directory, "logs")).map((name) => fs.readFileSync(path.join(directory, "logs", name), "utf8")).join("\n");
     assert.match(logs, /response\.completed/);
     assert.match(logs, /工具历史压缩摘要/);
   });
@@ -741,7 +742,6 @@ test("ZCode WebSocket 降级仅作用于明确模型的 Responses，不影响 Re
 test("ZCode 请求日志沿用缺省日志目录", async () => {
   await fixture(async ({ config, directory, create }) => {
     config.requestLogging = true;
-    delete config.logDir;
     // 缺省日志目录回退运行主目录（不再从 catalogPath 倒推）；用环境变量钉住测试位置。
     const envHome = path.join(directory, "env-home");
     const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;

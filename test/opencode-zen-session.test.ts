@@ -4,8 +4,8 @@ import {
   OPENCODE_SESSION_PATTERN,
   createOpenCodeSessionId,
   createOpenCodeSessionResolver,
-  createSessionBindingCache,
   decodeOpenCodeSessionTimestamp,
+  deriveOpenCodeSessionId,
 } from "@agent-proxy/opencode-zen/session";
 
 test("生成的 session id 符合 ses_ + 12位Hex + 14位Base62 的 30 字符结构", () => {
@@ -53,79 +53,61 @@ test("相同 seed 生成确定性 session id，不同 seed 互不相同", () => 
   assert.match(first, OPENCODE_SESSION_PATTERN);
 });
 
-test("绑定表：同一 X-Session-Id 稳定复用同一 Zen session", () => {
-  const cache = createSessionBindingCache({ now: () => 1_000_000 });
-  const first = cache.resolve("test-conv-1");
-  assert.match(first, OPENCODE_SESSION_PATTERN);
-  assert.equal(cache.resolve("test-conv-1"), first);
-  const second = cache.resolve("test-conv-2");
-  assert.notEqual(second, first);
-  assert.equal(cache.size(), 2);
-});
-
-test("绑定表：TTL 滑动续期，活跃会话不过期、静默会话到期后重新绑定", () => {
-  let now = 1_000_000;
-  const cache = createSessionBindingCache({ ttlMs: 10_000, now: () => now });
-  const first = cache.resolve("conv");
-  // 9 秒后访问：续期到 now+10s。
-  now += 9_000;
-  assert.equal(cache.resolve("conv"), first);
-  // 再过 9 秒（距上次访问 9s < 10s）：仍在滑动窗口内。
-  now += 9_000;
-  assert.equal(cache.resolve("conv"), first);
-  // 连续静默超过 TTL 后过期，重新绑定生成新 session。
-  now += 20_000;
-  const rebound = cache.resolve("conv");
-  assert.notEqual(rebound, first);
-  // 旧值不残留。
-  assert.equal(cache.size(), 1);
-});
-
-test("绑定表：超容量按最久未使用淘汰", () => {
-  let now = 1_000_000;
-  const cache = createSessionBindingCache({ ttlMs: 60_000, maxEntries: 2, now: () => now });
-  const a = cache.resolve("a");
-  cache.resolve("b");
-  // touch a：b 变为最久未使用，下一次写入淘汰 b。
-  assert.equal(cache.resolve("a"), a);
-  cache.resolve("c");
-  assert.equal(cache.size(), 2);
-  assert.equal(cache.resolve("a"), a);
-  const reboundB = cache.resolve("b");
-  assert.notEqual(reboundB, a);
+test("确定性派生：同一外部会话跨实例稳定，id 具备官方 counter=1 形状", () => {
+  // Zen 解码校验时间段结构：哈希前缀一律 403，counter=1 官方形状的派生 id 过闸
+  // （2026-10-15 实测 3/3）；确定性派生让会话粘性不依赖任何进程内状态。
+  const external = "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45";
+  const derived = deriveOpenCodeSessionId(external);
+  assert.equal(derived, deriveOpenCodeSessionId(external), "同一外部会话派生结果恒定");
+  assert.notEqual(derived, deriveOpenCodeSessionId("another-conv"), "不同外部会话互不相同");
+  assert.match(derived, OPENCODE_SESSION_PATTERN);
+  assert.ok(derived.slice(4, 16).endsWith("ffe"), "counter 位固定为官方形状（hex 以 ffe 结尾）");
+  assert.ok(decodeOpenCodeSessionTimestamp(derived) !== undefined, "时间段可反解（服务端同款校验）");
+  assert.notEqual(derived, createOpenCodeSessionId(1_000, external), "与铸币路径（时间戳在前）独立");
 });
 
 test("resolveOpenCodeSession：入站已带合法 x-opencode-session 时原样透传", () => {
-  const cache = createSessionBindingCache();
-  const resolver = createOpenCodeSessionResolver(cache);
+  const resolver = createOpenCodeSessionResolver();
   const inbound = "ses_3a4ee6335ffedFB8f76BPU1Eb3";
   const headers = new Headers({
     "x-opencode-session": inbound,
-    "x-session-id": "should-be-ignored",
+    "session-id": "should-be-ignored",
   });
   assert.equal(resolver.resolve(headers), inbound);
-  // 透传路径不产生任何绑定。
-  assert.equal(cache.size(), 0);
 });
 
-test("resolveOpenCodeSession：非法 x-opencode-session 不透传，回落到 X-Session-Id 绑定", () => {
-  const resolver = createOpenCodeSessionResolver(createSessionBindingCache({ now: () => 5_000_000 }));
+test("resolveOpenCodeSession：非法 x-opencode-session 不透传，回落到外部会话派生", () => {
+  const resolver = createOpenCodeSessionResolver();
   const headers = new Headers({
     "x-opencode-session": "not-a-valid-session",
-    "X-Session-Id": "test-conv-1",
+    "Session-Id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45",
   });
   const resolved = resolver.resolve(headers);
   assert.match(resolved, OPENCODE_SESSION_PATTERN);
-  // 与同 seed 的确定性生成一致（绑定转换路径）。
-  assert.equal(resolved, createOpenCodeSessionId(5_000_000, "test-conv-1"));
+  // 与同外部会话的确定性派生一致（Codex 实发 session-id 头，不再依赖绑定表）。
+  assert.equal(resolved, deriveOpenCodeSessionId("01a13e5e-fd6e-7b31-88cb-faaefcd6cb45"));
   // 同一外部会话再次解析结果稳定。
-  assert.equal(resolver.resolve(new Headers({ "x-session-id": "test-conv-1" })), resolved);
+  assert.equal(resolver.resolve(new Headers({ "session-id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45" })), resolved);
+});
+
+test("resolveOpenCodeSession：外部会话标头按 x-session-id → session-id → thread-id 优先级取值", () => {
+  const resolver = createOpenCodeSessionResolver();
+  assert.equal(
+    resolver.resolve(new Headers({ "x-session-id": "first", "session-id": "second", "thread-id": "third" })),
+    deriveOpenCodeSessionId("first"),
+  );
+  assert.equal(
+    resolver.resolve(new Headers({ "session-id": "second", "thread-id": "third" })),
+    deriveOpenCodeSessionId("second"),
+  );
+  // 仅 thread-id 在场（如 fork 线程）时仍可稳定派生。
+  assert.equal(resolver.resolve(new Headers({ "thread-id": "third" })), deriveOpenCodeSessionId("third"));
 });
 
 test("resolveOpenCodeSession：plain object 标头大小写不敏感", () => {
-  const resolver = createOpenCodeSessionResolver(createSessionBindingCache({ now: () => 5_000_000 }));
-  const resolved = resolver.resolve({ "x-session-id": "conv-plain" });
-  assert.equal(resolved, createOpenCodeSessionId(5_000_000, "conv-plain"));
+  const resolver = createOpenCodeSessionResolver();
+  const resolved = resolver.resolve({ "session-id": "conv-plain" });
+  assert.equal(resolved, deriveOpenCodeSessionId("conv-plain"));
   assert.equal(
     resolver.resolve({ "X-Opencode-Session": "ses_3a4ee6335ffedFB8f76BPU1Eb3" }),
     "ses_3a4ee6335ffedFB8f76BPU1Eb3",
@@ -134,7 +116,7 @@ test("resolveOpenCodeSession：plain object 标头大小写不敏感", () => {
 
 test("resolveOpenCodeSession：无任何会话标头时生成单次临时合规 session", () => {
   let now = 1_000_000;
-  const resolver = createOpenCodeSessionResolver(createSessionBindingCache(), { now: () => now });
+  const resolver = createOpenCodeSessionResolver({ now: () => now });
   const first = resolver.resolve(new Headers());
   assert.match(first, OPENCODE_SESSION_PATTERN);
   assert.equal(decodeOpenCodeSessionTimestamp(first), now);
@@ -142,5 +124,5 @@ test("resolveOpenCodeSession：无任何会话标头时生成单次临时合规 
   const second = resolver.resolve(new Headers());
   assert.notEqual(second, first, "兜底临时 session 不得跨请求复用");
   // 空白标头视同缺失。
-  assert.notEqual(resolver.resolve(new Headers({ "x-session-id": "  " })), second);
+  assert.notEqual(resolver.resolve(new Headers({ "session-id": "  " })), second);
 });

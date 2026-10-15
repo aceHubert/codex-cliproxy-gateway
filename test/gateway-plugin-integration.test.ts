@@ -55,11 +55,11 @@ test("插件 HTTP 收到协议、操作与实际匹配前缀，错误不会调�
   globalThis.fetch = (async () => { upstreamCalls++; return Response.json({}); }) as unknown as typeof fetch;
   const handler = createPluginGatewayHandler(config, registry, "proxy-key");
   try {
-    for (const pathname of ["/v1/responses", "/v1/responses/compact", "/v1/chat/completions"]) {
+    for (const pathname of ["/v1/responses", "/v1/responses/compact", "/v1/chat/completions", "/v1/messages"]) {
       assert.equal((await handler(request("example-team/provider/model", pathname))).status, 400);
     }
-    assert.deepEqual(contexts.map(({ from, operation }) => [from, operation]),
-      [["responses", "generate"], ["responses", "compact"], ["chat", "generate"]]);
+    assert.deepEqual(contexts.map(({ to, operation }) => [to, operation]),
+      [["responses", "generate"], ["responses", "compact"], ["chat-completions", "generate"], ["anthropic", "generate"]]);
     assert.ok(contexts.every((context) => context.matchedPattern === "example-*/*" && context.matchedPrefix === "example-team/"));
     assert.equal(upstreamCalls, 0);
     assert.equal((await handler(request("example/model", "/ui/api/config"))).status, 404);

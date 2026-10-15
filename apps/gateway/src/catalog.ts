@@ -1,13 +1,11 @@
 import fs from "node:fs";
 import { codexBaselineEntry, CODEX_BASELINE_SLUG } from "@agent-proxy/models";
 import { atomicWrite } from "./toml.ts";
+import type { ModelOverrideRule } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry, UpstreamType } from "./types.ts";
 
-export interface ModelOverrideRule {
-  patterns: string[];
-  prefix: boolean;
-  fields: Record<string, unknown>;
-}
+/** 目录覆盖规则的单一来源在 @agent-proxy/plugin-api，网关侧只再导出，调用点不变。 */
+export type { ModelOverrideRule };
 
 function invalidOverrides(file: string, message: string): never {
   throw new Error(`Invalid model overrides ${file}: ${message}`);
@@ -80,7 +78,7 @@ export async function resolveModelMergeJson<T extends string | undefined>(
     try {
       source = new URL(url);
     } catch {
-      throw new Error(`Invalid model_merge_json URL: ${url}`);
+      throw new Error(`Invalid modelMergeJson URL: ${url}`);
     }
     const parts = source.pathname.split("/").filter(Boolean);
     const githubRepository = ["github.com", "www.github.com"].includes(source.hostname)
@@ -90,7 +88,7 @@ export async function resolveModelMergeJson<T extends string | undefined>(
       || source.password
       || parts.length === 0
       || (!githubRepository && source.pathname.endsWith("/"))) {
-      throw new Error("model_merge_json must be a GitHub repository or an HTTP(S) URL with a file name");
+      throw new Error("modelMergeJson must be a GitHub repository or an HTTP(S) URL with a file name");
     }
     if (githubRepository) {
       source.hostname = "github.com";
@@ -100,10 +98,10 @@ export async function resolveModelMergeJson<T extends string | undefined>(
     }
 
     const response = await fetch(source, { redirect: "follow" });
-    if (!response.ok) throw new Error(`model_merge_json download returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`modelMergeJson download returned HTTP ${response.status}`);
     const contents = await response.text();
     if (Buffer.byteLength(contents) > 16 * 1024 * 1024) {
-      throw new Error("model_merge_json download exceeds 16 MiB");
+      throw new Error("modelMergeJson download exceeds 16 MiB");
     }
     const stagingFile = `${cacheFile}.download`;
     try {

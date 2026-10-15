@@ -490,8 +490,8 @@ function configResponse(
       routerMode: live.upstreamOnly === true ? "upstream-only" : "dynamic",
       host: live.host,
       port: live.port,
-      mountPath: live.mountPath,
-      officialBaseUrl: sanitizeUrlValue(live.officialBaseUrl),
+      mountPath: MOUNT_PATH,
+      officialBaseUrl: sanitizeUrlValue(OFFICIAL_BASE_URL),
       /** config.toml 管理模式：true = agent-proxy 托管受管键，false = 手动（--manual-codex-config）。 */
       codexConfigManaged,
       /** 仅手动模式返回：待配置键的期望值与用户 config.toml 当前值比对。托管模式无此字段。 */

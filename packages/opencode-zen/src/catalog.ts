@@ -7,7 +7,7 @@ import { atomicWrite } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 
 /**
- * OpenCode Zen 模型目录：`GET /zen/v1/models` 提供当前真实可服务的模型 id，
+ * OpenCode Zen 模型目录：`GET /inference/v1/models` 提供当前真实可服务的模型 id，
  * models.opencode.ai 元数据（models.dev 同构）提供每个模型的免费判定（cost）、
  * 显示名、上下文窗口（limit.context）、reasoning effort 档位（reasoning_options）、
  * 生命周期状态（deprecated）与端点协议（provider.npm）。两个源都是实时的——
@@ -63,7 +63,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 /**
- * 解析 /zen/v1/models 响应（OpenAI list 形状）：校验并去重全部模型 id，保持上游
+ * 解析 /inference/v1/models 响应（OpenAI list 形状）：校验并去重全部模型 id，保持上游
  * 顺序。该端点不带计费信息，「哪些是免费模型」由元数据 cost 判定（见
  * filterOpencodeZenCatalogIds），这里只做形状清洗。
  */
@@ -155,7 +155,7 @@ export function mergeOpencodeZenCatalog(base: ModelCatalog, opencodeZen: ModelCa
 export interface OpencodeZenModelMetadata {
   /** 模型级 SDK 覆盖（如 @ai-sdk/anthropic）；缺省继承 provider 级 openai-compatible。 */
   npm?: string;
-  /** provider 级 baseURL（元数据 api 字段，如 https://opencode.ai/zen/v1）；转发 endpoint 的依据。 */
+  /** provider 级 baseURL（元数据 api 字段，如 https://opencode.ai/inference/v1）；转发 endpoint 的依据。 */
   api?: string;
   /** 官方 deprecated 标记：已轮换下线的模型。 */
   deprecated: boolean;
@@ -178,20 +178,22 @@ function metadataApi(value: unknown): string | undefined {
   } catch { return; }
 }
 
-/** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点。 */
-export type OpencodeZenModelProtocol = "chat" | "responses" | "anthropic" | "google";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
+
+/** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点；与全仓公共协议同型。 */
+export type OpencodeZenModelProtocol = ClientProtocol;
 
 const NPM_PROTOCOL: Record<string, OpencodeZenModelProtocol> = {
-  "@ai-sdk/openai-compatible": "chat",
+  "@ai-sdk/openai-compatible": "chat-completions",
   "@ai-sdk/openai": "responses",
   "@ai-sdk/anthropic": "anthropic",
-  "@ai-sdk/google": "google",
+  "@ai-sdk/google": "gemini",
   // @ai-sdk/mistral 等 OpenAI 兼容 SDK 走缺省 chat（Mistral 的 chat completions 与 OpenAI 同构）。
 };
 
-/** npm 字段 → 端点协议；缺省（无覆盖）即继承 openai-compatible chat。 */
+/** npm 字段 → 端点协议；缺省（无覆盖）即继承 openai-compatible chat-completions。 */
 export function protocolFromNpm(npm: string | undefined): OpencodeZenModelProtocol {
-  return (npm && NPM_PROTOCOL[npm]) || "chat";
+  return (npm && NPM_PROTOCOL[npm]) || "chat-completions";
 }
 
 /** 元数据 limit.context 提取：正有限数才采纳，其余（0/负数/NaN/字符串）视为缺失。 */
@@ -278,7 +280,25 @@ export interface OpencodeZenProbeVerdictEntry {
 }
 
 /**
+ * 代码级屏蔽的模型家族：上游免费池里网关确定无法服务的模型。jev 系（SystemOne Jev）
+ * chat 端点返回 400 ModelProtocolUnsupported（chat 是网关唯一注入门禁材料的协议），
+ * 其余端点一律 403 FreeTierError（非 chat 协议带不上门禁材料）；而探针在门禁抖动期
+ * 会按「门禁全局异常」保守记为 chat-completions（2026-10-15 实测因此漏进目录且转发
+ * 必失败），故在可见性过滤里硬屏蔽，优先于元数据与探针裁决，元数据降级路径同样生效，
+ * 探针也不再为它花费真实请求。上游若未来为 jev 提供正式 chat 支持，删除对应条目即可。
+ */
+const OPENCODE_ZEN_BLOCKED_MODEL_PREFIXES: readonly string[] = ["jev-"];
+
+/** 模型 id 是否命中代码级屏蔽名单（家族前缀匹配，大小写不敏感）。 */
+export function isOpencodeZenBlockedModel(id: string): boolean {
+  const lower = id.toLowerCase();
+  return OPENCODE_ZEN_BLOCKED_MODEL_PREFIXES.some((prefix) => lower.startsWith(prefix));
+}
+
+/**
  * 可见目录过滤——免费判定以实时元数据为唯一权威：
+ * - 代码级屏蔽名单（jev- 前缀家族）：无条件剔除，优先于以下各条（见
+ *   OPENCODE_ZEN_BLOCKED_MODEL_PREFIXES）；
  * - 元数据有条目：`cost` 为零且未 deprecated 才可见（免费池轮换、付费模型混列都靠它）；
  * - 元数据无条目（刚轮换上线的新模型）：只认 `-free` 后缀（元数据滞后的宽限），
  *   并由探针裁决兜底（drop 才剔除）；
@@ -290,8 +310,9 @@ export function filterOpencodeZenCatalogIds(
   metadata: Record<string, OpencodeZenModelMetadata> | undefined,
   verdicts: Record<string, OpencodeZenProbeVerdictEntry> | undefined,
 ): string[] {
-  if (!metadata) return ids.filter((id) => id.endsWith("-free"));
+  if (!metadata) return ids.filter((id) => !isOpencodeZenBlockedModel(id) && id.endsWith("-free"));
   return ids.filter((id) => {
+    if (isOpencodeZenBlockedModel(id)) return false;
     const meta = Object.hasOwn(metadata, id) ? metadata[id] : undefined;
     if (meta) return meta.free === true && !meta.deprecated;
     if (!id.endsWith("-free")) return false;
@@ -302,7 +323,7 @@ export function filterOpencodeZenCatalogIds(
 export interface OpencodeZenCatalogStoreOptions {
   catalogMode?: "dynamic" | "manual";
   cacheDirectory: string;
-  /** 返回 /zen/v1/models 的已解码 JSON；认证与超时由调用方负责。 */
+  /** 返回 /inference/v1/models 的已解码 JSON；认证与超时由调用方负责。 */
   fetchCatalog: () => Promise<unknown>;
   /** 返回 models.opencode.ai 元数据 JSON；缺省不启用下线过滤。 */
   fetchMetadata?: () => Promise<unknown>;
@@ -432,9 +453,12 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
           for (const [id, raw] of Object.entries(verdictsRaw)) {
             const entry = record(raw);
             if (!entry || typeof entry.at !== "number") continue;
-            if (entry.result === "drop" || entry.result === "chat" || entry.result === "responses"
-              || entry.result === "anthropic" || entry.result === "google") {
+            if (entry.result === "drop" || entry.result === "chat-completions" || entry.result === "responses"
+              || entry.result === "anthropic" || entry.result === "gemini") {
               verdicts[id] = { result: entry.result, at: entry.at };
+            } else if (entry.result === "chat" || entry.result === "google") {
+              // 旧版短名缓存归一化（chat → chat-completions、google → gemini）。
+              verdicts[id] = { result: entry.result === "chat" ? "chat-completions" : "gemini", at: entry.at };
             }
           }
           if (Object.keys(verdicts).length > 0) value.verdicts = verdicts;
@@ -493,8 +517,8 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
     for (const id of value.ids) {
       if (Object.hasOwn(value.metadata.models, id)) continue;
       // 只探测「可能是免费」的未知 id：无元数据且无 -free 后缀的模型（新付费模型）
-      // 直接不示，没必要为它花一次真实请求。
-      if (!id.endsWith("-free")) continue;
+      // 直接不示，没必要为它花一次真实请求；代码级屏蔽家族同理（结论已知）。
+      if (!id.endsWith("-free") || isOpencodeZenBlockedModel(id)) continue;
       const existing = verdicts[id];
       if (!force && existing && now() - existing.at < probeTtlMs) continue;
       try {
@@ -574,13 +598,13 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       }
       return structuredClone(cached?.models ?? []);
     },
-    /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat。 */
+    /** 模型端点协议：元数据 npm 优先，其次探针裁决，缺省 chat-completions。 */
     protocol(id: string): OpencodeZenModelProtocol {
       const models = cached?.metadata?.models;
       const meta = models && Object.hasOwn(models, id) ? models[id] : undefined;
       if (meta) return protocolFromNpm(meta.npm);
       const result = cached?.verdicts?.[id]?.result;
-      return result && result !== "drop" ? result : "chat";
+      return result && result !== "drop" ? result : "chat-completions";
     },
     /**
      * 模型上游 baseURL：元数据 provider.api 确认（全 provider 共享一份），元数据缺失或

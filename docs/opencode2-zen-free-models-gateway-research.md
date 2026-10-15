@@ -20,7 +20,7 @@
 > [执行计划决策记录 #3](exec-plans/completed/opencode-zen-free-models-proxy-integration.md)
 > 与 `src/opencode-zen/fingerprint.ts` 头注释。
 
-> **⚠️ 2026-10-14 门禁复测修正（当前有效画像）**：上段三层门禁画像再次漂移——经
+> **⚠️ 2026-10-14 门禁复测修正（已被 10-15 画像否决）**：上段三层门禁画像再次漂移——经
 > `scripts/zen-gate-probe.ts` 8 项隔离探针实测（space-bunny-free）：① **请求体层的
 > system 模板匹配已不再执行**（无任何官方模板 + 官方工具全量 200；无模板 + 仅
 > read/bash 空 schema 占位亦 200）；② 工具检查现为**名单制**：tools 必须同时含
@@ -32,6 +32,43 @@
 > （read+bash 占位垫补替代模板与官方工具注入、目录停发提示词替换）见
 > [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)；探针结论已同步
 > [指纹数据文档](fingerprint-data.md) 的 opencode-zen notes 与更新记录。
+
+> **⚠️ 2026-10-15 门禁再收紧修正（当前有效画像）**：10-14 的「空 schema 名单占位」
+> 画像一天后被上游否决，全网关批量 403。经 mitm 抓官方 GA 2.0.29 实流（隔离 HOME +
+> `--standalone`）与逐项隔离二分实证，现行门禁为四层：① **端点迁移**：base 由
+> `https://opencode.ai/zen/v1` 迁至 `https://opencode.ai/inference/v1`（旧端点一律
+> 403；`models.opencode.ai/api.json` 的 `opencode.api` 已自报新端点，元数据在线的
+> 网关自动跟随）；② **标头硬性新增 `x-opencode-session-id`**（与会话 id 同值，缺失
+> 即 403）；UA 版本与 Accept 实测不校验（2.0.26/2.0.29 皆过）；③ **工具闸升级实名制**：
+> 空 schema 占位被拒；**终版修正（同日追加实测 + [linux.do 2912664](https://linux.do/t/topic/2912664)
+> 同结论）：`read` 唯一必须**——仅官方 `read` 单件即放行（bash/shell 及数量无关，仅
+> shell 无 read 仍 403），其 schema 须非空（官方完整定义与 `{path:{}}` 最小形均过闸，
+> 空 properties 403；早前「read+shell 双件」是把空 schema 反例误计入件数）；
+> **`/responses` 端点执行同一门禁**且仍强制流式（非流式 403），anthropic `/messages`
+> 与 gemini 端点未观测到 FreeTier 门禁；无 tools 的请求只有携带官方标题生成器模板才
+> 放行（网关一律保证 tools 在场，不走该例外）。标头最小集为 Authorization + UA +
+> session-id + affinity（完整集下单缺 affinity 互备放行）。帖子内 `/zen/v1/responses`
+> 可用的 curl 为迁移间隙过时信息（复测双协议 403，旧端点死透）。落地：工具合并收敛为
+> 仅 `read`（chat 包裹/Responses 扁平双形状）、标头集补 session-id、同协议 responses
+> 适配器改强制流式+非流式聚合、快照 2.0.29，探针按终版画像重写（13 项实测 OK）。
+>
+> **同日会话机制补正**：服务端会**解码 session id 的时间段结构**——摘要哈希直接当前缀
+> 的 id 一律 403（4/4 复现；[dsh 同类插件 commit 5de7c17](https://github.com/jiesou/dsh-opencode-zen-free-provider/commit/5de7c178d3683ce09711e18df276cfaab36184cb)
+> 同结论），counter 位（低 12 位）须为官方形状（counter=1 → hex 以 `ffe` 结尾）；
+> 老时间戳（30 天/1 年/epoch）全过（不校验新鲜度）。落地为无状态确定性派生
+> `deriveOpenCodeSessionId(外部会话id)`：SHA-256 高 36 位作 ms 段 + counter 固定 1 +
+> 摘要派生 base62 尾（3/3 过闸含同 id 复用）——Codex 入站实发 `session-id` 头（与
+> `thread-id` 同值；旧绑定表只认 `x-session-id` 致 Codex 流量此前全部落每请求随机
+> 分支），现按 `x-session-id`/`session-id`/`thread-id` 三源优先级取外部会话派生，
+> 同一 IDE 会话跨请求、跨网关重启恒得同一上游会话（Zen 按会话计量免费额度并按它
+> 路由 prompt cache），原内存绑定表移除。
+>
+> **同日真实客户端链路补正**：curl 模拟通过但真实 `codex exec` 经 zen 转发 502——
+> Codex 0.162 在 MCP 工具中途挂载时向 input 历史发 `additional_tools` 信封项，
+> llm-bridge 转换器按未知历史项报错；已按网关自身 Responses 路径的既有语义在桥接层
+> 剥离（连同 `compaction_trigger`）。真机闭环：`codex exec` 经网关调 zen 免费模型
+> 正常返回。详见 [指纹数据文档](fingerprint-data.md) 的 opencode-zen notes 与
+> 更新记录。
 
 ---
 

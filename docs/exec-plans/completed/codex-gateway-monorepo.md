@@ -2,7 +2,7 @@
 
 ## 目标
 
-从 main 的 a20587d（v0.10.0）建立独立 monorepo，提供 gateway 插件注册与装配，将 ZCode、CodeBuddy/WorkBuddy、Qoder、AGY、Zen 迁入独立包，并完成安装默认目录与配置缺省值迁移。本计划负责包结构、plugin-api、路由/生命周期、业务装配与安装配置；转换封装与实现由独立的 [转换封装与兼容计划](../active/llm-bridge-conversion-compatibility.md) 在 monorepo 验收后负责。后续转换目标边界为：`@agent-proxy/llm-bridge` 只封装标准 Responses、Chat Completions、Anthropic、Gemini 协议，ZCode、CodeBuddy、Qoder、Zen 通过其 `convertRequest` 接入；AGY 的 CloudCodeAssist 私有请求/响应转换由 `@agent-proxy/agy` 独立封装，不调用或依赖 `@agent-proxy/llm-bridge`，也不直接依赖外部 npm 转换库。
+从 main 的 a20587d（v0.10.0）建立独立 monorepo，提供 gateway 插件注册与装配，将 ZCode、CodeBuddy/WorkBuddy、Qoder、AGY、Zen 迁入独立包，并完成安装默认目录与配置缺省值迁移。本计划负责包结构、plugin-api、路由/生命周期、业务装配与安装配置；转换封装与实现由独立的 [转换封装与兼容计划](../completed/llm-bridge-conversion-compatibility.md) 在 monorepo 验收后负责。后续转换目标边界为：`@agent-proxy/llm-bridge` 只封装标准 Responses、Chat Completions、Anthropic、Gemini 协议，ZCode、CodeBuddy、Qoder、Zen 通过其 `convertRequest` 接入；AGY 的 CloudCodeAssist 私有请求/响应转换由 `@agent-proxy/agy` 独立封装，不调用或依赖 `@agent-proxy/llm-bridge`，也不直接依赖外部 npm 转换库。
 
 状态：已完成并归档（按 2026-10-11 最新确认的本轮范围）；现有协议转换保持不变。
 目录边界：@agent-proxy/gateway 放在 apps/gateway，属于业务层；packages/* 放可复用转换层、契约与 agent 插件。
@@ -222,7 +222,7 @@ const detected = {
 - 2026-10-10：命名调整为 `@agent-proxy` namespace，业务包名为 `@agent-proxy/gateway`，应用目录确认为 `apps/gateway`。其他 package 目录、执行计划文件名和工作分支名保持不变。
 - 2026-10-10：用户确认采用独立的 @agent-proxy/plugin-api 最小契约包，目录为 packages/plugin-api，纳入本轮实施与验收范围，避免网关与 agent 循环依赖；发布/交付策略在 S0 收敛，不再讨论是否采用或最终包名。请求、流式与解析均收口到桥接包，不把 agent 类型传入公共转换核心。
 
-- 2026-10-10：拆出 [llm-bridge 封装、兼容与 Chat Completions 适配计划](../active/llm-bridge-conversion-compatibility.md)，承接转换算法、agent 转换调用适配和旧 Chat Completions 计划的适配/测试；本计划专注 monorepo、插件与安装配置迁移。（其转换范围由后续决策细化，AGY CloudCodeAssist 转换留在 AGY 包。）
+- 2026-10-10：拆出 [llm-bridge 封装、兼容与 Chat Completions 适配计划](../completed/llm-bridge-conversion-compatibility.md)，承接转换算法、agent 转换调用适配和旧 Chat Completions 计划的适配/测试；本计划专注 monorepo、插件与安装配置迁移。（其转换范围由后续决策细化，AGY CloudCodeAssist 转换留在 AGY 包。）
 - 2026-10-10：install 默认运行目录确认改为 ~/.agent-proxy-gateway；旧默认 JSON 地址按受管白名单迁移。五类 agent 缺省值合并 true，已有用户字段（含 false）保留，不通过改默认值重写用户选择。
 - 2026-10-11：独立协议抽离计划弃用并撤下；转换/解析/流式事件等通用需求转交 llm-bridge 计划，本计划继续负责插件与网关业务生命周期，不新增第三份实施计划。
 - 2026-10-11：用户确认 CLI 命令由 codex-cliproxy 改为 agent-proxy；纳入 S4 的业务装配与 S5 打包验收，保留既有子命令/参数语义，同步当前帮助、UI 提示和受管启动入口。

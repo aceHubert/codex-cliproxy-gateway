@@ -142,8 +142,9 @@ try {
     import type { QoderDependencies } from "@agent-proxy/qoder";
     import type { AgyDependencies } from "@agent-proxy/agy";
     import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
-    import type { ProviderType } from "@agent-proxy/llm-bridge";
-    export type PublishedApi = [GatewayPlugin, HostServices, ZcodeDependencies, CodebuddyDependencies, QoderDependencies, AgyDependencies, OpencodeZenDependencies, ProviderType];
+    import { convertRequest, createClientResponse } from "@agent-proxy/llm-bridge";
+    import type { ClientProtocol, ToolIdentityMap } from "@agent-proxy/llm-bridge";
+    export type PublishedApi = [GatewayPlugin, HostServices, ZcodeDependencies, CodebuddyDependencies, QoderDependencies, AgyDependencies, OpencodeZenDependencies, ClientProtocol, ToolIdentityMap, ReturnType<typeof convertRequest>, Awaited<ReturnType<typeof createClientResponse>>];
   `);
   await run([process.execPath, path.join(consumer, "node_modules/typescript/bin/tsc"), "--noEmit", "--strict", "--module", "Preserve", "--moduleResolution", "Bundler", "--target", "ES2024", "--types", "bun", "types-smoke.ts"], consumer);
   for (const pkg of packages.filter(pkg => pkg.name !== "@agent-proxy/gateway")) {
@@ -189,11 +190,11 @@ try {
     import assert from "node:assert/strict";
     const input = { input: "ping" };
     const cases = [
-      (await import("@agent-proxy/zcode/request")).translateZcodeRequest(input, "glm-5.3").body,
-      (await import("@agent-proxy/codebuddy/request")).translateCodebuddyRequest(input, "gpt-5.6-luna").body,
-      (await import("@agent-proxy/qoder/request")).translateQoderRequest(input, "qfmodel").body,
+      (await (await import("@agent-proxy/zcode/request")).translateZcodeRequest(input, "glm-5.3")).body,
+      (await (await import("@agent-proxy/codebuddy/request")).translateCodebuddyRequest(input, "gpt-5.6-luna")).body,
+      (await (await import("@agent-proxy/qoder/request")).translateQoderRequest(input, "qfmodel")).body,
       (await import("@agent-proxy/agy/request")).translateAgyRequest(input, "gemini-3.8-flash").wrapper,
-      (await import("@agent-proxy/opencode-zen/convert")).responsesToChatBody(input),
+      (await (await import("@agent-proxy/opencode-zen/convert")).convertOpencodeZenRequest("chat","responses", input)).body,
     ];
     for (const body of cases) assert.ok(JSON.stringify(body).includes("ping"));
     const upstream = new Response([
@@ -201,7 +202,7 @@ try {
       'data: {"id":"smoke","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
       'data: [DONE]',
     ].join("\\n\\n") + "\\n\\n", { headers: { "content-type": "text/event-stream" } });
-    const response = await (await import("@agent-proxy/codebuddy/response")).createCodebuddyResponse(upstream, { model: "codebuddy/gpt-5.6-luna", tools: new Map(), stream: true });
+    const response = await (await import("@agent-proxy/codebuddy/response")).createCodebuddyResponse("responses", upstream, { model: "codebuddy/gpt-5.6-luna", tools: new Map(), stream: true });
     const stream = await response.text();
     assert.ok(stream.includes("response.completed"));
     assert.ok(stream.includes("pong"));

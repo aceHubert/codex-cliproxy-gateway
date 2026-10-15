@@ -18,8 +18,8 @@ function fixture(): { directory: string; config: GatewayConfig; paths: ReturnTyp
   const paths = resolvePaths({ HOME: directory, CODEX_HOME: path.join(directory, "codex") }, path.join(directory, "runtime"));
   const config: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
-    host: "127.0.0.1", port: 0, mountPath: "/v1", prefix: "cliproxy/",
-    upstreamBaseUrl: "http://127.0.0.1:9/v1", officialBaseUrl: "http://127.0.0.1:9/official",
+    host: "127.0.0.1", port: 0,
+    upstreamBaseUrl: "http://127.0.0.1:9/v1",
     catalogPath: paths.catalogFile,
   };
   fs.mkdirSync(paths.runtimeHome, { recursive: true });
@@ -173,7 +173,6 @@ test("动态网关的 default 推理不等待其它 agent 启动目录，健康�
   });
   config.zcode = true;
   config.upstreamBaseUrl = new URL("v1", upstream.url).href;
-  config.officialBaseUrl = new URL("v1", upstream.url).href;
   const server = runWithInstancePaths(paths, () => startGateway(config, "invalid", undefined, {
     cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
     configCache: { get: () => catalogReady, close: () => { closed++; } },

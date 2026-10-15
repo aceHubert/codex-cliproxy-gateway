@@ -1,8 +1,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { ExchangeEntry, LogNamespace, RequestLogSink } from "@agent-proxy/plugin-api";
 import { resolvePaths } from "./paths.ts";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
+
+/**
+ * 请求日志目标的单一来源在 @agent-proxy/plugin-api，网关侧只再导出，调用点不变。
+ * maxLogs：整个日志目录保留的最新请求日志文件数；0 表示不限制。
+ * processLog：进程日志目标。未配置时（如单测直接构造 handler）只写请求日志，
+ * 不写进程日志；请求摘要与错误摘要只在配置了它之后才记录，见 process-log.ts。
+ */
+export type { RequestLogSink };
 
 /**
  * 请求日志与调试转储的实际落盘目录：固定为运行主目录
@@ -13,19 +22,7 @@ export function requestLogDir(paths: ResolvedPaths = resolvePaths()): string {
   return paths.logDir;
 }
 
-export interface RequestLogSink {
-  dir: string;
-  /** 整个日志目录保留的最新请求日志文件数；0 表示不限制。 */
-  maxLogs: number;
-  /**
-   * 进程日志目标。未配置时（如单测直接构造 handler）只写请求日志，不写进程日志；
-   * 请求摘要与错误摘要只在配置了它之后才记录，见 process-log.ts。
-   */
-  processLog?: ProcessLogTarget;
-}
-
 const LOG_PREFIX = "cliproxy";
-export type LogNamespace = "cliproxy" | "zcode" | "bigmodel" | "codebuddy" | "workbuddy" | "qoder" | "agy" | "opencode-zen";
 
 const SENSITIVE_HEADERS = new Set([
   "authorization",
@@ -231,21 +228,11 @@ export function maskedHeaders(headers: Record<string, string>): Record<string, s
 }
 
 
-export interface ExchangeEntry {
-  requestTime: string;
-  method: string;
-  url: string;
-  reqHeaders: Headers;
-  reqBody: unknown;
-  status: number;
-  resHeaders: Headers;
-  resBody: string;
-  upstreamUrl?: string;
-  upstreamRequestHeaders?: Headers;
-  /** 转换后真正发给上游的请求正文；仅在实际转发过且需要落盘时记录。 */
-  upstreamRequestBody?: unknown;
-  durationMs?: number;
-}
+/**
+ * 一次请求交换的落盘条目；单一来源在 @agent-proxy/plugin-api，网关侧只再导出。
+ * upstreamRequestBody：转换后真正发给上游的请求正文；仅在实际转发过且需要落盘时记录。
+ */
+export type { ExchangeEntry };
 
 export function logExchange(sink: RequestLogSink | undefined, group: string, entry: ExchangeEntry, namespace: LogNamespace = LOG_PREFIX): void {
   if (!sink) return;

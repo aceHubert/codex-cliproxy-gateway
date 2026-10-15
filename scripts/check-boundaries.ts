@@ -21,8 +21,14 @@ assert.equal([...manifests.values()].filter(({ manifest }) => !manifest.private)
 assert.equal(manifests.get("@agent-proxy/models")?.manifest.private, true, "共享模型包必须保持私有");
 assert.equal(JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8")).private, true);
 
-function imports(file: string): string[] {
-  return ts.preProcessFile(fs.readFileSync(file, "utf8"), true, true).importedFiles.map((entry) => entry.fileName);
+function imports(file: string, runtimeOnly = false): string[] {
+  const source = fs.readFileSync(file, "utf8");
+  // 核心链路只检查实际运行时依赖；类型增强不会把插件载入模型流量进程。
+  const code = runtimeOnly ? ts.transpileModule(source, {
+    fileName: file,
+    compilerOptions: { module: ts.ModuleKind.ESNext, verbatimModuleSyntax: true },
+  }).outputText : source;
+  return ts.preProcessFile(code, true, true).importedFiles.map((entry) => entry.fileName);
 }
 
 for (const [name, { directory, manifest }] of manifests) {
@@ -65,7 +71,7 @@ for (const name of manifests.keys()) visitPackage(name);
 function inspectCore(file: string, seen = new Set<string>()): void {
   if (seen.has(file)) return;
   seen.add(file);
-  for (const specifier of imports(file)) {
+  for (const specifier of imports(file, true)) {
     assert(!specifier.startsWith("@agent-proxy/") || specifier === "@agent-proxy/plugin-api" || specifier === "@agent-proxy/models",
       `网关核心依赖业务插件或转换包：${file} → ${specifier}`);
     assert(specifier !== "llm-bridge", `default 链路依赖转换库：${file}`);

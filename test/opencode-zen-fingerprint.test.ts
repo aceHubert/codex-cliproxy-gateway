@@ -8,15 +8,15 @@ import {
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
+  mergeOpencodeZenGateTools,
   normalizeOpencodeZenEffort,
-  padOpencodeZenGateTools,
 } from "@agent-proxy/opencode-zen/fingerprint";
 import { OPENCODE_SESSION_PATTERN, createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
 
 const SESSION = createOpenCodeSessionId(1_000_000, "test-session");
 
-test("UA 与标头集：官方四段式 UA、会话三回填、稳定项目 id 与 W3C 追踪头", () => {
-  assert.equal(OPENCODE_ZEN_CLIENT_USER_AGENT, "opencode/latest/2.0.26/cli");
+test("UA 与标头集：官方四段式 UA、会话四回填（含 session-id 硬性头）、稳定项目 id 与 W3C 追踪头", () => {
+  assert.equal(OPENCODE_ZEN_CLIENT_USER_AGENT, "opencode/latest/2.0.29/cli");
   assert.match(createOpencodeZenProjectId("host-a"), /^[0-9a-f]{40}$/);
   assert.equal(createOpencodeZenProjectId("host-a"), createOpencodeZenProjectId("host-a"));
   assert.notEqual(createOpencodeZenProjectId("host-a"), createOpencodeZenProjectId("host-b"));
@@ -25,6 +25,7 @@ test("UA 与标头集：官方四段式 UA、会话三回填、稳定项目 id �
   assert.equal(headers.authorization, "Bearer public");
   assert.equal(headers["x-opencode-client"], "cli");
   assert.equal(headers["x-opencode-session"], SESSION);
+  assert.equal(headers["x-opencode-session-id"], SESSION, "2026-10-15 起门禁硬性要求，缺失即 403");
   assert.equal(headers["x-session-affinity"], SESSION);
   assert.equal(headers["x-session-id"], SESSION);
   assert.match(headers["x-opencode-project"], /^[0-9a-f]{40}$/);
@@ -34,7 +35,7 @@ test("UA 与标头集：官方四段式 UA、会话三回填、稳定项目 id �
   assert.equal(headers.accept, "text/event-stream");
 });
 
-test("注入无工具请求：消息原样透传、垫补 read/bash 占位、强制流式", () => {
+test("注入无工具请求：消息原样透传、合并官方 read 定义、强制流式", () => {
   const input = {
     model: "exo-free",
     messages: [{ role: "user", content: "hi" }],
@@ -50,15 +51,15 @@ test("注入无工具请求：消息原样透传、垫补 read/bash 占位、强
   assert.equal(messages[0].role, "user");
   assert.equal(messages[0].content, "hi");
   const tools = body.tools as Array<{ function: { name: string } }>;
-  assert.deepEqual(tools.map((tool) => tool.function.name), ["read", "bash"], "名单闸不分有无工具，空列表也要垫补");
+  assert.deepEqual(tools.map((tool) => tool.function.name), ["read"], "无 tools 的请求只有官方标题模板才放行，一律合并官方 read 定义");
   // 输入对象不被改写。
   assert.equal(input.stream, false);
   assert.equal(input.messages.length, 1);
 });
 
 test("注入带客户端 system 与工具的请求：system 不动、客户端同名定义优先", () => {
-  const clientRead = { type: "function", function: { name: "read", description: "client read", parameters: { type: "object", properties: {} } } };
-  const clientShell = { type: "function", function: { name: "shell", description: "client shell", parameters: { type: "object", properties: {} } } };
+  const clientRead = { type: "function", function: { name: "read", description: "client read", parameters: { type: "object", properties: { path: { type: "string" } } } } };
+  const clientShell = { type: "function", function: { name: "shell", description: "client shell", parameters: { type: "object", properties: { cmd: { type: "string" } } } } };
   const lookup = { type: "function", function: { name: "lookup_issue", description: "issue lookup", parameters: { type: "object", properties: {} } } };
   const { body } = injectOpencodeZenFingerprintBody({
     messages: [{ role: "system", content: "You are a coding agent." }, { role: "user", content: "hi" }],
@@ -69,28 +70,28 @@ test("注入带客户端 system 与工具的请求：system 不动、客户端�
   assert.equal(messages[0].content, "You are a coding agent.", "客户端 system 原样保留（门禁不检查内容）");
   const tools = body.tools as Array<{ function: { name: string; description?: string } }>;
   const names = tools.map((tool) => tool.function.name);
-  assert.deepEqual(names, ["read", "shell", "lookup_issue"], "read 与 shell（bash 替代名）已在场时不重复垫补");
-  assert.equal(tools[0].function.description, "client read", "客户端同名定义优先，占位不覆盖");
-  for (const official of OPENCODE_ZEN_CLIENT_TOOLS as Array<{ function: { name: string } }>) {
-    if (official.function.name !== "read" && official.function.name !== "shell") {
-      assert.ok(!names.includes(official.function.name), `官方工具 ${official.function.name} 不再并入`);
-    }
-  }
+  assert.deepEqual(names, ["read", "shell", "lookup_issue"], "read 已在场时不重复合并");
+  assert.equal(tools[0].function.description, "client read", "客户端同名定义优先，官方定义不覆盖");
+  assert.equal(tools.length, 3, "read 在场时不追加任何官方定义（最小合并面，客户端 shell/read 原样保留）");
 });
 
-test("垫补规则：缺 read 垫 read；bash 与 shell 都缺才垫 bash；畸形输入按空列表垫补", () => {
+test("合并规则：缺 read 补官方定义；畸形输入按空列表合并；官方定义带非空 schema", () => {
   const name = (tools: unknown[]) => (tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
-  const bashOnly = [{ type: "function", function: { name: "bash", parameters: {} } }];
-  const shellOnly = [{ type: "function", function: { name: "shell", parameters: {} } }];
-  const readPlusCustom = [{ type: "function", function: { name: "read", parameters: {} } }, { type: "function", function: { name: "exec_command", parameters: {} } }];
-  assert.deepEqual(name(padOpencodeZenGateTools(bashOnly)), ["bash", "read"], "有 bash 缺 read：只垫 read");
-  assert.deepEqual(name(padOpencodeZenGateTools(shellOnly)), ["shell", "read"], "shell 可替代 bash");
-  assert.deepEqual(name(padOpencodeZenGateTools(readPlusCustom)), ["read", "exec_command", "bash"], "有 read 缺 bash：垫 bash 且不改动客户端顺序");
-  assert.deepEqual(name(padOpencodeZenGateTools(undefined)), ["read", "bash"], "undefined 按空列表垫补");
-  assert.deepEqual(name(padOpencodeZenGateTools("nope")), ["read", "bash"], "非数组输入按空列表垫补");
-  const placeholder = padOpencodeZenGateTools([])[0] as { function: { parameters: Record<string, unknown>; description: string } };
-  assert.deepEqual(placeholder.function.parameters, { type: "object", properties: {}, required: [], additionalProperties: false }, "占位 schema 为空对象（模型带不出参数）");
-  assert.match(placeholder.function.description, /cannot execute it/, "占位描述声明不可执行");
+  const bashOnly = [{ type: "function", function: { name: "bash", parameters: { type: "object", properties: { cmd: { type: "string" } } } } }];
+  const shellOnly = [{ type: "function", function: { name: "shell", parameters: { type: "object", properties: { cmd: { type: "string" } } } } }];
+  const readPlusCustom = [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { path: {} } } } }, { type: "function", function: { name: "exec_command", parameters: {} } }];
+  assert.deepEqual(name(mergeOpencodeZenGateTools(bashOnly)), ["bash", "read"], "bash 不替代 read：缺 read 仍要补");
+  assert.deepEqual(name(mergeOpencodeZenGateTools(shellOnly)), ["shell", "read"], "shell 不替代 read");
+  assert.deepEqual(name(mergeOpencodeZenGateTools(readPlusCustom)), ["read", "exec_command"], "read 已在场（最小非空 schema 亦可）不再补");
+  assert.deepEqual(name(mergeOpencodeZenGateTools(undefined)), ["read"], "undefined 按空列表合并");
+  assert.deepEqual(name(mergeOpencodeZenGateTools("nope")), ["read"], "非数组输入按空列表合并");
+  const merged = mergeOpencodeZenGateTools([]) as Array<{ function: { name: string; parameters: Record<string, unknown>; description: string } }>;
+  const official = (n: string) => (OPENCODE_ZEN_CLIENT_TOOLS as typeof merged).find((tool) => tool.function.name === n);
+  for (const tool of merged) {
+    assert.equal(tool, official(tool.function.name), "合并的是 fingerprint-data.json 的官方定义原文");
+    assert.ok(Object.keys((tool.function.parameters as { properties?: object }).properties ?? {}).length > 0, `官方定义 ${tool.function.name} 必须带非空 schema（空 properties 已被门禁拒绝）`);
+    assert.ok(!/cannot execute it/.test(tool.function.description), "不得残留占位描述");
+  }
 });
 
 test("回退材料自检：官方模板与工具定义完整、会话 id 合规", () => {

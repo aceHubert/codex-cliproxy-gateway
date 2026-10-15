@@ -3,7 +3,9 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { getHostServices } from "@agent-proxy/plugin-api";
 import os from "node:os";
 import path from "node:path";
-import type { CodebuddyRegion } from "@agent-proxy/plugin-api";
+
+/** CodeBuddy 凭据地域；具体请求按模型地域筛选凭据，auto 表示自动选择。 */
+export type CodebuddyRegion = "auto" | "cn" | "intl";
 
 /**
  * CodeBuddy/WorkBuddy 桌面端登录凭据（.info 文件）的只读消费层。
@@ -507,7 +509,8 @@ export function getActiveAccount(): string | undefined {
   const host = context ? undefined : getHostServices();
   const home = context?.getHome?.() ?? host?.getPaths().home;
   const directory = context?.authDirectory ?? defaultAuthDirectory(home);
-  return codebuddyAccountLabel(directory, (context?.getConfig() ?? host!.getConfig()).codebuddyAccount);
+  const account = context?.getConfig().codebuddyAccount ?? host?.getConfig().codebuddyAccount;
+  return codebuddyAccountLabel(directory, account);
 }
 
 export interface CodebuddyAccountEntry {

@@ -381,7 +381,7 @@ test("collectCompatibleModels includes enabled zen models for the exclusion pick
       refreshCatalogOnStart: false,
       projectId: "a".repeat(40),
       fetch: (async (url: string | URL | Request) => {
-        if (String(url).endsWith("/zen/v1/models")) {
+        if (String(url).endsWith("/inference/v1/models")) {
           return Response.json({ object: "list", data: [{ id: "exo-free" }, { id: "nemotron-free" }] });
         }
         // 元数据端点按不可用处理：目录回退 -free 后缀过滤，两个 id 都可见。

@@ -3,6 +3,7 @@
 状态：monorepo 与插件迁移已完成；转换封装仍由独立计划负责，未执行发布。
 日期：2026-10-10。
 工作分支：`codex/gateway-monorepo`。
+后续变更（2026-10-14）：桥接底座与插件调用形态已由 [llm-bridge-aisdk-rebase 计划](../exec-plans/completed/llm-bridge-aisdk-rebase.md) 变更——npm `llm-bridge@2.0.1` 底座替换为 `@ai-sdk/*` 引擎离线捕获，四类标准桥接插件统一调用异步 `convertRequest(from, to, body)`，协议面扩展 ClientProtocol 四值（含 gemini 客户端入口）。本需求文中涉及外部 llm-bridge 封装、「不得直接依赖外部 llm-bridge」等表述均按需求时点（2026-10-10）理解，现行状态以该计划为准；其余目录、插件契约与装配边界未变。
 实施基线：`main` 的 `a20587d9da3e375219dca7199c892ddb639d4d64`（v0.10.0）。
 
 ## 1. 目标与已确认要求
@@ -11,7 +12,7 @@
 
 按“bridge 封装 → 网关插件方法 → agent 接入与差异适配”的目标分层，将现有单包改成 Bun workspace monorepo。所有 agent 兼容能力通过插件注入网关；规范协议转换由基于外部 llm-bridge 的封装完成，AGY 的 CloudCodeAssist 转换在自身包内独立实现。实施先完成 monorepo 迁移及验收，再按独立转换计划推进。
 
-实施分为两个计划：[monorepo、插件化与安装配置迁移](../exec-plans/completed/codex-gateway-monorepo.md)负责包结构、注册/装配、生命周期与安装配置；[llm-bridge 封装与兼容](../exec-plans/active/llm-bridge-conversion-compatibility.md)负责转换层、agent 转换调用适配和 Chat Completions 兼容/测试。Chat Completions 要求直接纳入转换封装，不另保留独立 Chat Completions 端点计划。
+实施分为两个计划：[monorepo、插件化与安装配置迁移](../exec-plans/completed/codex-gateway-monorepo.md)负责包结构、注册/装配、生命周期与安装配置；[llm-bridge 封装与兼容](../exec-plans/completed/llm-bridge-conversion-compatibility.md)负责转换层、agent 转换调用适配和 Chat Completions 兼容/测试。Chat Completions 要求直接纳入转换封装，不另保留独立 Chat Completions 端点计划。
 
 原独立协议抽离计划同样弃用并撤下：通用请求/响应、解析、工具身份、usage、流式事件/输出外壳及回归要求统一在 llm-bridge 封装中重构；原插件与网关生命周期要求由 monorepo 计划承接，不再维护第三份独立计划。
 
@@ -273,7 +274,7 @@ const detected = {
 
 - install 的默认运行主目录改为 `~/.agent-proxy-gateway`，config.json、state、目录缓存、日志与其他受管运行文件统一从该目录派生；识别并迁移旧 `~/.codex-cliproxy-gateway` 默认安装，保留用户配置、安装状态、备份与回滚材料，不自动删除旧目录。
 - 配置合并优先级：新目录已有用户字段 > 旧安装中迁入的缺失用户字段 > 新默认值；显式 false/true、账号选择及未知字段保留。新旧安装归属或 state 冲突时保留两端并报告，不盲目覆盖。
-- JSON 内旧默认地址按明确受管字段与默认路径白名单迁移，例如旧默认 catalogPath 和 logDir；state.config 镜像同步。自定义 catalog/log/model_merge_json 路径、远程 URL、$schema 地址及任意包含旧目录文字的字段不做全局替换。
+- JSON 内旧默认地址按明确受管字段与默认路径白名单迁移，例如旧默认 catalogPath 和 logDir；state.config 镜像同步。自定义 catalog/log/modelMergeJson 路径、远程 URL、$schema 地址及任意包含旧目录文字的字段不做全局替换。
 - 显式实例目录、`CODEX_CLIPROXY_HOME` 和自定义 `serve --config` 继续优先，不改变用户指定地址。macOS LaunchAgent 保持在 ~/Library/LaunchAgents，更新受管启动参数与 ownership；~/.codex 配置/缓存不搬迁，manual-codex-config 保持只读，凭据路径迁移沿用 keychain 分派存储边界。
 - zcode、codebuddy（含 WorkBuddy）、qoder、agy、opencodeZen 的合并默认值均为 true，只在字段缺失时生效。CLI、网关、Web UI、插件初始化和 Schema 使用一致默认；已有用户字段不动，不为修改默认值批量重写存量配置或把显式 false 改为 true。
 - 调整安装 DEFAULTS 和命令同步中缺失开关补 false 的旧逻辑，同步 Schema/类型说明及测试。新安装保存合并结果，存量读取形成有效默认；缺省开启不等于插件热加载或自动生成凭据。
@@ -302,7 +303,7 @@ const detected = {
 - packages 的库版本固定或独立、旧 npm 包名迁移公告与发布顺序；apps/gateway 的 CLI/应用交付方式独立确定，本轮不发布。
 - 转换结果的工具身份/损失字段、流式/解析公开 API 及外部库不可表达能力的报错规则。
 
-执行阶段与分工见 [monorepo 与插件计划](../exec-plans/completed/codex-gateway-monorepo.md)和 [llm-bridge 封装与兼容计划](../exec-plans/active/llm-bridge-conversion-compatibility.md)。
+执行阶段与分工见 [monorepo 与插件计划](../exec-plans/completed/codex-gateway-monorepo.md)和 [llm-bridge 封装与兼容计划](../exec-plans/completed/llm-bridge-conversion-compatibility.md)。
 
 ## 9. 后续备注：配置与 Web UI 插件化
 

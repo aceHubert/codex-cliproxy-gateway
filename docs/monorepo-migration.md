@@ -4,7 +4,7 @@
 CLI 命令更名为 `agent-proxy`，业务包为 `@agent-proxy/gateway`。
 现有 Responses 请求、响应、流式与 compaction 转换保持迁移前行为。
 独立的转换封装、通用修复与新增 Chat 适配由
-[转换封装与兼容计划](exec-plans/active/llm-bridge-conversion-compatibility.md)
+[转换封装与兼容计划](exec-plans/completed/llm-bridge-conversion-compatibility.md)
 推进；本次目录迁移不代表这些能力已经交付。
 
 ## 包与源码位置

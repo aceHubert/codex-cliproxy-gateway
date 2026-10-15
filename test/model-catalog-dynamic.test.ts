@@ -448,16 +448,16 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     await runCli(["models", "--sync", "--select", "proxy-model"]);
     assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
 
-    // model_merge_json 带 token 的 URL 在审计中脱敏为 origin+path?…。
+    // modelMergeJson 带 token 的 URL 在审计中脱敏为 origin+path?…。
     await runCli([
       "models", "--sync", "--select", "proxy-model",
       "--model-merge-json", "https://github.com/owner/repo?token=super-secret",
     ]);
     assert.equal(
-      JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).model_merge_json,
+      JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")).modelMergeJson,
       "https://github.com/owner/repo?token=super-secret",
     );
-    assert.match(auditEntries(), /model_merge_json: null -> "https:\/\/github\.com\/owner\/repo\?…"/);
+    assert.match(auditEntries(), /modelMergeJson: null -> "https:\/\/github\.com\/owner\/repo\?…"/);
     assert.equal(auditEntries().includes("super-secret"), false);
   } finally {
     globalThis.fetch = originalFetch;
