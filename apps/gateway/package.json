@@ -11,7 +11,7 @@
   },
   "files": [
     "dist",
-    "schemas",
+    "config.schema.json",
     "README.md"
   ],
   "scripts": {

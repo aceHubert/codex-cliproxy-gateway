@@ -1,0 +1,50 @@
+name: GitHub Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "目标 tag，如 v0.12.3；Release 已存在则补充资产，不存在则创建"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+# 同一 tag 的 tag 推送与手动触发只保留最后一次，避免并发创建同名 Release。
+concurrency:
+  group: github-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          # 手动触发检出指定 tag，tag 推送事件检出事件 tag；资产取自该版本提交。
+          ref: ${{ inputs.tag || github.ref_name }}
+      - name: Create or update release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # tag 属于手动输入，经 env 传入脚本避免注入 run 步骤。
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::远端不存在 tag ${TAG}，请先确认该 tag 已推送。"
+            exit 1
+          fi
+          ASSETS=(apps/gateway/models.json apps/gateway/config.schema.json)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${ASSETS[@]}" --clobber
+            exit 0
+          fi
+          BODY="$(awk -v t="^## ${TAG}" '$0 ~ t {p=1; next} /^## / && p {p=0} p' CHANGELOG.md)"
+          if [ -n "$BODY" ]; then
+            gh release create "$TAG" --title "$TAG" --notes "$BODY" "${ASSETS[@]}"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes "${ASSETS[@]}"
+          fi

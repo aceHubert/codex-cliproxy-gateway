@@ -18,7 +18,7 @@
 - `config-update.ts`：CLI `config` 命令与 Web UI 共享的配置解析/写入/审计路径。
 - `launchd.ts`、`toml.ts`：其余系统集成。
 
-测试集中在 `test/`，辅助脚本在 `scripts/`；私有包 `packages/models/` 是模型目录预设的唯一来源，网关和插件直接消费并在构建时内联，该包不发布；`apps/gateway/models.json` 是网关自有的上游元数据覆盖规则，只允许网关内部使用，不向插件导出。`apps/gateway/schemas/` 是配置规范的唯一来源，随网关包发布并用于运行时校验。根 `README.md` 说明项目结构，`apps/gateway/README.md` 独立维护 CLI 使用手册。`apps/gateway/dist/` 与各 `packages/*/dist/` 是构建产物，不应手工编辑。根目录 `CHANGELOG.md` 与 `LICENSE` 不生成常驻包副本，许可证仅在发布/打包时临时提供。各模块的实现规则与边界细节见 `docs/` 对应文档（执行计划、专题文档与历史记录），不在此重复。
+测试集中在 `test/`，辅助脚本在 `scripts/`；私有包 `packages/models/` 是模型目录预设的唯一来源，网关和插件直接消费并在构建时内联，该包不发布；`apps/gateway/models.json` 是维护者个人的上游元数据覆盖规则源文件，不随构建内联；运行时仅经 `modelMergeJson`（`--model-merge-json`，缓存优先，GitHub 仓库地址解析到最新 Release 资产）消费，不向插件导出。`apps/gateway/config.schema.json` 是配置规范的唯一来源，随网关包发布并用于运行时校验。根 `README.md` 说明项目结构，`apps/gateway/README.md` 独立维护 CLI 使用手册。`apps/gateway/dist/` 与各 `packages/*/dist/` 是构建产物，不应手工编辑。根目录 `CHANGELOG.md` 与 `LICENSE` 不生成常驻包副本，许可证仅在发布/打包时临时提供。各模块的实现规则与边界细节见 `docs/` 对应文档（执行计划、专题文档与历史记录），不在此重复。
 
 ## 构建、测试与开发命令
 
@@ -55,7 +55,7 @@
 - 禁止在日志、Web UI 或任何 API 响应中读取、展示或外发凭据；URL 的 query 可能携带 token，对外展示（审计与 `/ui/api/*` 响应）一律按 `sanitizeUrlValue` 只保留 origin 与路径；修改日志时继续遮蔽敏感请求头。
 - 转发到 CLIProxy 前必须移除 ChatGPT OAuth。
 - 安装、卸载及配置写入逻辑必须保留备份、原子写入和「只修改受管字段」的行为。
-- 修改 `~/.agent-proxy-gateway/config.json` 的字段、默认值、类型或校验规则时，必须同步更新 `apps/gateway/schemas/gateway-config.schema.json`，并补充或调整对应测试。
+- 修改 `~/.agent-proxy-gateway/config.json` 的字段、默认值、类型或校验规则时，必须同步更新 `apps/gateway/config.schema.json`，并补充或调整对应测试。
 - `$schema` 是程序维护的配置字段；每次 install 使用当前程序的规范地址覆盖旧值或用户自定义值，安装失败仍恢复原配置与状态。
 - 默认目录为 `~/.agent-proxy-gateway`；`CODEX_CLIPROXY_HOME`、显式实例与 `serve --config` 仍优先。
 - 五类 agent 缺失开关按 true 合并，已有显式 false 必须保留；配置仍枚举已知 agent，插件只由业务组合入口显式装配。

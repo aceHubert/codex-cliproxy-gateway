@@ -69,7 +69,7 @@ export function loadModelOverrides(file: string): ModelOverrideRule[] {
 
 export async function resolveModelMergeJson<T extends string | undefined>(
   cacheFile: string,
-  bundledFile: T,
+  fallbackFile: T,
   url?: string,
   refresh = false,
 ): Promise<string | T> {
@@ -112,7 +112,7 @@ export async function resolveModelMergeJson<T extends string | undefined>(
       fs.rmSync(stagingFile, { force: true });
     }
   }
-  return fs.existsSync(cacheFile) ? cacheFile : bundledFile;
+  return fs.existsSync(cacheFile) ? cacheFile : fallbackFile;
 }
 
 export function normalizeCatalog(value: unknown): ModelCatalog {
@@ -217,7 +217,7 @@ export function parseCodexCatalog(value: unknown): ModelCatalog {
 /**
  * models.json 已知厂商命中的合成基底：仅包含 Codex 解析所需的保守字段，不携带任何
  * GPT 专属配置（model_messages、reasoning levels、prefer_websockets 等），由命中的
- * 覆盖规则补全厂商元数据。字段集与网关 models.json 覆盖条目同源。
+ * 覆盖规则补全厂商元数据。字段集与仓库的 models.json 覆盖条目同源。
  */
 function minimalModelEntry(id: string, priority: number): ModelEntry {
   return {

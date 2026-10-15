@@ -6,14 +6,14 @@ import { test } from "./host-test.ts";
 import { changedSinceFixedTag, releaseVersionArgs } from "../scripts/release-version.ts";
 
 test("共享产品构建与资源变更强制纳入八包，保留 Lerna 用户参数", () => {
-  for (const file of ["scripts/build-library.ts", "LICENSE", ".github/workflows/deploy.yml", "packages/models/src/index.ts", "packages/models/vendor_models.json", "packages/models/codex_client_models.json", "packages/models/package.json"]) {
+  for (const file of ["scripts/build-library.ts", "LICENSE", ".github/workflows/deploy.yml", ".github/workflows/github-release.yml", "packages/models/src/index.ts", "packages/models/vendor_models.json", "packages/models/codex_client_models.json", "packages/models/package.json"]) {
     assert.deepEqual(releaseVersionArgs(["--yes", "--no-push"], [file]), ["version", "--yes", "--no-push", "--force-publish"]);
   }
   assert.deepEqual(releaseVersionArgs(["--force-publish=@agent-proxy/gateway"], ["scripts/build-ui.ts"]), ["version", "--force-publish=@agent-proxy/gateway"]);
 });
 
 test("纯文档测试不强制版本，包内变更交由 Lerna 原生判定", () => {
-  for (const file of ["docs/requirements/change.md", "README.md", "CHANGELOG.md", "test/new.test.ts", "scripts/run-tests.ts", "apps/gateway/src/cli.ts", "apps/gateway/models.json", "apps/gateway/schemas/gateway-config.schema.json", "packages/zcode/src/index.ts"]) {
+  for (const file of ["docs/requirements/change.md", "README.md", "CHANGELOG.md", "test/new.test.ts", "scripts/run-tests.ts", "apps/gateway/src/cli.ts", "apps/gateway/models.json", "apps/gateway/config.schema.json", "packages/zcode/src/index.ts"]) {
     assert.deepEqual(releaseVersionArgs(["--yes"], [file]), ["version", "--yes"]);
   }
 });

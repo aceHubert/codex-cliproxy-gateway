@@ -4,7 +4,7 @@ const SHARED_PRODUCT_FILES = new Set([
   "package.json", "bun.lock", "lerna.json", "nx.json", "tsconfig.json", "tsconfig.base.json", "vite.config.ts", "LICENSE",
   "scripts/build-gateway.ts", "scripts/build-library.ts", "scripts/build-ui.ts",
   "scripts/changelog.ts", "scripts/verify-package.ts", "scripts/pack-check.ts", "scripts/release-version.ts",
-  ".github/workflows/deploy.yml", ".github/workflows/release-check.yml",
+  ".github/workflows/deploy.yml", ".github/workflows/release-check.yml", ".github/workflows/github-release.yml",
 ]);
 
 /** 根工具包不在产品图内，影响产品的共享输入必须显式参与版本判定。 */

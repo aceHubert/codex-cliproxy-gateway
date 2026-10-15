@@ -18,8 +18,8 @@ Agent Proxy 是基于 Bun 的跨平台本地网关，为 Codex Desktop 和 Codex
 apps/
 └── gateway/          CLI、网关、安装、配置、Web UI 与插件装配
     ├── src/          业务源码；src/ui/ 为 React 界面
-    ├── models.json   网关内部的上游模型覆盖规则
-    ├── schemas/      网关配置的 JSON Schema
+    ├── models.json   维护者个人的模型覆盖规则源文件（经 --model-merge-json 消费）
+    ├── config.schema.json  网关配置的 JSON Schema（随包发布）
     └── README.md     随 CLI 包发布的使用手册
 packages/
 ├── models/           私有模型快照与厂商预设包，构建内联，不发布

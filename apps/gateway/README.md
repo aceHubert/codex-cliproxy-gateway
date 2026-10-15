@@ -264,7 +264,7 @@ agent-proxy serve --config /path/to/config.json
 
 不传 `--config` 时使用 `~/.agent-proxy-gateway/config.json`。
 手动部署还需配置 Codex 的连接地址与模型目录；配置字段见
-[配置格式](schemas/gateway-config.schema.json)。`serve` 本身不执行安装或启动 Web 界面。
+[配置格式](config.schema.json)。`serve` 本身不执行安装或启动 Web 界面。
 
 上游 API Key 在 macOS 保存在登录钥匙串中，其他平台保存在
 `~/.agent-proxy-gateway/credentials.json`，权限应为仅本人可读写（Linux 为 `0600`）。

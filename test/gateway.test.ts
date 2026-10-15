@@ -663,33 +663,33 @@ test("display-name [1m] has no implicit context override", () => {
 test("model merge JSON resolves GitHub repositories and direct HTTP files", async () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "model-merge-json-test-"));
   const cacheFile = path.join(tempDir, "cache", "models.json");
-  const bundledFile = path.join(tempDir, "bundled.json");
+  const fallbackFile = path.join(tempDir, "bundled.json");
   const url = "https://github.com/example/models/";
   const originalFetch = globalThis.fetch;
   const requestedUrls: string[] = [];
   let downloads = 0;
-  fs.writeFileSync(bundledFile, '{"openai":[]}\n');
+  fs.writeFileSync(fallbackFile, '{"openai":[]}\n');
   globalThis.fetch = (async (input: string | URL | Request) => {
     requestedUrls.push(String(input));
     downloads += 1;
     return new Response(`{"openai":[{"name":"gpt-${downloads}"}]}`);
   }) as unknown as typeof fetch;
   try {
-    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile), bundledFile);
-    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile, url), cacheFile);
+    assert.equal(await resolveModelMergeJson(cacheFile, fallbackFile), fallbackFile);
+    assert.equal(await resolveModelMergeJson(cacheFile, fallbackFile, url), cacheFile);
     assert.equal(downloads, 1);
     assert.equal(requestedUrls[0], `${url}releases/latest/download/models.json`);
-    assert.equal(await resolveModelMergeJson(cacheFile, bundledFile, url), cacheFile);
+    assert.equal(await resolveModelMergeJson(cacheFile, fallbackFile, url), cacheFile);
     assert.equal(downloads, 1);
-    await resolveModelMergeJson(cacheFile, bundledFile, "http://downloads.example/models.json", true);
+    await resolveModelMergeJson(cacheFile, fallbackFile, "http://downloads.example/models.json", true);
     assert.equal(downloads, 2);
     assert.equal(requestedUrls[1], "http://downloads.example/models.json");
     assert.match(fs.readFileSync(cacheFile, "utf8"), /gpt-2/);
     globalThis.fetch = (async () => new Response("{invalid")) as unknown as typeof fetch;
-    await assert.rejects(resolveModelMergeJson(cacheFile, bundledFile, url, true), /Invalid model overrides/);
+    await assert.rejects(resolveModelMergeJson(cacheFile, fallbackFile, url, true), /Invalid model overrides/);
     assert.match(fs.readFileSync(cacheFile, "utf8"), /gpt-2/);
     await assert.rejects(
-      resolveModelMergeJson(cacheFile, bundledFile, "https://example.com/downloads/", true),
+      resolveModelMergeJson(cacheFile, fallbackFile, "https://example.com/downloads/", true),
       /file name/,
     );
   } finally {
@@ -1850,7 +1850,7 @@ test("config --debug persists, audits, and defaults to off", async () => {
   try {
     // 发布 schema 同步声明 debug：可选布尔、默认关闭（配置字段与 schema 必须同步）。
     const schema = JSON.parse(fs.readFileSync(
-      path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+      path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
     ));
     assert.equal(schema.required.includes("debug"), false);
     assert.equal(schema.properties.debug.type, "boolean");

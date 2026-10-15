@@ -42,7 +42,7 @@ test("agy 配置只使用可选布尔开关，发布 schema 声明默认开启",
     assert.deepEqual(gatewayConfigWarnings({ ...config, agy }), ["$.agy should be boolean"]);
   }
   const schema = JSON.parse(fs.readFileSync(
-    path.resolve(import.meta.dir, "../apps/gateway/schemas/gateway-config.schema.json"), "utf8",
+    path.resolve(import.meta.dir, "../apps/gateway/config.schema.json"), "utf8",
   ));
   assert.equal(schema.required.includes("agy"), false);
   assert.equal(schema.properties.agy.type, "boolean");
