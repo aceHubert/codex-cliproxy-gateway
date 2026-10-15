@@ -565,7 +565,12 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
       retryAt = 0;
       writeMetadataDisk(value);
       writeCatalogDisk(value);
-      if (previous === undefined || contentDigest(visibleIds(previous)) !== contentDigest(visibleIds(value))) {
+      // 客户端缓存失效条件：可见集合变化（模型增删），或成品条目内容变化（启动/
+      // 手动强制刷新补齐窗口、档位等）——后者同样改变客户端展示与上下文预算，
+      // 已缓存的客户端必须重新拉取。
+      if (previous === undefined
+        || contentDigest(visibleIds(previous)) !== contentDigest(visibleIds(value))
+        || digest(previous.models ?? []) !== digest(value.models)) {
         // 可见目录变化会改变客户端模型列表：过期 Codex 自己的目录缓存。
         try {
           if (options.codexModelsCacheFile) invalidateModelsCache(options.codexModelsCacheFile);

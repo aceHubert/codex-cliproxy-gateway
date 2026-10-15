@@ -544,7 +544,10 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
   let timer: ReturnType<typeof setInterval> | undefined;
   let startup: Promise<void> | undefined;
   if (dependencies.refreshCatalogOnStart !== false) {
-    startup = store.refresh(dependencies.catalogMode === "manual");
+    // 启动/安装刷新一律强制重拉（含元数据）：重启即手动更新窗口，对齐 agy/qoder/
+    // codebuddy 的启动强制语义；元数据 6 小时 TTL 只约束后台定时刷新，否则免费池
+    // 新上线的模型在 TTL 内始终无窗口档位，客户端按自身缺省（如 1M）虚标上下文。
+    startup = store.refresh(true);
     void startup.catch(() => {});
     void startup.finally(() => { startup = undefined; }).catch(() => {});
     void userAgent.refresh().catch(() => {});

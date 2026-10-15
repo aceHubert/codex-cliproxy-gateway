@@ -525,6 +525,57 @@ test("目录存储：元数据过滤 + 探针裁决 + 磁盘回读（TTL 内不�
   }
 });
 
+test("目录存储：强制刷新绕过元数据 TTL（重启即手动更新窗口），成品内容变化失效客户端缓存", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-force-"));
+  const modelsCacheFile = path.join(directory, "models-cache.json");
+  let now = 1_000_000;
+  let metadataFetches = 0;
+  const fetchCatalog = async () => ({ data: [{ id: "space-bunny-free" }, { id: "deepseek-v4.1-flash-free" }] });
+  const fetchMetadata = async () => {
+    metadataFetches++;
+    return { opencode: { models: metadataFetches === 1
+      ? { "space-bunny-free": freeMeta({ limit: { context: 1_048_576 } }) }
+      : {
+        "space-bunny-free": freeMeta({ limit: { context: 1_048_576 } }),
+        "deepseek-v4.1-flash-free": freeMeta({
+          limit: { context: 200_000 },
+          reasoning_options: [{ type: "effort", values: ["low", "high", "max"] }],
+        }),
+      } } };
+  };
+  const freshCache = () => fs.writeFileSync(modelsCacheFile, JSON.stringify({
+    fetched_at: "2026-10-15T12:00:00Z", client_version: "0.150.0", models: [],
+  }));
+  const cacheFetchedAt = () =>
+    (JSON.parse(fs.readFileSync(modelsCacheFile, "utf8")) as { fetched_at: string }).fetched_at;
+  try {
+    const store = createOpencodeZenCatalogStore({
+      cacheDirectory: directory, now: () => now, ttlMs: 60_000,
+      metadataTtlMs: 600_000, probeTtlMs: 600_000,
+      fetchCatalog, fetchMetadata, codexModelsCacheFile: modelsCacheFile,
+      probeModel: async () => "chat-completions",
+    });
+    freshCache();
+    const first = await store.catalog();
+    const degraded = first.find((entry) => entry.slug === "opencode-zen/deepseek-v4.1-flash-free")!;
+    assert.equal("context_window" in degraded, false, "元数据未知的新模型先以降级形态进目录");
+    assert.equal(metadataFetches, 1);
+    assert.equal(cacheFetchedAt(), "2000-01-01T00:00:00Z", "首轮失效客户端缓存");
+    // 模拟客户端重新拉取了降级目录；随后一次「重启」（强制刷新）：元数据 TTL 未到
+    // 也必须重拉（新模型条目补齐窗口档位），可见集合不变但内容变化，同样失效缓存。
+    freshCache();
+    now += 61_000;
+    await store.refresh(true);
+    const second = await store.catalog();
+    const caught = second.find((entry) => entry.slug === "opencode-zen/deepseek-v4.1-flash-free")!;
+    assert.equal(caught.context_window, 200_000);
+    assert.equal(metadataFetches, 2, "强制刷新绕过元数据 TTL");
+    assert.equal(cacheFetchedAt(), "2000-01-01T00:00:00Z", "成品内容变化同样失效客户端缓存");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("目录存储：探针失败不记录裁决，保守保留并下轮重试", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-catalog-probe-fail-"));
   let now = 1_000_000;
