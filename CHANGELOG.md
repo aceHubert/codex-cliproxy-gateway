@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.13.0 (2026-10-15)
+
+#### :rocket: New Feature
+* `plugin-api`
+  * [#21](https://github.com/aceHubert/codex-cliproxy-gateway/pull/21) feat(release): 自动化 GitHub Release 并调整资产与默认规则 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.12.3 (2026-10-15)
 
 #### :bug: Bug Fix
