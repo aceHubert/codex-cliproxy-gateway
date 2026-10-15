@@ -561,31 +561,48 @@ test("GET /ui/api/config 的 CodeBuddy 账号标签随 codebuddyAccount 实时�
   writeLogin("stale-intl.info", "IntlUser", "www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", 1_000, "intl@example.com");
   const handler = (request: Request) =>
     handleWebUiRequest(request, config, { paths, uiHtmlPath, providerDeps: { codebuddyAuthDir: authDir } }, config.port);
+  type AccountPayload = {
+    editable: { codebuddyAccount: string };
+    detected: {
+      codebuddyAccountLabel: string | null;
+      codebuddyAccounts?: Array<{ value: string; uid: string; file: string; label: string; broken: boolean; autoResolved: boolean }>;
+    };
+  };
   try {
     // 未设置（auto 语义）：解析最近刷新的登录，不落配置。
-    let payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { codebuddyAccountLabel: string | null };
-    };
+    const autoText = await (await handler(authedRequest("/ui/api/config"))).text();
+    assert.ok(!autoText.includes(jwt("https://www.codebuddy.cn/auth/realms/copilot")), "账号列表不得包含 accessToken");
+    let payload = JSON.parse(autoText) as AccountPayload;
     assert.equal(payload.detected.codebuddyAccountLabel, "CnUser / cn");
-    // 锁定具体文件：标签随配置指向该文件。
+    // 账号下拉数据：配置值规范化为 "auto"；列表按文件名排序并携带账号 uid（选择
+    // 控件的值），auto 命中的登录（最近刷新）标 autoResolved 供前端折叠进 auto 项。
+    assert.equal(payload.editable.codebuddyAccount, "auto");
+    assert.deepEqual(payload.detected.codebuddyAccounts, [
+      { value: "cn-cli:uid-CnUser", uid: "uid-CnUser", file: "fresh-cn.info", label: "CnUser / cn", broken: false, autoResolved: true },
+      { value: "intl-cli:uid-IntlUser", uid: "uid-IntlUser", file: "stale-intl.info", label: "IntlUser <intl@example.com> / intl", broken: false, autoResolved: false },
+    ]);
+    // 历史 .info 文件名锁定值：标签按同账号解析，规范值换算为 profile 作用域账号值。
     fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "stale-intl.info" }, null, 2));
-    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { codebuddyAccountLabel: string | null };
-    };
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as AccountPayload;
     assert.equal(payload.detected.codebuddyAccountLabel, "IntlUser <intl@example.com> / intl");
-    // 锁定文件缺失：标签回落 auto 真实命中的账号，不显示过期的锁定名。
+    assert.equal(payload.editable.codebuddyAccount, "intl-cli:uid-IntlUser");
+    // 锁定账号不存在：标签回落 auto 真实命中的账号；规范值保留原值，前端用占位项
+    // 展示并可切走。
     fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "gone.info" }, null, 2));
-    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { codebuddyAccountLabel: string | null };
-    };
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as AccountPayload;
     assert.equal(payload.detected.codebuddyAccountLabel, "CnUser / cn");
+    assert.equal(payload.editable.codebuddyAccount, "gone.info");
     // 锁定文件存在但持续损坏：显示诊断标签（网关直读同样报错），不是「未选择」也不是 fallback 账号。
     fs.writeFileSync(path.join(authDir, "broken-locked.info"), "{ not json");
     fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "broken-locked.info" }, null, 2));
-    payload = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      detected: { codebuddyAccountLabel: string | null };
-    };
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as AccountPayload;
     assert.equal(payload.detected.codebuddyAccountLabel, "broken-locked.info（凭据无法读取）");
+    // 损坏登录在下拉里保留条目（uid 为空、值为文件名、标签含原因）但标记不可选。
+    assert.deepEqual(payload.detected.codebuddyAccounts?.map((entry) => [entry.uid, entry.value, entry.broken, entry.autoResolved]), [
+      ["", "broken-locked.info", true, false],
+      ["uid-CnUser", "cn-cli:uid-CnUser", false, true],
+      ["uid-IntlUser", "intl-cli:uid-IntlUser", false, false],
+    ]);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -648,6 +665,143 @@ test("POST /ui/api/config marks pendingRestart and schedules a restart when the 
   }
 });
 
+test("GET /ui/api/config 锁定值规范化为账号 uid：旧快照直接映射，列表外保留原值", async () => {
+  const fixture = await makeFixture();
+  const { paths, config, home, uiHtmlPath } = fixture;
+  const authDir = path.join(home, "auth");
+  fs.mkdirSync(authDir, { recursive: true });
+  // 同 uid 同 profile 两份快照：CLI logout 备份的真实形态，去重后列表只留最新。
+  const writeSnap = (file: string, lastRefreshTime: number) => {
+    fs.writeFileSync(path.join(authDir, file), JSON.stringify({
+      account: { uid: "uid-snap", nickname: "SnapUser", enterpriseId: "" },
+      auth: {
+        accessToken: jwt("https://www.codebuddy.cn/auth/realms/copilot"),
+        refreshToken: jwt("https://refresh.example/auth/realms/x"),
+        domain: "www.codebuddy.cn",
+        expiresAt: Date.now() + 90 * 24 * 3600 * 1000,
+        lastRefreshTime,
+      },
+    }));
+  };
+  writeSnap("old-snap.info", 200);
+  writeSnap("new-snap.info", 600);
+  const handler = (request: Request) =>
+    handleWebUiRequest(request, config, { paths, uiHtmlPath, providerDeps: { codebuddyAuthDir: authDir } }, config.port);
+  type Payload = {
+    editable: { codebuddyAccount: string };
+    detected: {
+      codebuddyAccountLabel: string | null;
+      codebuddyAccounts?: Array<{ value: string; uid: string; file: string }>;
+    };
+  };
+  try {
+    // auto/未锁定：规范值 "auto"；去重后列表只剩最新快照（条目携带选择值与 uid）。
+    let payload = await (await handler(authedRequest("/ui/api/config"))).json() as Payload;
+    assert.equal(payload.editable.codebuddyAccount, "auto");
+    assert.deepEqual(payload.detected.codebuddyAccounts?.map((entry) => [entry.value, entry.file]), [["cn-cli:uid-snap", "new-snap.info"]]);
+    // 历史 .info 锁定旧快照（被列表归并）：规范值直接替换为 profile 作用域账号值
+    // ——锁定语义即「该账号该地域的最新登录」，无需用户纠正旧文件名。
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "old-snap.info" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as Payload;
+    assert.equal(payload.editable.codebuddyAccount, "cn-cli:uid-snap");
+    assert.equal(payload.detected.codebuddyAccountLabel, "SnapUser / cn");
+    // 裸 uid 锁定：规范化为当前命中行的 profile 作用域值；同账号再出新快照后值不变。
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "uid-snap" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as Payload;
+    assert.equal(payload.editable.codebuddyAccount, "cn-cli:uid-snap");
+    // 登录列表外的值（文件名或 uid 均无命中）：保留原值，前端按占位提示；运行期回退 auto。
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "gone.info" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as Payload;
+    assert.equal(payload.editable.codebuddyAccount, "gone.info");
+    fs.writeFileSync(paths.gatewayConfig, JSON.stringify({ ...config, codebuddyAccount: "uid-gone" }, null, 2));
+    payload = await (await handler(authedRequest("/ui/api/config"))).json() as Payload;
+    assert.equal(payload.editable.codebuddyAccount, "uid-gone");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("POST /ui/api/config 切换 CodeBuddy 账号写盘并失效模型缓存", async () => {
+  const calls: string[] = [];
+  // 认证目录在拿到临时 home 后再填（providerDeps 按请求时求值，允许延后赋值）。
+  const codebuddyAuth = { dir: "" };
+  const { handler, paths, home } = await makeFixture({
+    config: { codebuddy: true },
+    webUi: {
+      providerDeps: {
+        get codebuddyAuthDir() { return codebuddyAuth.dir; },
+      },
+      scheduleRestart: () => { calls.push("gateway"); },
+      modelDeps: {
+        wait: async () => {},
+        reloadModels: async () => { calls.push("reload"); return { loaded: true, revision: "account" }; },
+        updateCodexCatalog: async () => { calls.push("update"); return { catalogPath: "fixture", count: 1, manual: false, tomlChanged: false }; },
+      },
+    },
+  });
+  try {
+    // 提交校验按登录列表拒绝列表外取值：fixture 里放一个 uid-Alpha 登录。
+    const authDir = path.join(home, "auth");
+    fs.mkdirSync(authDir, { recursive: true });
+    fs.writeFileSync(path.join(authDir, "alpha.info"), JSON.stringify({
+      account: { uid: "uid-Alpha", nickname: "Alpha", enterpriseId: "" },
+      auth: {
+        accessToken: jwt("https://www.codebuddy.ai/auth/realms/copilot"),
+        refreshToken: jwt("https://refresh.example/auth/realms/x"),
+        domain: "www.codebuddy.ai",
+        expiresAt: Date.now() + 90 * 24 * 3600 * 1000,
+        lastRefreshTime: 1_000,
+      },
+    }));
+    codebuddyAuth.dir = authDir;
+    fs.mkdirSync(path.dirname(paths.launchAgent), { recursive: true });
+    fs.writeFileSync(paths.launchAgent, "# stub plist\n");
+    fs.writeFileSync(paths.stateFile, `${JSON.stringify({ version: 4, pendingRestart: false, config: null }, null, 2)}\n`);
+    fs.writeFileSync(paths.modelsCacheFile, `${JSON.stringify({ models: [], fetched_at: "2026-10-01T00:00:00Z", client_version: "9.9.9" }, null, 2)}\n`);
+    // 列表外取值（文件名、裸 uid 或未知账号）一律拒绝，不静默写成死值。
+    const rejected = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "alpha.info" } }));
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json() as { error: { message: string } }).error.message, /listed/);
+    const rejectedUid = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "uid-Alpha" } }));
+    assert.equal(rejectedUid.status, 400);
+    const rejectedGhost = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "intl-cli:uid-ghost" } }));
+    assert.equal(rejectedGhost.status, 400);
+    const response = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "intl-cli:uid-Alpha" } }));
+    assert.equal(response.status, 200);
+    const payload = await response.json() as { restarting: boolean; applied: string[] };
+    assert.deepEqual(payload.applied, ["codebuddyAccount"]);
+    // modelsChanged 路径已等待新网关就绪并更新目录，restart 不再单独等待。
+    assert.equal(payload.restarting, false);
+    // 与 CLI --switch 同一语义：写盘、state 同步、审计、调度重启、失效模型缓存。
+    const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { codebuddyAccount?: string };
+    assert.equal(saved.codebuddyAccount, "intl-cli:uid-Alpha");
+    const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { pendingRestart?: boolean; config?: { codebuddyAccount?: string } };
+    assert.equal(state.pendingRestart, true);
+    assert.equal(state.config?.codebuddyAccount, "intl-cli:uid-Alpha");
+    const cache = JSON.parse(fs.readFileSync(paths.modelsCacheFile, "utf8")) as { fetched_at?: string };
+    assert.equal(cache.fetched_at, "2000-01-01T00:00:00Z");
+    const audit = fs.readFileSync(paths.stdoutLog, "utf8");
+    assert.match(audit, /config changed by `webui config`/);
+    assert.match(audit, /codebuddyAccount: null -> "intl-cli:uid-Alpha"/);
+    assert.deepEqual(calls, ["gateway", "reload", "update"]);
+    // 切回 auto：显式落 "auto"（与 CLI --switch 一致）。
+    const back = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "auto" } }));
+    assert.equal(back.status, 200);
+    assert.deepEqual((await back.json() as { applied: string[] }).applied, ["codebuddyAccount"]);
+    assert.equal(
+      (JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { codebuddyAccount?: string }).codebuddyAccount,
+      "auto",
+    );
+    // 语义相同（已是 auto）再提交 auto：无变更、不写盘、不触发模型与进程操作。
+    const noop = await handler(authedRequest("/ui/api/config", { json: { codebuddyAccount: "auto" } }));
+    assert.equal(noop.status, 200);
+    assert.deepEqual((await noop.json() as { applied: string[] }).applied, []);
+    assert.deepEqual(calls, ["gateway", "reload", "update", "gateway", "reload", "update"]);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
 test("POST /ui/api/config rejects invalid values and unknown fields", async () => {
   const { handler, home } = await makeFixture();
   try {
@@ -660,8 +814,11 @@ test("POST /ui/api/config rejects invalid values and unknown fields", async () =
       ...[true, false, "on", 1, null, [], {}].map((value) => ({
         json: { upstreamOnly: value }, message: /Unsupported field: upstreamOnly/,
       })),
-      // 账号选择只在 CLI：UI 提交 codebuddyAccount 一律按不支持字段拒绝。
-      { json: { codebuddyAccount: "Tencent-Cloud.coding-copilot.info" }, message: /Unsupported field/ },
+      // codebuddyAccount 形状校验：只接受 "auto" 或 .info 纯文件名（拒绝路径注入与非字符串）。
+      { json: { codebuddyAccount: "../evil.info" }, message: /codebuddyAccount expects/ },
+      { json: { codebuddyAccount: "sub/dir.info" }, message: /codebuddyAccount expects/ },
+      { json: { codebuddyAccount: "alpha" }, message: /codebuddyAccount expects/ },
+      { json: { codebuddyAccount: 123 }, message: /codebuddyAccount expects/ },
       { json: { codebuddyRegion: "cn" }, message: /Unsupported field/ },
       { json: { upstreamBaseUrl: "http://evil" }, message: /Unsupported field/ },
       { json: {}, message: /no supported fields/ },

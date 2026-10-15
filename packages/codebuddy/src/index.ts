@@ -7,7 +7,7 @@ import {
   CodebuddyCredentialError,
   createCodebuddyCredentialCache,
   defaultAuthDirectory,
-  isCodebuddyAccountName,
+  isCodebuddyAccountValue,
 } from "./credentials.ts";
 import type { CodebuddyCredentialCache } from "./credentials.ts";
 import {
@@ -70,8 +70,8 @@ export function codebuddyEnabled<Config extends AgentConfig>(config: Config): bo
 export function validateCodebuddyConfig<Config extends AgentConfig>(config: Config): void {
   if (config.codebuddy !== undefined && typeof config.codebuddy !== "boolean") throw new Error("codebuddy 必须为 boolean");
   if (config.codebuddyAccount !== undefined
-    && (typeof config.codebuddyAccount !== "string" || !isCodebuddyAccountName(config.codebuddyAccount))) {
-    throw new Error("codebuddyAccount 必须是认证目录内的 .info 文件名或 auto");
+    && (typeof config.codebuddyAccount !== "string" || !isCodebuddyAccountValue(config.codebuddyAccount))) {
+    throw new Error("codebuddyAccount 必须是账号 uid、认证目录内的 .info 文件名或 auto");
   }
   if (!codebuddyEnabled(config)) return;
   const host = config.host;

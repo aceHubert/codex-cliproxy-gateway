@@ -446,22 +446,11 @@ button {
   cursor: default;
 }
 
-/* CodeBuddy 账号只读标签：实时解析的「昵称 <邮箱> / 地域」，无任何交互态；
- * 切换账号只在 CLI（codebuddy --switch），UI 不提供写入口。 */
-.account-readonly {
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 8px;
-  background: var(--bg-input-editable);
-  border: 1px solid var(--border-card);
-  border-radius: var(--radius-sm);
-  color: var(--fg-secondary);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  font-weight: 600;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: default;
+/* CodeBuddy 账号下拉：与开关同行的右侧选择框，基线外观复用 .input-text；
+ * 标签较长（昵称 <邮箱> / 地域），允许比常规输入略宽。 */
+.codebuddy-account-select {
+  flex: 0 1 340px;
+  max-width: 340px;
 }
 
 .error-text {

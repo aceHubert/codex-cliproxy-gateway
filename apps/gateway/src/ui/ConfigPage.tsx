@@ -26,10 +26,11 @@ const EXCLUDED_GROUP_EXAMPLES: Record<string, string> = {
 };
 
 /** 表单态：数值/大小字段保持字符串，与服务端 CLI 解析规则一致。
- * CodeBuddy 账号不在表单内：UI 只读展示实时解析标签，切换走 CLI。 */
+ * codebuddyAccount 为归一后的凭据选择值（"auto" 或 .info 文件名），随表单保存写盘。 */
 interface FormState {
   zcode: boolean;
   codebuddy: boolean;
+  codebuddyAccount: string;
   qoder: boolean;
   agy: boolean;
   opencodeZen: boolean;
@@ -151,6 +152,8 @@ export function ConfigPage({
       setForm({
         zcode: next.editable.zcode,
         codebuddy: next.editable.codebuddy,
+        // 兼容未带该字段的后端（升级窗口期）：缺省视为 auto。
+        codebuddyAccount: next.editable.codebuddyAccount ?? "auto",
         qoder: next.editable.qoder,
         agy: next.editable.agy,
         // 兼容未带该字段的后端（升级窗口期）：缺省视为关闭。
@@ -181,6 +184,7 @@ export function ConfigPage({
     if (!config || !form) return false;
     return form.zcode !== config.editable.zcode
       || form.codebuddy !== config.editable.codebuddy
+      || form.codebuddyAccount !== (config.editable.codebuddyAccount ?? "auto")
       || form.qoder !== config.editable.qoder
       || form.agy !== config.editable.agy
       || form.opencodeZen !== (config.editable.opencodeZen === true)
@@ -207,6 +211,24 @@ export function ConfigPage({
   const showAgy = Boolean(config && (config.detected.agy || config.editable.agy));
   // 兼容旧后端返回结构：仅接受数组形式的生效来源，避免升级窗口期内渲染报错。
   const qoderSources = Array.isArray(config?.detected.qoderSources) ? config.detected.qoderSources : [];
+  // 兼容旧后端返回结构：账号列表缺省按空列表处理（升级窗口期）。
+  const codebuddyAccounts = Array.isArray(config?.detected.codebuddyAccounts)
+    ? config.detected.codebuddyAccounts
+    : [];
+  /** 账号下拉选项：auto 当前命中的登录折叠进 auto 项（与 CLI --switch 菜单一致），
+   * 但当前锁定的账号始终保持可选；损坏登录展示但不可选。选项值 = `profile:uid`
+   * （同账号跨地域多行时唯一，可钉住地域），无 uid 登录为文件名。 */
+  const codebuddyAccountOptions = codebuddyAccounts.filter((account) =>
+    !account.autoResolved || (form !== null && account.value === form.codebuddyAccount));
+  /** 悬空值兜底：锁定的账号已不在登录列表（如该账号已登出）时补占位项，保证
+   * select 值不悬空；运行期已回退 auto，用户可改选其他账号。 */
+  const codebuddyAccountMissing = form !== null
+    && form.codebuddyAccount !== "auto"
+    && !codebuddyAccountOptions.some((account) => account.value === form.codebuddyAccount);
+  /** auto 项展示「auto 规则此刻命中的登录」（最近刷新），与当前是否锁定无关——
+   * 不能用 codebuddyAccountLabel：那是当前配置实际命中的账号，锁定状态下会显示
+   * 被锁定账号而非 auto 将命中的账号。无有效登录时只显示模式文案。 */
+  const codebuddyAutoAccountLabel = codebuddyAccounts.find((account) => account.autoResolved)?.label;
   /** 各兼容端下按前缀分组的排除模型输入框；条目只填模型名，前缀由网关保存时补全。 */
   const excludedDisabled = phase === "saving" || phase === "restarting" || phase === "confirm";
   const renderExcludedGroups = (endpoint: ExcludedModelGroup["endpoint"]): React.ReactNode => {
@@ -269,6 +291,9 @@ export function ConfigPage({
       }
       if (formSnapshot.zcode !== config.editable.zcode) changes.zcode = formSnapshot.zcode;
       if (formSnapshot.codebuddy !== config.editable.codebuddy) changes.codebuddy = formSnapshot.codebuddy;
+      if (formSnapshot.codebuddyAccount !== (config.editable.codebuddyAccount ?? "auto")) {
+        changes.codebuddyAccount = formSnapshot.codebuddyAccount;
+      }
       if (formSnapshot.qoder !== config.editable.qoder) changes.qoder = formSnapshot.qoder;
       if (formSnapshot.agy !== config.editable.agy) changes.agy = formSnapshot.agy;
       if (formSnapshot.opencodeZen !== (config.editable.opencodeZen === true)) {
@@ -512,11 +537,36 @@ export function ConfigPage({
                           />
                           <span className="slider" />
                         </label>
-                        {/* 账号选择只在 CLI（codebuddy --switch）：这里只读显示后端实时
-                            解析的实际命中账号，无交互态、不进 changes、不写配置。 */}
-                        <span className="account-readonly" aria-label={t("config:labelCodebuddyAccount")}>
-                          {config.detected.codebuddyAccountLabel ?? t("config:codebuddyAccountNone")}
-                        </span>
+                        {/* 账号切换下拉：与 CLI codebuddy --switch 写同一 codebuddyAccount 字段。
+                            auto 项折叠当前命中登录（后端标 autoResolved），损坏登录不可选，
+                            锁定文件缺失时补占位项，保证当前值始终可见可切。 */}
+                        <select
+                          className="input-text codebuddy-account-select"
+                          aria-label={t("config:labelCodebuddyAccount")}
+                          value={form.codebuddyAccount}
+                          disabled={excludedDisabled}
+                          onChange={(event) => setForm({ ...form, codebuddyAccount: event.target.value })}
+                        >
+                          {/* auto 置顶（默认跟随项），其后列出具体登录；auto 项把「自动」
+                              标记放在账号标签之后——账号是最重要的信息，模式只作后缀。 */}
+                          <option value="auto">
+                            {codebuddyAutoAccountLabel
+                              ? `${codebuddyAutoAccountLabel} · ${t("config:codebuddyAccountAuto")}`
+                              : t("config:codebuddyAccountAuto")}
+                          </option>
+                          {codebuddyAccountOptions.map((account) => (
+                            <option key={account.value} value={account.value} disabled={account.broken}>
+                              {account.broken
+                                ? `${account.label}${t("config:codebuddyAccountBroken")}`
+                                : account.label}
+                            </option>
+                          ))}
+                          {codebuddyAccountMissing && (
+                            <option value={form.codebuddyAccount}>
+                              {t("config:codebuddyAccountMissingFile", { value: form.codebuddyAccount })}
+                            </option>
+                          )}
+                        </select>
                       </div>
                       <p className="field-desc">{t("config:descCodebuddy")}</p>
                       <p className="field-desc">{t("config:descCodebuddyAccount")}</p>
