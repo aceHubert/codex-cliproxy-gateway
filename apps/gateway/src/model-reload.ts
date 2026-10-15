@@ -184,7 +184,11 @@ export interface ModelReloadDependencies {
 function isConnectionRefused(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const value = error as { code?: unknown; cause?: unknown };
-  return value.code === "ECONNREFUSED" || (value.cause !== error && isConnectionRefused(value.cause));
+  // Node net 层的错误码是 "ECONNREFUSED"；Bun 的 fetch（JSC WebFetch）抛
+  // "Unable to connect" 时错误码为 "ConnectionRefused"。两者都是「端口暂无监听」，
+  // 重启窗口期（kickstart 杀旧进程、新进程未绑定端口）属预期，须按可重试处理。
+  return value.code === "ECONNREFUSED" || value.code === "ConnectionRefused"
+    || (value.cause !== error && isConnectionRefused(value.cause));
 }
 
 /** 只探测模型端口的健康身份；未运行时保留通知，供下次启动拾取。 */

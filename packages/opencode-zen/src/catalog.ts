@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { getCodexModelSnapshot } from "@agent-proxy/models";
+import { getCodexBaselineEntry } from "@agent-proxy/models";
 import { invalidateModelsCache } from "@agent-proxy/plugin-api";
 import { atomicWrite } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
@@ -22,7 +22,7 @@ const CATALOG_TTL_MS = 10 * 60 * 1000;
 const FAILURE_COOLDOWN_MS = 30_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** 档位展示文案：复用 gpt-5.5 快照里 low/medium/high 的描述，其余值域（none/max/xhigh）留空。 */
+/** 档位展示文案：复用快照基底（优先 gpt-5.5，缺失回退首条）里 low/medium/high 的描述，其余值域（none/max/xhigh）留空。 */
 const effortDescriptions = (base: ModelEntry) => new Map(
   (Array.isArray(base.supported_reasoning_levels)
     ? base.supported_reasoning_levels as Array<{ effort?: unknown; description?: unknown }>
@@ -81,7 +81,7 @@ export function parseOpencodeZenModelsResponse(value: unknown): string[] {
 }
 
 /**
- * Codex 目录基底沿用 gpt-5.5 快照（与 agy/ 一致），能力字段按 chat-completions 中性化。
+ * Codex 目录基底沿用快照基底（优先 gpt-5.5，缺失回退首条，与 agy/ 一致），能力字段按 chat-completions 中性化。
  * `metadata` 为可选的实时元数据表（models.opencode.ai）：显示名、上下文窗口
  * （limit.context）与 reasoning effort 档位（reasoning_options）全部取自它；
  * 元数据缺失的模型按 id 人工化命名、删窗口字段、不暴露档位。
@@ -90,8 +90,7 @@ export function buildOpencodeZenCatalog(
   ids: string[],
   metadata?: Record<string, OpencodeZenModelMetadata>,
 ): ModelCatalog {
-  const BASE = getCodexModelSnapshot().models.find((entry) => entry.slug === "gpt-5.5");
-  if (!BASE) throw new Error("Codex 模型快照缺少 gpt-5.5 基底条目");
+  const BASE = getCodexBaselineEntry();
   const EFFORT_DESCRIPTIONS = effortDescriptions(BASE);
   const models: ModelEntry[] = ids.map((id, index) => {
     const meta = metadata && Object.hasOwn(metadata, id) ? metadata[id] : undefined;
@@ -126,7 +125,7 @@ export function buildOpencodeZenCatalog(
     // Chat Completions 工具调用原生支持并行函数调用。
     model.supports_parallel_tool_calls = true;
     // 上下文窗口：元数据 limit.context；缺数据时删字段（客户端用自身缺省，
-    // 好过用 gpt-5.5 基底的 272k 误导客户端超长输入被上游拒）。
+    // 好过用基底的 272k 误导客户端超长输入被上游拒）。
     const contextWindow = meta?.contextWindow;
     if (contextWindow !== undefined) {
       model.context_window = contextWindow;
@@ -138,7 +137,7 @@ export function buildOpencodeZenCatalog(
       delete model.effective_context_window_percent;
     }
     // 提示词回落（2026-10-14 决策）：门禁不检查 system 内容后不再替换 base_instructions /
-    // instructions_template，条目保留 gpt-5.5 快照基底的官方 Codex 提示词——客户端由此
+    // instructions_template，条目保留快照基底的官方 Codex 提示词——客户端由此
     // 恢复自身的操作性指令（apply_patch freeform 协议、shell 约定）。OpenCode 官方
     // 模板仍留在 fingerprint-data.json 作回退材料。
     return model;
@@ -322,7 +321,7 @@ interface CachedCatalog {
   ids: string[];
   metadata?: { fetchedAt: number; models: Record<string, OpencodeZenModelMetadata> };
   verdicts?: Record<string, OpencodeZenProbeVerdictEntry>;
-  /** 成品条目（保留 gpt-5.5 基底的官方 Codex 提示词）：刷新时合成，
+  /** 成品条目（保留快照基底的官方 Codex 提示词）：刷新时合成，
    *  与 `opencode-zen-catalog.json` 内容一致；serve 路径只读，不重建。 */
   models?: ModelEntry[];
 }

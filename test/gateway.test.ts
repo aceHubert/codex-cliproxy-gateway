@@ -3673,10 +3673,23 @@ test("newapi upstream rejects malformed or empty /models responses", async () =>
   }
 });
 
-test("synthesizeModelEntry fails when the snapshot lacks the gpt-5.5 base", () => {
+test("synthesizeModelEntry falls back to the first snapshot entry when the preferred base slug is missing", () => {
+  const snapshot = { models: [{ slug: "gpt-6-astra", context_window: 272000, prefer_websockets: true }] };
+  const model = synthesizeModelEntry("any-model", 0, snapshot);
+  assert.equal(model.slug, "any-model");
+  assert.equal(model.display_name, "any-model");
+  assert.equal(model.priority, 0);
+  assert.equal(model.context_window, 272000);
+  assert.equal(model.minimal_client_version, undefined);
+  // new-api 只有 HTTP：即使基底声明 WS 优先，克隆也必须显式关闭（不随快照字段集漂移）。
+  assert.equal(model.prefer_websockets, false);
+  assert.ok(String(model.description).includes("any-model"));
+});
+
+test("synthesizeModelEntry rejects an empty snapshot at the fallback tier", () => {
   assert.throws(
-    () => synthesizeModelEntry("any-model", 0, { models: [{ slug: "gpt-6-astra" }] }),
-    /does not contain the "gpt-5.5" base entry/,
+    () => synthesizeModelEntry("any-model", 0, { models: [] }),
+    /无法确定目录合成基底/,
   );
 });
 

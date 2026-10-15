@@ -43,10 +43,27 @@ export interface ExcludedModelGroup {
   prefixes: string[];
 }
 
+/** CodeBuddy 认证目录内的一条登录（下拉选项）：只含账号标识与展示标签，无凭据。 */
+export interface CodebuddyAccountOption {
+  /** 选择控件的值：`profile:uid`（可钉住地域/产品，同账号跨地域多行时唯一）；
+   * 无 uid 的旧客户端登录为文件名。 */
+  value: string;
+  /** 账号 uid（无 uid 的旧客户端登录为空串）。 */
+  uid: string;
+  file: string;
+  label: string;
+  /** 损坏/未知域名的登录不可被选中。 */
+  broken: boolean;
+  /** auto 规则当前命中的登录：折叠进 auto 选项，不单独列出（与 CLI --switch 菜单一致）。 */
+  autoResolved: boolean;
+}
+
 export interface UiConfig {
   editable: {
     zcode: boolean;
     codebuddy: boolean;
+    /** CodeBuddy 凭据选择（规范值："auto" 或账号 uid），下拉切换的绑定值。 */
+    codebuddyAccount: string;
     qoder: boolean;
     agy: boolean;
     /** OpenCode Zen 免费模型入口（公共鉴权，无本机凭据依赖）。 */
@@ -67,10 +84,11 @@ export interface UiConfig {
     codebuddy: boolean;
     /**
      * 当前实际命中的 CodeBuddy 账号标签（`昵称 <邮箱> / 地域`，只含非敏感的账号标识），
-     * 由后端按网关同一选取规则实时解析；null 表示无可用登录。只读字段，切换只在 CLI
-     * （codebuddy --switch）。
+     * 由后端按网关同一选取规则实时解析；null 表示无可用登录。
      */
     codebuddyAccountLabel: string | null;
+    /** 认证目录内全部登录，供账号下拉切换；旧后端缺省该字段时按空列表处理。 */
+    codebuddyAccounts?: CodebuddyAccountOption[];
     qoder: boolean;
     /** Qoder 当前生效登录来源；每地域按 CLI 优先、桌面回退计算，只含标签不含凭据。 */
     qoderSources: Array<"CLI-INTL" | "CLI-CN" | "DESKTOP-INTL" | "DESKTOP-CN">;
@@ -95,13 +113,14 @@ export interface UiConfig {
   configVersion: string;
 }
 
-/** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。
- * CodeBuddy 账号不在此列：UI 只读展示，切换走 CLI 的 codebuddy --switch。 */
+/** UI 表单提交子集：日志上限用数字 0 或带单位字符串，其余数值字段保持字符串。 */
 export interface UiConfigChanges {
   /** 组合保存时由服务端先拉取、校验并重建所选目录，不只写配置字段。 */
   selectedModels?: string[];
   zcode?: boolean;
   codebuddy?: boolean;
+  /** CodeBuddy 凭据选择："auto" 或账号 uid（与 CLI codebuddy --switch 同一语义）。 */
+  codebuddyAccount?: string;
   qoder?: boolean;
   agy?: boolean;
   opencodeZen?: boolean;
