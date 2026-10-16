@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/codebuddy",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "Agent Proxy codebuddy 插件；保留基线转换行为。",
   "type": "module",
   "exports": {
