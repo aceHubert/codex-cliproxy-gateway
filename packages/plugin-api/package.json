@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/plugin-api",
-  "version": "0.14.0",
+  "version": "0.14.1",
   "description": "Agent Proxy 插件与主机公共契约。",
   "type": "module",
   "exports": {
