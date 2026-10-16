@@ -9,7 +9,7 @@ import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 /**
  * OpenCode Zen 模型目录：`GET /inference/v1/models` 提供当前真实可服务的模型 id，
  * models.opencode.ai 元数据（models.dev 同构）提供每个模型的免费判定（cost）、
- * 显示名、上下文窗口（limit.context）、reasoning effort 档位（reasoning_options）、
+ * 显示名、输入模态（modalities.input）、上下文窗口（limit.context）、reasoning effort 档位（reasoning_options）、
  * 生命周期状态（deprecated）与端点协议（provider.npm）。两个源都是实时的——
  * 免费池轮换、窗口调整、档位变化都不需要改网关代码；磁盘缓存（本模块 store）
  * 只作 TTL 内的 last-good 兜底，不内置任何静态模型快照。
@@ -83,8 +83,8 @@ export function parseOpencodeZenModelsResponse(value: unknown): string[] {
 /**
  * Codex 目录基底沿用快照基底（优先 gpt-5.5，缺失回退首条，与 agy/ 一致），能力字段按 chat-completions 中性化。
  * `metadata` 为可选的实时元数据表（models.opencode.ai）：显示名、上下文窗口
- * （limit.context）与 reasoning effort 档位（reasoning_options）全部取自它；
- * 元数据缺失的模型按 id 人工化命名、删窗口字段、不暴露档位。
+ * （limit.context）、输入模态（modalities.input）与 reasoning effort 档位（reasoning_options）全部取自它；
+ * 元数据缺失的模型按 id 人工化命名、仅支持文本、删窗口字段、不暴露档位。
  */
 export function buildOpencodeZenCatalog(
   ids: string[],
@@ -102,7 +102,7 @@ export function buildOpencodeZenCatalog(
     model.priority = index;
     model.prefer_websockets = false;
     delete model.minimal_client_version;
-    model.input_modalities = ["text"];
+    model.input_modalities = metadataInputModalities(meta?.inputModalities) ?? ["text"];
     model.supports_reasoning_summaries = false;
     model.supports_reasoning_summary_parameter = false;
     model.supports_image_detail_original = false;
@@ -151,7 +151,7 @@ export function mergeOpencodeZenCatalog(base: ModelCatalog, opencodeZen: ModelCa
   return { models: [...models, ...opencodeZen.models.map((entry, index) => ({ ...entry, priority: priority + index }))] };
 }
 
-/** 官方元数据中的单模型信息：免费判定、生命周期、端点协议、显示名、窗口与 effort 档位。 */
+/** 官方元数据中的单模型信息：免费判定、生命周期、端点协议、显示名、输入模态、窗口与 effort 档位。 */
 export interface OpencodeZenModelMetadata {
   /** 模型级 SDK 覆盖（如 @ai-sdk/anthropic）；缺省继承 provider 级 openai-compatible。 */
   npm?: string;
@@ -163,6 +163,8 @@ export interface OpencodeZenModelMetadata {
   free?: boolean;
   /** 官方显示名。 */
   name?: string;
+  /** modalities.input：仅保留目录和客户端支持的 text/image；缺失时目录按纯文本处理。 */
+  inputModalities?: Array<"text" | "image">;
   /** limit.context：上下文窗口（token）；元数据缺该字段时 undefined（目录删窗口字段）。 */
   contextWindow?: number;
   /** reasoning_options 中 effort 型档位的值域；toggle/budget 型不产出该字段。 */
@@ -203,6 +205,13 @@ function metadataContextWindow(entry: Record<string, unknown>): number | undefin
   return typeof context === "number" && Number.isFinite(context) && context > 0 ? Math.trunc(context) : undefined;
 }
 
+/** 只采纳明确声明的客户端输入模态，忽略 attachment 与模型名，避免推断出不存在的图片能力。 */
+function metadataInputModalities(value: unknown): Array<"text" | "image"> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const modalities = value.filter((item): item is "text" | "image" => item === "text" || item === "image");
+  return modalities.length > 0 ? [...new Set(modalities)] : undefined;
+}
+
 /** 元数据 cost 判定免费：input 与 output 都为 0（缺字段按非免费处理，宁可漏示不误示）。 */
 function metadataFree(entry: Record<string, unknown>): boolean {
   const cost = record(entry.cost);
@@ -223,8 +232,8 @@ function metadataEffortLevels(entry: Record<string, unknown>): string[] | undefi
 /**
  * 解析 models.opencode.ai 元数据（models.dev 同构）：取 opencode provider 下每个模型的
  * `provider.npm`、`api`（provider 级 baseURL）、`status`、`cost`（免费判定）、`name`、
- * `limit.context` 与 `reasoning_options`（effort 档位）。结构不符返回 undefined，调用方按
- * "元数据不可用"保守处理（只信 `-free` 后缀、删窗口字段、不暴露档位）。
+ * `modalities.input`、`limit.context` 与 `reasoning_options`（effort 档位）。结构不符返回 undefined，调用方按
+ * "元数据不可用"保守处理（只信 `-free` 后缀、仅支持文本、删窗口字段、不暴露档位）。
  */
 export function parseOpencodeZenMetadataResponse(value: unknown): Record<string, OpencodeZenModelMetadata> | undefined {
   const provider = record(record(value)?.opencode);
@@ -238,6 +247,7 @@ export function parseOpencodeZenMetadataResponse(value: unknown): Record<string,
     if (!entry) continue;
     const npm = record(entry.provider)?.npm;
     const contextWindow = metadataContextWindow(entry);
+    const inputModalities = metadataInputModalities(record(entry.modalities)?.input);
     const effortLevels = metadataEffortLevels(entry);
     const name = typeof entry.name === "string" && entry.name.trim() ? entry.name.trim() : undefined;
     result[id] = {
@@ -245,6 +255,7 @@ export function parseOpencodeZenMetadataResponse(value: unknown): Record<string,
       ...(api ? { api } : {}),
       ...(metadataFree(entry) ? { free: true } : {}),
       ...(name ? { name } : {}),
+      ...(inputModalities ? { inputModalities } : {}),
       ...(contextWindow !== undefined ? { contextWindow } : {}),
       ...(effortLevels ? { effortLevels } : {}),
       deprecated: entry.status === "deprecated",
@@ -405,11 +416,13 @@ export function createOpencodeZenCatalogStore(options: OpencodeZenCatalogStoreOp
   const parseMetadataEntry = (raw: unknown): OpencodeZenModelMetadata | undefined => {
     const entry = record(raw);
     if (!entry) return;
+    const inputModalities = metadataInputModalities(entry.inputModalities);
     return {
       ...(typeof entry.npm === "string" && entry.npm ? { npm: entry.npm } : {}),
       ...(typeof entry.api === "string" && entry.api ? { api: entry.api } : {}),
       ...(entry.free === true ? { free: true } : {}),
       ...(typeof entry.name === "string" && entry.name ? { name: entry.name } : {}),
+      ...(inputModalities ? { inputModalities } : {}),
       ...(typeof entry.contextWindow === "number" && Number.isFinite(entry.contextWindow) && entry.contextWindow > 0
         ? { contextWindow: Math.trunc(entry.contextWindow) } : {}),
       ...(Array.isArray(entry.effortLevels) && entry.effortLevels.every((level) => typeof level === "string")
