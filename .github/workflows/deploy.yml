@@ -12,6 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   id-token: write
   issues: read
@@ -27,6 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CODEX_CLIPROXY_SKIP_TESTS: "1"
+      HAS_RELEASE_PAT: ${{ secrets.RELEASE_PAT != '' }}
     environment:
       name: production
     steps:
@@ -34,7 +36,7 @@ jobs:
         with:
           fetch-depth: 0
           # 用 RELEASE_PAT 推送 release 提交与 tag，tag 事件才能触发 GitHub Release workflow；
-          # secret 缺失时回退 GITHUB_TOKEN（发布仍成功，但 Release 需手动 dispatch 补建）。
+          # secret 缺失时回退 GITHUB_TOKEN，并在 npm 发布成功后主动 dispatch Release。
           token: ${{ secrets.RELEASE_PAT || github.token }}
       - uses: actions/setup-node@v7.0.0
         with:
@@ -48,16 +50,28 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Warn when release token is missing
-        env:
-          PAT_PROVIDED: ${{ secrets.RELEASE_PAT }}
-        run: |
-          if [ -z "$PAT_PROVIDED" ]; then
-            echo "::warning::未配置 RELEASE_PAT：tag 将以 GITHUB_TOKEN 推送，无法自动触发 GitHub Release workflow；可在 Actions 手动运行 GitHub Release 补建。"
-          fi
       - name: Create release commit and tag
-        run: bun run release:version -- --yes
+        id: version
+        run: |
+          PREVIOUS_HEAD="$(git rev-parse HEAD)"
+          bun run release:version -- --yes
+          if [ "$PREVIOUS_HEAD" = "$(git rev-parse HEAD)" ]; then
+            echo "未生成新版本，跳过 GitHub Release 自动触发。"
+            exit 0
+          fi
+          TAG="v$(jq -r '.version' lerna.json)"
+          if [ "$(git rev-parse --verify "refs/tags/${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            echo "::error::版本标签 ${TAG} 未指向本次发布提交，请检查版本步骤。"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
         env:
           GITHUB_AUTH: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish to npm
         run: bun run release -- --yes
+      - name: Trigger GitHub Release without PAT
+        if: env.HAS_RELEASE_PAT == 'false' && steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: gh workflow run github-release.yml --ref main -f tag="$RELEASE_TAG"
