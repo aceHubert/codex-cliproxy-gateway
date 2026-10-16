@@ -24,7 +24,8 @@ export const AGY_DISPLAY_PREFIX = "AGY/";
  *  （v2：档位家族合并；v3：levels 按实际档位重建；v4：删 web_search_tool_type；
  *  v5：v3/v4 的字段删除改为保留字段置中性值——缺字段疑似导致 Codex 弃用目录；
  *  v6：系统提示词在合成时替换（base_instructions + model_messages 模板））。 */
-const CACHE_REVISION = 6;
+/** 目录输出语义修订：变化时旧磁盘缓存整体失效（-disabled 剔除自 7 起）。 */
+const CACHE_REVISION = 7;
 const CATALOG_TTL_MS = 6 * 60 * 1000;
 const FAILURE_COOLDOWN_MS = 30_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -110,6 +111,9 @@ export function parseAgyCatalogData(value: unknown): AgyCatalogData {
     if (seen.has(id)) throw new Error("Antigravity 模型目录格式错误：模型 id 重复");
     seen.add(id);
     if (excluded.has(id)) continue;
+    // 上游把当前下线的模型保留在目录里并以 `-disabled` 后缀命名，同步时整体剔除；
+    // 推荐位/档位里引用的同名 id 由 selection 重排自然跳过。
+    if (id.endsWith("-disabled")) continue;
     if (selection !== undefined && !selection.includes(id)) continue;
     const details = record(raw) ?? {};
     const displayName = typeof details.displayName === "string" && details.displayName.trim()
@@ -139,8 +143,10 @@ export function parseAgyCatalogData(value: unknown): AgyCatalogData {
   if (deprecated) {
     for (const [oldId, info] of Object.entries(deprecated)) {
       const target = record(info);
-      if (typeof target?.newModelId === "string" && target.newModelId && target.newModelId !== oldId) {
-        reroute.set(oldId, target.newModelId);
+      const newModelId = typeof target?.newModelId === "string" ? target.newModelId : "";
+      // 重定向目标已被 `-disabled` 剔除时不产出重定向，避免把可请求的旧 id 指到下线模型。
+      if (newModelId && newModelId !== oldId && !newModelId.endsWith("-disabled")) {
+        reroute.set(oldId, newModelId);
       }
     }
   }

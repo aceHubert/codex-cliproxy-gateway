@@ -100,11 +100,19 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
   const catalogStore = createCodebuddyCatalogStore({
     cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
     // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
-    // 请求路由则始终以带地域 slug 为准。
+    // 请求路由则始终以带地域 slug 为准。选取抛凭据错误时强制重扫重试一次：
+    // 登录文件刚轮换/新增时定时刷新不必依赖 fs.watch 事件恰好到达。
     credentials: async () => {
       const list = [];
       for (const product of ["cli", "work"] as const) {
-        try { list.push(await credentialCache.forProduct(product)); } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
+        try {
+          list.push(await credentialCache.forProduct(product));
+        } catch {
+          try {
+            credentialCache.refresh();
+            list.push(await credentialCache.forProduct(product));
+          } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
+        }
       }
       return list;
     },
@@ -264,10 +272,6 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           cleanup();
           return fail(400, "CodeBuddy 模型名必须使用 codebuddy-cn/、codebuddy-intl/、workbuddy-cn/ 或 workbuddy-intl/ 前缀");
         }
-        const credential = await credentialCache.forProduct(product, region);
-        accessToken = credential.accessToken;
-        refreshToken = credential.refreshToken;
-        abort.signal.throwIfAborted();
         const model = typeof input.model === "string" ? codebuddyUpstreamModel(input.model) : undefined;
         if (!model) { cleanup(); return fail(400, "CodeBuddy 模型名缺少前缀后的模型 ID"); }
         // 目录可用时校验 belongs-to-serves；空目录（拉取失败）透传，由上游判定。
@@ -276,16 +280,53 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           return fail(404, "此模型不在 CodeBuddy/WorkBuddy 当前账号的可服务目录内");
         }
         const translated = await translateCodebuddyRequest(input, model, to);
-        upstreamUrl = `${credential.endpoint}/v2/chat/completions`;
-        // 从当前凭据重建身份头与会话归因，不采信入站客户端的身份或授权头。
-        const context = contexts.resolve(request, credential);
-        const headers = buildCodebuddyChatHeaders(credential, context);
-        upstreamRequestHeaders = headers;
-        const body = translated.body;
-        upstreamRequestBody = sink ? redactValue(body) : undefined;
-        const upstream = await fetchUpstream(upstreamUrl, {
-          method: "POST", headers, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
-        });
+        // 凭据选取带一次缓存兜底：首次抛凭据错误（缺登录/临近过期）时强制重扫重试
+        // 一次，覆盖 fs.watch 未及时触达的新登录与 token 轮换；仍失败按原错误抛出。
+        const selectCredential = async () => {
+          try {
+            return await credentialCache.forProduct(product, region);
+          } catch (error) {
+            if (!(error instanceof CodebuddyCredentialError)) throw error;
+            credentialCache.refresh();
+            return await credentialCache.forProduct(product, region);
+          }
+        };
+        // 凭据选取 → 上游调用，最多两轮：上游 401/403 时疑似缓存 token 已被本机 CLI
+        // 轮换，强制重扫后仅当 token 因此变化才重发一次；未变化或重扫失败视为确定性
+        // 失败直接透传，不对上游多打请求。重试只发生在此处（响应未开始写给客户端）。
+        let upstream: Response | undefined;
+        for (let attempt = 0; ; attempt++) {
+          const credential = await selectCredential();
+          accessToken = credential.accessToken;
+          refreshToken = credential.refreshToken;
+          abort.signal.throwIfAborted();
+          upstreamUrl = `${credential.endpoint}/v2/chat/completions`;
+          // 从当前凭据重建身份头与会话归因，不采信入站客户端的身份或授权头。
+          const context = contexts.resolve(request, credential);
+          const headers = buildCodebuddyChatHeaders(credential, context);
+          upstreamRequestHeaders = headers;
+          const body = translated.body;
+          upstreamRequestBody = sink ? redactValue(body) : undefined;
+          const candidate = await fetchUpstream(upstreamUrl, {
+            method: "POST", headers, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
+          });
+          if (candidate.ok || (candidate.status !== 401 && candidate.status !== 403)) {
+            upstream = candidate;
+            break;
+          }
+          if (attempt > 0) {
+            upstream = candidate;
+            break;
+          }
+          credentialCache.refresh();
+          const refreshed = await selectCredential().catch(() => undefined);
+          if (refreshed === undefined || refreshed.accessToken === credential.accessToken) {
+            upstream = candidate;
+            break;
+          }
+          await candidate.body?.cancel().catch(() => {});
+        }
+        if (upstream === undefined) { cleanup(); return fail(502, "CodeBuddy 上游请求失败", "upstream_error"); }
         if (!upstream.ok) {
           const text = redact(await upstream.text());
           cleanup();
