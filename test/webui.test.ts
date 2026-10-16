@@ -483,7 +483,7 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
     handleWebUiRequest(request, config, {
       paths,
       uiHtmlPath,
-      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir, agyCredentialFile },
+      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir, agyCredentialFile, agyProbeKeychain: () => false },
     }, config.port);
   try {
     const absent = await (await handler(authedRequest("/ui/api/config"))).json() as {

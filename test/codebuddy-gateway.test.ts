@@ -35,7 +35,7 @@ test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求�
   };
   const adapter = createCodebuddyAdapter(config, {
     cacheDirectory: directory, catalogMode: "manual",
-    credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
+    credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
     setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
     fetch: async (url) => {
       if (!url.endsWith("/v3/config")) return chatUpstream();
@@ -80,7 +80,7 @@ test("CodeBuddy manual 显式刷新无缓存失败会报错", { timeout: 60_000 
   };
   const adapter = createCodebuddyAdapter(adapterConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
-    credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
+    credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
     fetch: async () => { throw new Error("network down"); },
   });
   try {
@@ -111,6 +111,12 @@ function credential(profile: CodebuddyCredential["profile"] = "intl-cli"): Codeb
     accountEmail: "",
     expiresAt: Date.now() + 3_600_000,
   };
+}
+
+/** 单凭据适配器用例只模拟国际站登录，两个产品继续复用同一份凭据。 */
+async function internationalCredential(_product: "cli" | "work", region?: "cn" | "intl"): Promise<CodebuddyCredential> {
+  if (region === "cn") throw new CodebuddyCredentialError("没有可用的国内 CodeBuddy/WorkBuddy 登录凭据");
+  return credential();
 }
 
 type SelectKey = "up" | "down" | "enter" | "cancel" | "other";
@@ -174,9 +180,11 @@ interface ChatCall {
 interface FixtureOptions {
   config?: Partial<GatewayConfig>;
   profile?: CodebuddyCredential["profile"];
+  regions?: Array<"cn" | "intl">;
   missingRegion?: "cn" | "intl";
+  authDirectory?: string;
   chatResponse?: () => Response;
-  catalogResponse?: () => Response;
+  catalogResponse?: (url: string) => Response;
 }
 
 interface FixtureContext {
@@ -226,14 +234,17 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
           undefined,
           undefined,
           {
-            credentialCache: {
-              // 带地域 slug 硬性路由；目录刷新没有地域参数时跟随 options.profile。
+            authDirectory: options.authDirectory,
+            credentialCache: options.authDirectory ? undefined : {
+              // 默认只有指定 profile 的地域；双地域用例显式提供 regions。
               forProduct: async (product, region) => {
-                if (region !== undefined && region === options.missingRegion) {
-                  throw new CodebuddyCredentialError(`没有可用的 ${region === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
-                }
                 const resolvedRegion = region
                   ?? ((options.profile ?? "intl-cli").startsWith("cn-") ? "cn" : "intl");
+                const availableRegions = options.regions
+                  ?? [(options.profile ?? "intl-cli").startsWith("cn-") ? "cn" : "intl"];
+                if (resolvedRegion === options.missingRegion || !availableRegions.includes(resolvedRegion)) {
+                  throw new CodebuddyCredentialError(`没有可用的 ${resolvedRegion === "cn" ? "国内" : "国际"} CodeBuddy/WorkBuddy 登录凭据`);
+                }
                 return credential(`${resolvedRegion}-${product}` as CodebuddyCredential["profile"]);
               },
               refresh: () => {},
@@ -243,7 +254,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
             fetch: async (url, init) => {
               if (url.endsWith("/v3/config")) {
                 catalogFetches.push(new Headers(init.headers));
-                return options.catalogResponse?.() ?? Response.json(configData());
+                return options.catalogResponse?.(url) ?? Response.json(configData());
               }
               if (url.endsWith("/v2/chat/completions")) {
                 chats.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
@@ -480,6 +491,102 @@ const CN_ISSUER = "https://www.codebuddy.cn/auth/realms/copilot";
 const STALE_TOKEN = authJwt(INTL_ISSUER);
 const FRESH_TOKEN = authJwt(INTL_ISSUER, "-rotated");
 
+/** 同一账号分别登录国内与国际站，国际登录刷新时间更近。 */
+function writeRegionalLogins(authDirectory: string): void {
+  fs.mkdirSync(authDirectory);
+  for (const region of ["cn", "intl"] as const) {
+    const issuer = region === "cn" ? CN_ISSUER : INTL_ISSUER;
+    fs.writeFileSync(path.join(authDirectory, `${region}.info`), JSON.stringify({
+      account: { uid: "uid-shared", enterpriseId: "" },
+      auth: {
+        accessToken: authJwt(issuer), refreshToken: REFRESH_TOKEN,
+        domain: region === "cn" ? "www.codebuddy.cn" : "www.codebuddy.ai",
+        expiresAt: Date.now() + 3_600_000,
+        lastRefreshTime: region === "cn" ? 1_000 : 2_000,
+      },
+    }));
+  }
+}
+
+test("CodeBuddy auto 同时展示双地域同名模型，并按各自地域成功路由", async () => {
+  await fixture(async ({ create, directory, chats, catalogFetches }) => {
+    const authDirectory = path.join(directory, "auth");
+    writeRegionalLogins(authDirectory);
+    const handler = create({ authDirectory, config: { codebuddyAccount: "auto" } });
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    assert.equal(response.status, 200);
+    const catalog = await response.json() as Json;
+    assert.deepEqual(
+      catalog.data.filter((model: Json) => /^(codebuddy|workbuddy)-(cn|intl)\//.test(model.id)).map((model: Json) => model.id).sort(),
+      ["codebuddy-cn/gpt-5.6-luna", "codebuddy-intl/gpt-5.6-luna"],
+      "同地域的产品重名仍去重，不同地域的同名模型必须各自保留",
+    );
+    assert.equal(catalogFetches.length, 4, "两个地域的 cli/work 产品目录各拉一次");
+    for (const region of ["cn", "intl"] as const) {
+      const model = `codebuddy-${region}/gpt-5.6-luna`;
+      const result = await handler(request(model, { stream: false }));
+      assert.equal(result.status, 200);
+      assert.equal((await result.json() as Json).model, model);
+    }
+    assert.deepEqual(chats.map((chat) => chat.url), [
+      "https://copilot.tencent.com/v2/chat/completions",
+      "https://www.codebuddy.ai/v2/chat/completions",
+    ]);
+  });
+});
+
+test("CodeBuddy 单地域目录请求失败仍展示并服务另一地域", async () => {
+  await fixture(async ({ create, chats }) => {
+    const catalogUrls: string[] = [];
+    const handler = create({
+      regions: ["cn", "intl"],
+      catalogResponse: (url) => {
+        catalogUrls.push(url);
+        const domestic = ["copilot.tencent.com", "www.workbuddy.cn"].includes(new URL(url).hostname);
+        return domestic ? new Response("暂时不可用", { status: 503 }) : Response.json(configData());
+      },
+    });
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    assert.equal(response.status, 200);
+    const catalog = await response.json() as Json;
+    assert.deepEqual(
+      catalog.data.filter((model: Json) => /^(codebuddy|workbuddy)-(cn|intl)\//.test(model.id)).map((model: Json) => model.id),
+      ["codebuddy-intl/gpt-5.6-luna"],
+    );
+    assert.equal(catalogUrls.length, 4, "单地域失败不应中断其他地域与产品的目录拉取");
+    const result = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(result.status, 200);
+    await result.json();
+    assert.equal(chats[0]!.url, "https://www.codebuddy.ai/v2/chat/completions");
+  });
+});
+
+test("CodeBuddy 锁定账号时仅展示锁定地域，双地域同账号不扩大授权范围", async () => {
+  for (const region of ["cn", "intl"] as const) {
+    await fixture(async ({ create, directory, catalogFetches }) => {
+      const authDirectory = path.join(directory, "auth");
+      writeRegionalLogins(authDirectory);
+      const handler = create({ authDirectory, config: { codebuddyAccount: `${region}-cli:uid-shared` } });
+      const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
+      assert.equal(response.status, 200);
+      const catalog = await response.json() as Json;
+      assert.deepEqual(
+        catalog.data.filter((model: Json) => /^(codebuddy|workbuddy)-(cn|intl)\//.test(model.id)).map((model: Json) => model.id),
+        [`codebuddy-${region}/gpt-5.6-luna`],
+        "显式地域账号锁定不能因枚举目录而切换到同账号的另一地域登录",
+      );
+      assert.equal(catalogFetches.length, 2, "锁定地域仍可按同地域产品回退拉取 cli/work 目录");
+      const result = await handler(request(`codebuddy-${region}/gpt-5.6-luna`, { stream: false }));
+      assert.equal(result.status, 200);
+      await result.json();
+      const otherRegion = region === "cn" ? "intl" : "cn";
+      const rejected = await handler(request(`codebuddy-${otherRegion}/gpt-5.6-luna`, { stream: false }));
+      assert.equal(rejected.status, 503, "显式请求另一地域也不能突破账号锁定");
+      assert.equal((await rejected.json() as Json).error.type, "configuration_error");
+    });
+  }
+});
+
 /** 真实凭据缓存 + 可轮换 .info 的网关夹具：验证请求路径的缓存过期重试。 */
 async function retryFixture(
   run: (context: {
@@ -681,7 +788,7 @@ test("适配器目录投影与网关关闭时不装配插件", async () => {  co
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
     };
     const enabled = createCodebuddyAdapter({ ...base, codebuddy: true }, {
-      credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
+      credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       refreshCatalogOnStart: false,
       fetch: async (url) => {
@@ -717,7 +824,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
       catalogPath: path.join(directory, "catalog.json"),
     };
     const adapter = createCodebuddyAdapter({ ...base, codebuddy: true }, {
-      credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
+      credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       setInterval: ((callback: () => void, delay: number) => {
         scheduled.push(callback);
@@ -889,7 +996,7 @@ test("promptCodebuddyAccountSelection：箭头选择/取消；auto 置顶且不�
         .map((line) => line.slice(2)),
     );
     const items = [...menuItems];
-    assert.ok(items.includes("uid-beta / intl (auto, follows the most recently refreshed login)"), items.join(" | "));
+    assert.ok(items.includes("Auto(uid-beta / intl)"), items.join(" | "));
     assert.ok(items.includes("uid-alpha / intl"), items.join(" | "));
     assert.ok(items.some((item) => item.startsWith("broken.info（") && item.endsWith(" (unusable)")), items.join(" | "));
     assert.ok(!items.includes("uid-beta / intl"), "auto 命中的登录不再单独列出");

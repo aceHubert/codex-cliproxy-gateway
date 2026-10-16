@@ -248,8 +248,9 @@ export interface CodebuddyCredentialCache {
    * region/product，请求 slug 地域与账号地域不匹配时直接报错，不跨地域回退；接口
    * 产品不一致时沿用同账号换端点的产品适配——CLI 刷新换文件后经 watch/refresh 跟随。
    * 账号不存在时告警一次并回落 auto。auto/未锁定时按缓存快照最近刷新选取：模型 slug
-   * 中的地域是硬性路由（该地域没有任何凭据时直接报错），目录刷新没有 slug 可依据，
-   * 走最近刷新登录的 auto 规则；同产品凭据优先，缺失时回退同地域另一产品登录。
+   * 中的地域是硬性路由（该地域没有任何凭据时直接报错），目录枚举同样显式指定地域；
+   * 未指定地域的调用走最近刷新登录的 auto 规则。同产品凭据优先，缺失时回退
+   * 同地域另一产品登录。
    */
   forProduct(product: "cli" | "work", region?: Exclude<CodebuddyRegion, "auto">): Promise<CodebuddyCredential>;
   /**

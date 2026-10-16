@@ -99,22 +99,29 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const catalogStore = createCodebuddyCatalogStore({
     cacheDirectory: dependencies.cacheDirectory ?? resolvePaths().runtimeHome,
-    // 目录刷新没有带地域的 slug 可依据，按 codebuddyAccount/auto 选取凭据；
-    // 请求路由则始终以带地域 slug 为准。选取抛凭据错误时强制重扫重试一次：
-    // 登录文件刚轮换/新增时定时刷新不必依赖 fs.watch 事件恰好到达。
+    // 按 .info 的内存快照选取各产品×地域凭据；auto 同时展示有登录支持的两地，
+    // 锁定账号仍由凭据层限制地域。部分地域缺失是正常状态，不因此反复全扫目录。
     credentials: async () => {
-      const list = [];
-      for (const product of ["cli", "work"] as const) {
-        try {
-          list.push(await credentialCache.forProduct(product));
-        } catch {
-          try {
-            credentialCache.refresh();
-            list.push(await credentialCache.forProduct(product));
-          } catch { /* 锁定文件不可用或缺凭据时由另一产品/auto 兜底。 */ }
+      const collect = async () => {
+        const list = [];
+        for (const product of ["cli", "work"] as const) {
+          for (const region of ["cn", "intl"] as const) {
+            try {
+              list.push(await credentialCache.forProduct(product, region));
+            } catch { /* 缺登录、过期或不在锁定账号地域内时跳过该目录族。 */ }
+          }
         }
+        return list;
+      };
+      const list = await collect();
+      if (list.length > 0) return list;
+      // 所有目录族均不可用时，仅补扫一次，兜底登录文件轮换但 watch 尚未到达。
+      try {
+        credentialCache.refresh();
+        return await collect();
+      } catch {
+        return [];
       }
-      return list;
     },
     ...(dependencies.codexModelsCacheFile ? { codexModelsCacheFile: dependencies.codexModelsCacheFile } : {}),
     fetch: (url, init) => fetchUpstream(url, init),
