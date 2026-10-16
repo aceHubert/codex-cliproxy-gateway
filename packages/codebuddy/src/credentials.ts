@@ -241,15 +241,23 @@ const EXPIRY_MARGIN_MS = 5 * 60 * 1000;
 
 export interface CodebuddyCredentialCache {
   /**
-   * 按产品接口选取凭据。配置锁定账号（账号 uid；历史 .info 文件名值选取时换算为
+   * 按产品接口选取凭据，选取基于内存缓存的目录快照（intl/cn 各 profile 独立成条，
+   * 同时调用互不影响）；缓存更新只来自 fs.watch 提前触发与 refresh() 强制重扫。
+   * 配置锁定账号（账号 uid；历史 .info 文件名值选取时换算为
    * 同账号 uid）时按「该账号最近刷新的登录」选取：命中凭据的 profile 决定
    * region/product，请求 slug 地域与账号地域不匹配时直接报错，不跨地域回退；接口
-   * 产品不一致时沿用同账号换端点的产品适配——CLI 刷新换文件后自动跟随新快照。
-   * 账号不存在时告警一次并回落 auto。auto/未锁定时全扫 + 最近刷新选取：模型 slug
+   * 产品不一致时沿用同账号换端点的产品适配——CLI 刷新换文件后经 watch/refresh 跟随。
+   * 账号不存在时告警一次并回落 auto。auto/未锁定时按缓存快照最近刷新选取：模型 slug
    * 中的地域是硬性路由（该地域没有任何凭据时直接报错），目录刷新没有 slug 可依据，
    * 走最近刷新登录的 auto 规则；同产品凭据优先，缺失时回退同地域另一产品登录。
    */
   forProduct(product: "cli" | "work", region?: Exclude<CodebuddyRegion, "auto">): Promise<CodebuddyCredential>;
+  /**
+   * 强制重扫认证目录并同步更新内存缓存（同步文件读，目录内只有少量几 KB 的 .info）。
+   * 供请求路径在疑似缓存过期（凭据错误、上游 401/403）与目录刷新容错时兜底调用；
+   * fs.watch 只是提前触发，refresh 是正确性的兜底。
+   */
+  refresh(): void;
   close(): void;
 }
 
@@ -578,9 +586,10 @@ function defaultAccountFallbackWarning(account: string): void {
 }
 
 /**
- * 只读凭据缓存：扫描认证目录下全部 `.info`（不同产品/客户端各一份文件），目录事件
- * 触发重扫（本机 CLI 会持续刷新这些文件），网关自身绝不刷新 token；临近过期直接报
- * 带指引的错误。单个文件损坏/未知域名只跳过该文件，不拖垮其余有效登录。
+ * 只读凭据缓存：扫描认证目录下全部 `.info`（不同产品/客户端各一份文件）缓存在
+ * 内存，目录事件触发重扫（本机 CLI 会持续刷新这些文件），请求路径在凭据错误或
+ * 上游 401/403 时经 refresh() 强制重扫兜底；网关自身绝不刷新 token；临近过期直接
+ * 报带指引的错误。单个文件损坏/未知域名只跳过该文件，不拖垮其余有效登录。
  */
 export function createCodebuddyCredentialCache(
   authDirectory: string,
@@ -605,8 +614,9 @@ export function createCodebuddyCredentialCache(
   let identity = "";
   let debounce: ReturnType<typeof setTimeout> | undefined;
   /**
-   * 选取前总是重扫：认证目录内只有少量几 KB 的 .info 文件，一次读+解析相对模型
-   * 请求可忽略；正确性完全不依赖 fs.watch 事件的到达时机（watch 仅作提前触发）。
+   * 凭据列表只缓存在内存：请求选取不重扫，缓存更新来自 fs.watch 提前触发与
+   * refresh() 强制重扫（请求路径在凭据错误/上游 401/403 时调用）。CLI `--switch`
+   * 与 Web UI 的账号列表不走本缓存，始终实时全扫。
    */
   let closed = false;
   let watcher: fs.FSWatcher | undefined;
@@ -620,11 +630,12 @@ export function createCodebuddyCredentialCache(
     // 写入方（CLI 刷新）通常先写临时文件再 rename，短去抖合并同一轮事件。
     debounce = setTimeout(() => {
       debounce = undefined;
-      applyScan(state.byProfile);
+      applyScan();
     }, 100);
     debounce.unref?.();
   }
 
+  let reconciled = false;
   function reconcileWatcher(): void {
     let info: fs.Stats;
     try { info = stat(directory); }
@@ -639,16 +650,18 @@ export function createCodebuddyCredentialCache(
     active.on("error", () => { active.close(); if (watcher === active) watcher = undefined; });
     watcher = active;
     identity = next;
+    // 构造时已同步扫过一次；之后 watcher 重建（目录被删除重建/inode 变化/watch 出错
+    // 退出）意味着事件可能丢失，主动补一次重扫，不再依赖下次 refresh 兜底。
+    if (reconciled) schedule();
+    reconciled = true;
   }
 
-  function applyScan(previous: Map<CodebuddyProfile, CodebuddyCredential>): void {
+  function applyScan(): void {
     state = scanSync();
-    const unchanged = state.byProfile.size === previous.size
-      && [...state.byProfile].every(([profile, credential]) => previous.get(profile)?.accessToken === credential.accessToken);
   }
 
   // uid 锁定与 auto 都依赖全扫结果；目录内只有少量几 KB 的 .info，初始扫描成本可忽略。
-  applyScan(new Map());
+  applyScan();
   reconcileWatcher();
 
   function expired(credential: CodebuddyCredential): boolean {
@@ -712,12 +725,12 @@ export function createCodebuddyCredentialCache(
         return adapted;
       };
       // 锁定账号（`profile:uid` 钉住地域/产品；裸 uid 或换算后的历史文件名值跟随
-      // 该账号最近刷新的登录）：同键取最新，文件轮换（CLI 刷新另写新文件）后自动
-      // 跟随；账号/地域不存在时告警一次并回落 auto，绝不改写配置。
+      // 该账号最近刷新的登录）：同键取最新，文件轮换（CLI 刷新另写新文件）后经
+      // watch/refresh 更新缓存并自动跟随；账号/地域不存在时告警一次并回落 auto，
+      // 绝不改写配置。
       if (lockedValue !== undefined) {
         const selector = lockedAccountSelector(directory, lockedValue, existsSync);
         if (selector !== undefined) {
-          applyScan(state.byProfile);
           const credential = selector.profile !== undefined
             ? state.byAccount.get(`${selector.uid}::${selector.profile}`)
             : state.byUid.get(selector.uid);
@@ -737,15 +750,18 @@ export function createCodebuddyCredentialCache(
           (dependencies.onAccountFallback ?? defaultAccountFallbackWarning)(lockedValue);
         }
       }
-      // auto 路径（含锁定文件缺失的运行期 fallback）。
-      // 每次选取前重扫：文件量小、读取廉价，正确性不依赖 fs.watch 事件到达时机。
-      applyScan(state.byProfile);
+      // auto 路径（含锁定文件缺失的运行期 fallback）：直接在内存缓存快照上选取，
+      // 快照更新由 fs.watch 提前触发与请求路径的 refresh() 兜底负责。
       let credential = state.failure || state.byProfile.size === 0 ? undefined : select(state.byProfile, product, region);
 
       if (state.failure) throw state.failure;
       if (!credential) throw new CodebuddyCredentialError("CodeBuddy 凭据不可用");
       if (expired(credential)) throw expiryError();
       return credential;
+    },
+    refresh() {
+      if (closed) return;
+      applyScan();
     },
     close() {
       if (closed) return;

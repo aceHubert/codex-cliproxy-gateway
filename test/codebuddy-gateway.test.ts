@@ -35,7 +35,7 @@ test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求�
   };
   const adapter = createCodebuddyAdapter(config, {
     cacheDirectory: directory, catalogMode: "manual",
-    credentialCache: { forProduct: async () => credential(), close: () => {} },
+    credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
     setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
     fetch: async (url) => {
       if (!url.endsWith("/v3/config")) return chatUpstream();
@@ -80,7 +80,7 @@ test("CodeBuddy manual 显式刷新无缓存失败会报错", { timeout: 60_000 
   };
   const adapter = createCodebuddyAdapter(adapterConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
-    credentialCache: { forProduct: async () => credential(), close: () => {} },
+    credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
     fetch: async () => { throw new Error("network down"); },
   });
   try {
@@ -236,6 +236,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
                   ?? ((options.profile ?? "intl-cli").startsWith("cn-") ? "cn" : "intl");
                 return credential(`${resolvedRegion}-${product}` as CodebuddyCredential["profile"]);
               },
+              refresh: () => {},
               close: () => {},
             },
             cacheDirectory: directory,
@@ -433,6 +434,7 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
       {
         credentialCache: {
           forProduct: async () => { throw new CodebuddyCredentialError("CodeBuddy 凭据已过期；请在桌面端重新登录"); },
+          refresh: () => {},
           close: () => {},
         },
         cacheDirectory: directory,
@@ -464,6 +466,110 @@ test("上游错误正文回显 token 时被彻底遮蔽（含转义形式）", a
     assert.ok(!body.includes(JSON.stringify(ACCESS_TOKEN).slice(1, -1)), "JSON 转义形式不得回显");
     assert.ok(!body.includes(REFRESH_TOKEN), "refreshToken 不得回显");
     assert.match(body, /重新登录/);
+  });
+});
+
+/** 测试用 JWT 形 accessToken：payload 携带指定 iss；签名后缀区分新旧 token。 */
+function authJwt(iss: string, suffix = ""): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "RS256", typ: "JWT" })}.${encode({ iss })}.sig${suffix}`;
+}
+
+const INTL_ISSUER = "https://www.codebuddy.ai/auth/realms/copilot";
+const CN_ISSUER = "https://www.codebuddy.cn/auth/realms/copilot";
+const STALE_TOKEN = authJwt(INTL_ISSUER);
+const FRESH_TOKEN = authJwt(INTL_ISSUER, "-rotated");
+
+/** 真实凭据缓存 + 可轮换 .info 的网关夹具：验证请求路径的缓存过期重试。 */
+async function retryFixture(
+  run: (context: {
+    handler: ReturnType<typeof createGatewayHandler>;
+    authDir: string;
+    chats: ChatCall[];
+    writeLogin: (file: string, accessToken: string, domain: string, issuer: string) => void;
+  }) => Promise<void>,
+  chat?: (authorization: string | null, writeLogin: (file: string, accessToken: string, domain: string, issuer: string) => void) => Response,
+): Promise<void> {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-gw-retry-"));
+  const authDir = path.join(directory, "auth");
+  fs.mkdirSync(authDir);
+  const chats: ChatCall[] = [];
+  const writeLogin = (file: string, accessToken: string, domain: string, issuer: string) => {
+    fs.writeFileSync(path.join(authDir, file), JSON.stringify({
+      account: { uid: "uid-1", enterpriseId: "" },
+      auth: { accessToken, refreshToken: REFRESH_TOKEN, domain, expiresAt: Date.now() + 3_600_000 },
+    }));
+  };
+  // 初始只有国际站登录：凭据缓存在 handler 构造时完成首次扫描。
+  writeLogin("intl.info", STALE_TOKEN, "www.codebuddy.ai", INTL_ISSUER);
+  const handler = createGatewayHandler(
+    {
+      qoder: false, agy: false, opencodeZen: false,
+      host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: true, upstreamOnly: false,
+      officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+      catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
+    },
+    "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+    path.join(directory, "models-cache.json"), undefined, undefined,
+    {
+      authDirectory: authDir,
+      cacheDirectory: directory,
+      fetch: async (url, init) => {
+        if (url.endsWith("/v3/config")) return Response.json(configData());
+        if (url.endsWith("/v2/chat/completions")) {
+          chats.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
+          const authorization = new Headers(init.headers).get("authorization");
+          return chat?.(authorization, writeLogin) ?? chatUpstream("重试后的回答");
+        }
+        throw new Error(`测试未模拟的上游请求: ${url}`);
+      },
+    },
+  );
+  try {
+    await run({ handler, authDir, chats, writeLogin });
+  } finally {
+    handler.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+test("上游 401 时强制重扫缓存：token 已被 CLI 轮换则重试一次成功", async () => {
+  await retryFixture(async ({ handler, chats }) => {
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 200);
+    const body = await response.text();
+    assert.ok(!body.includes("重新登录"), "重试成功后不得出现登录指引");
+    assert.equal(chats.length, 2, "恰好重试一次");
+    assert.equal(chats[1]!.headers.get("authorization"), `Bearer ${FRESH_TOKEN}`, "重试携带轮换后的 token");
+  }, (authorization, writeLogin) => {
+    if (authorization === `Bearer ${STALE_TOKEN}`) {
+      // 模拟本机 CLI 在网关两次尝试之间轮换了 .info 里的 token。
+      writeLogin("intl.info", FRESH_TOKEN, "www.codebuddy.ai", INTL_ISSUER);
+      return new Response(JSON.stringify({ error: { message: "login expired" } }), { status: 401, headers: { "content-type": "application/json" } });
+    }
+    return chatUpstream("重试后的回答");
+  });
+});
+
+test("上游 401 且重扫后 token 未变：不重发上游，透传错误与登录指引", async () => {
+  await retryFixture(async ({ handler, chats }) => {
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 401);
+    const body = await response.text();
+    assert.match(body, /重新登录/);
+    assert.equal(chats.length, 1, "token 未变化不得对上游重发");
+  }, () => new Response(JSON.stringify({ error: { message: "login expired" } }), { status: 401, headers: { "content-type": "application/json" } }));
+});
+
+test("缓存缺少国内登录时请求自愈：凭据错误触发重扫发现新登录", async () => {
+  await retryFixture(async ({ handler, chats, writeLogin }) => {
+    // 构造后 CLI 完成国内站登录；fs.watch 去抖未到，缓存仍是旧快照，由请求路径
+    // 的凭据错误重试在单次请求内自愈。
+    writeLogin("cn.info", authJwt(CN_ISSUER), "www.codebuddy.cn", CN_ISSUER);
+    const response = await handler(request("codebuddy-cn/gpt-5.6-luna", { stream: false }));
+    assert.equal(response.status, 200);
+    assert.equal(chats.length, 1);
+    assert.ok(chats[0]!.url.startsWith("https://copilot.tencent.com/"), "cn 前缀路由到国内端点");
   });
 });
 
@@ -575,7 +681,7 @@ test("适配器目录投影与网关关闭时不装配插件", async () => {  co
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
     };
     const enabled = createCodebuddyAdapter({ ...base, codebuddy: true }, {
-      credentialCache: { forProduct: async () => credential(), close: () => {} },
+      credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       refreshCatalogOnStart: false,
       fetch: async (url) => {
@@ -611,7 +717,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
       catalogPath: path.join(directory, "catalog.json"),
     };
     const adapter = createCodebuddyAdapter({ ...base, codebuddy: true }, {
-      credentialCache: { forProduct: async () => credential(), close: () => {} },
+      credentialCache: { forProduct: async () => credential(), refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       setInterval: ((callback: () => void, delay: number) => {
         scheduled.push(callback);

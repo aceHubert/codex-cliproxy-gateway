@@ -228,9 +228,11 @@ test("锁定的账号不存在：运行期 fallback auto 并告警一次，不�
 
     // 该账号重新登录（新文件，即使比其他账号旧）：uid 命中优先，无需改配置。
     fs.writeFileSync(cnFile, JSON.stringify(cnLogin));
+    cache.refresh();
     assert.equal((await cache.forProduct("cli")).profile, "cn-cli");
     // 再登出（文件删除）后又回退，告警重新布防。
     fs.rmSync(cnFile);
+    cache.refresh();
     assert.equal((await cache.forProduct("cli")).profile, "intl-cli");
     assert.deepEqual(warnings, ["uid-gone", "uid-gone"]);
   } finally {
@@ -316,15 +318,17 @@ test("单个损坏/未知域名的 .info 只跳过，不拖垮其余有效登录
   }
 });
 
-test("临近过期的凭据返回带修复指引的错误，重读成功后恢复", async () => {
+test("临近过期的凭据返回带修复指引的错误，refresh 重扫后恢复", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-exp-"));
   const file = path.join(directory, "test.info");
   fs.writeFileSync(file, JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", { expiresAt: Date.now() + 60_000 })));
   const cache = createCodebuddyCredentialCache(directory);
   try {
     await assert.rejects(cache.forProduct("cli"), /重新登录/);
-    // CLI 完成刷新：写回新的有效期。签名重扫同步生效，无需等待 watch 事件。
+    // CLI 完成刷新：写回新的有效期。缓存不自动跟随，refresh 强制重扫后恢复。
     fs.writeFileSync(file, JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot")));
+    await assert.rejects(cache.forProduct("cli"), /重新登录/, "refresh 前缓存中的过期凭据仍然报错");
+    cache.refresh();
     const credential = await cache.forProduct("cli");
     assert.equal(credential.profile, "intl-cli");
   } finally {
@@ -333,7 +337,7 @@ test("临近过期的凭据返回带修复指引的错误，重读成功后恢�
   }
 });
 
-test("mtime 热更新：CLI 刷新 token 后网关读取新 accessToken", async () => {
+test("mtime 热更新：CLI 刷新 token 后经 refresh 重扫读取新 accessToken", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-hot-"));
   const file = path.join(directory, "test.info");
   const first = infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot");
@@ -344,9 +348,11 @@ test("mtime 热更新：CLI 刷新 token 后网关读取新 accessToken", async 
     const rotated = infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot");
     (rotated.auth).accessToken = jwt("https://www.codebuddy.ai/auth/realms/copilot") + "x";
     fs.writeFileSync(file, JSON.stringify(rotated));
-    // 签名（mtime/size/ino）变化在下一次选取前同步重扫，不依赖 fs.watch 事件到达。
+    // 缓存语义：文件变化在 refresh 前不生效（fs.watch 只是提前触发）。
+    assert.equal((await cache.forProduct("cli")).accessToken, before.accessToken, "refresh 前沿用缓存中的旧 token");
+    cache.refresh();
     const after = await cache.forProduct("cli");
-    assert.notEqual(after.accessToken, before.accessToken, "刷新后的 token 必须立即可见");
+    assert.notEqual(after.accessToken, before.accessToken, "refresh 重扫后刷新的 token 立即可见");
   } finally {
     cache.close();
     fs.rmSync(directory, { recursive: true, force: true });
@@ -597,7 +603,7 @@ test("同账号跨地域双登录：profile 作用域锁定钉住地域，裸 ui
   }
 });
 
-test("uid 锁定每次选取前重扫：同账号更新的登录立即生效", async () => {
+test("uid 锁定经 refresh 跟随同账号更新的登录", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-uidscan-"));
   try {
     const old = infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", { lastRefreshTime: 1_000 });
@@ -606,11 +612,88 @@ test("uid 锁定每次选取前重扫：同账号更新的登录立即生效", a
     const cache = createCodebuddyCredentialCache(directory, { preferredAccount: "uid-x" });
     try {
       assert.equal((await cache.forProduct("cli")).accessToken, old.auth.accessToken);
-      // CLI 刷新写出同账号新文件（不改动旧文件）：下一次请求即切换，无需重启网关。
+      // CLI 刷新写出同账号新文件（不改动旧文件）：refresh 重扫后切换，无需重启网关。
       const fresh = infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot", { lastRefreshTime: 9_000 });
       fresh.account.uid = "uid-x";
       fs.writeFileSync(path.join(directory, "x-fresh.info"), JSON.stringify(fresh));
-      assert.equal((await cache.forProduct("cli")).accessToken, fresh.auth.accessToken, "同账号新登录下一次请求即生效");
+      assert.equal((await cache.forProduct("cli")).accessToken, old.auth.accessToken, "refresh 前仍用缓存中的旧登录");
+      cache.refresh();
+      assert.equal((await cache.forProduct("cli")).accessToken, fresh.auth.accessToken, "refresh 后同账号新登录立即生效");
+    } finally {
+      cache.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("选取基于内存缓存：无变更时多次选取不重扫", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-noscan-"));
+  try {
+    fs.writeFileSync(path.join(directory, "intl.info"),
+      JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot")));
+    let reads = 0;
+    const cache = createCodebuddyCredentialCache(directory, { onCredentialRead: () => { reads += 1; } });
+    try {
+      for (let index = 0; index < 3; index++) await cache.forProduct("cli");
+      assert.equal(reads, 1, "只有构造期初始扫描读取 .info，选取不再重扫");
+    } finally {
+      cache.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fs.watch 目录事件经去抖更新缓存", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-watch-"));
+  try {
+    const file = path.join(directory, "test.info");
+    fs.writeFileSync(file, JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot")));
+    let listener: ((event: string, filename: Buffer | string | null) => void) | undefined;
+    const cache = createCodebuddyCredentialCache(directory, {
+      watch: ((_directory: string, _options: unknown, callback: (event: string, filename: Buffer | string | null) => void) => {
+        listener = callback;
+        return { close() {}, on() {} } as unknown as fs.FSWatcher;
+      }) as unknown as typeof fs.watch,
+    });
+    try {
+      const before = await cache.forProduct("cli");
+      const rotated = infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot");
+      (rotated.auth).accessToken = jwt("https://www.codebuddy.ai/auth/realms/copilot") + "x";
+      fs.writeFileSync(file, JSON.stringify(rotated));
+      // 事件只排程去抖重扫；定时器未到时选取仍读缓存。
+      listener!("change", "test.info");
+      assert.equal((await cache.forProduct("cli")).accessToken, before.accessToken, "去抖窗口内仍用缓存 token");
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      assert.notEqual((await cache.forProduct("cli")).accessToken, before.accessToken, "去抖重扫后缓存更新为新 token");
+    } finally {
+      cache.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("目录删除与重建：缓存暂留旧凭据，refresh 后恢复", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cred-rebuild-"));
+  try {
+    fs.writeFileSync(path.join(directory, "intl.info"),
+      JSON.stringify(infoFile("www.codebuddy.ai", "https://www.codebuddy.ai/auth/realms/copilot")));
+    const cache = createCodebuddyCredentialCache(directory);
+    try {
+      assert.equal((await cache.forProduct("cli")).profile, "intl-cli");
+      // 目录被删：缓存快照仍在，选取不报错（陈旧凭据由请求路径的 401 重试兜底）。
+      fs.rmSync(directory, { recursive: true, force: true });
+      assert.equal((await cache.forProduct("cli")).profile, "intl-cli");
+      cache.refresh();
+      await assert.rejects(cache.forProduct("cli"), /无法读取/);
+      // 目录重建并登录国内站：refresh 后立即可用。
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, "cn.info"),
+        JSON.stringify(infoFile("www.codebuddy.cn", "https://www.codebuddy.cn/auth/realms/copilot")));
+      cache.refresh();
+      assert.equal((await cache.forProduct("cli", "cn")).profile, "cn-cli");
     } finally {
       cache.close();
     }
