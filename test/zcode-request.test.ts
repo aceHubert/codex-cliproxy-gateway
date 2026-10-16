@@ -98,6 +98,61 @@ test("web_search 原生映射为 z.ai 服务端工具并透传过滤配置", asy
   assert.deepEqual(result.dropped, []);
 });
 
+test("增补工具在规划前提升并保留搜索、namespace 历史和工具选择且不修改源请求", async () => {
+  const definitions = [
+    { type: "web_search", max_uses: 2, filters: { allowed_domains: ["z.ai"] } },
+    { type: "namespace", name: "workspace", tools: [
+      { type: "function", name: "read", parameters: { type: "object" } },
+      { type: "custom", name: "patch" },
+    ] },
+  ];
+  const history = [
+    { role: "user", content: "搜索并修改" },
+    { type: "web_search_call", id: "ws_search", action: { type: "search", query: "GLM" } },
+    { type: "function_call", namespace: "workspace", name: "read", call_id: "fn", arguments: '{"path":"a.ts"}' },
+    { type: "custom_tool_call", namespace: "workspace", name: "patch", call_id: "custom", input: "修改内容" },
+    { type: "function_call_output", call_id: "fn", output: "文件内容" },
+    { type: "custom_tool_call_output", call_id: "custom", output: "已修改" },
+  ];
+  for (const choice of [{ type: "function", name: "read" }, { type: "custom", name: "patch" }]) {
+    const source = {
+      model: clientModel,
+      input: [history[0], { type: "additional_tools", tools: definitions }, ...history.slice(1)],
+      tool_choice: { ...choice, namespace: "workspace" },
+    };
+    const original = structuredClone(source);
+    const result = await translate(source);
+    const baseline = await translate({ ...source, input: history, tools: definitions });
+    assert.deepEqual(result, baseline);
+    assert.deepEqual(source, original);
+    assert.deepEqual(result.dropped, []);
+    const tools = result.body.tools as Array<Record<string, unknown>>;
+    assert.deepEqual(tools.at(-1), { type: "web_search_20250305", name: "web_search", max_uses: 2, allowed_domains: ["z.ai"] });
+    const entries = [...result.tools.entries()];
+    assert.deepEqual(entries.map(([, identity]) => identity), [
+      { name: "read", namespace: "workspace", custom: false },
+      { name: "patch", namespace: "workspace", custom: true },
+    ]);
+    assert.deepEqual(result.body.tool_choice, { type: "tool", name: entries[choice.type === "function" ? 0 : 1][0] });
+    const messages = result.body.messages as Array<{ content: Array<Record<string, unknown>> }>;
+    assert.equal(messages[1].content[0].type, "server_tool_use");
+    assert.deepEqual(messages[1].content[0].input, { search_query: "GLM" });
+    assert.deepEqual(messages[1].content.slice(2).map((block) => [block.name, block.input]), [
+      [entries[0][0], { path: "a.ts" }],
+      [entries[1][0], { input: "修改内容" }],
+    ]);
+  }
+});
+
+test("无效增补工具信封转换为 ZcodeRequestError", async () => {
+  for (const tools of [undefined, {}, [null], [{ type: "namespace", name: "workspace", tools: {} }]]) {
+    await assert.rejects(() => translate({ input: [{ type: "additional_tools", tools }] }), {
+      name: "ZcodeRequestError",
+      message: /additional_tools/,
+    });
+  }
+});
+
 test("显式禁用或未知内置工具被剥离并注入降级说明", async () => {
   const result = await translate({
     input: "查一下",

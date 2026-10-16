@@ -24,6 +24,7 @@ export type {
 export type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 export { convertRequest } from "./request.ts";
+export { normalizeResponsesToolDeclarations } from "./responses-tools.ts";
 
 export { readSseFrames, sseFrameBytes } from "./sse.ts";
 export type { SseFrame } from "./sse.ts";

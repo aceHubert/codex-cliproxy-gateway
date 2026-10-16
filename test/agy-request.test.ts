@@ -61,6 +61,155 @@ test("agy 请求转换：工具声明与 tool_choice 映射 functionDeclarations
   assert.deepEqual(request.toolConfig.functionCallingConfig, { mode: "ANY", allowedFunctionNames: ["shell"] });
 });
 
+test("agy 请求转换：增补工具与顶层命名空间合并并保留历史和选择的身份", TIMEOUT, () => {
+  const body = {
+    tools: [{ type: "namespace", name: "functions", tools: [
+      { type: "function", name: "shell", parameters: { type: "object", properties: { command: { type: "string" } } } },
+    ] }],
+    input: [
+      { type: "additional_tools", tools: [
+        { type: "namespace", name: "functions", tools: [
+          { type: "function", name: "shell", parameters: { type: "object", properties: { ignored: { type: "number" } } } },
+          { type: "custom", name: "apply_patch" },
+        ] },
+        { type: "function", name: "read_file", parameters: { type: "object" } },
+      ] },
+      { type: "function_call", name: "shell", namespace: "functions", call_id: "shell_1", arguments: '{"command":"pwd"}' },
+      { type: "function_call_output", call_id: "shell_1", output: "/project" },
+      { type: "custom_tool_call", name: "apply_patch", namespace: "functions", call_id: "patch_1", input: "patch text" },
+      { type: "custom_tool_call_output", call_id: "patch_1", output: "done" },
+    ],
+    tool_choice: { type: "custom", name: "apply_patch", namespace: "functions" },
+  };
+  const before = structuredClone(body);
+  const result = translateAgyRequest(body, "gemini-3.8-flash");
+  const request = result.wrapper.request as Json;
+  const declarations = request.tools[0].functionDeclarations;
+  assert.equal(declarations.length, 3);
+  const shell = declarations[0];
+  const patch = declarations[1];
+  assert.deepEqual(shell.parameters.properties, { command: { type: "string" } });
+  assert.equal(declarations[2].name, "read_file");
+  assert.deepEqual(result.tools.get(shell.name), { name: "shell", custom: false, namespace: "functions" });
+  assert.deepEqual(result.tools.get(patch.name), { name: "apply_patch", custom: true, namespace: "functions" });
+  assert.deepEqual(request.contents.map((content: Json) => content.parts[0]), [
+    { functionCall: { name: shell.name, args: { command: "pwd" } } },
+    { functionResponse: { name: shell.name, response: { output: "/project" } } },
+    { functionCall: { name: patch.name, args: { input: "patch text" } } },
+    { functionResponse: { name: patch.name, response: { output: "done" } } },
+  ]);
+  assert.deepEqual(request.toolConfig.functionCallingConfig, { mode: "ANY", allowedFunctionNames: [patch.name] });
+  assert.deepEqual(body, before);
+});
+
+test("agy 请求转换：仅在增补信封声明的工具可被选择，服务器工具沿用剥离策略", TIMEOUT, () => {
+  const result = translateAgyRequest({
+    input: [
+      { type: "additional_tools", tools: [
+        { type: "function", name: "shell", parameters: { type: "object" } },
+        { type: "web_search" },
+      ] },
+      { type: "message", role: "user", content: "检查文件" },
+    ],
+    tool_choice: { type: "function", name: "shell" },
+  }, "gemini-3.8-flash");
+  const request = result.wrapper.request as Json;
+  assert.deepEqual(request.tools[0].functionDeclarations, [{ name: "shell", parameters: { type: "object" } }]);
+  assert.deepEqual(request.toolConfig.functionCallingConfig, { mode: "ANY", allowedFunctionNames: ["shell"] });
+  assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "检查文件" }] }]);
+  assert.deepEqual(result.dropped, ["web_search"]);
+  assert.match(request.systemInstruction.parts[0].text, /web_search/);
+});
+
+test("agy 请求转换：无效增补工具声明抛出 AgyRequestError", TIMEOUT, () => {
+  for (const tools of [null, {}, [null], [{ type: "function", name: "shell" }], [{ type: "namespace", name: "functions", tools: "invalid" }]]) {
+    assert.throws(() => translateAgyRequest({
+      input: [{ type: "additional_tools", tools }],
+    }, "gemini-3.8-flash"), (error: unknown) => {
+      assert.ok(error instanceof AgyRequestError);
+      assert.match(error.message, /additional_tools/);
+      return true;
+    });
+  }
+});
+
+test("agy 请求转换：多信封去重并保留顶层 function/custom 工具类型", TIMEOUT, () => {
+  const body = {
+    tools: [{ type: "custom", name: "apply_patch" }],
+    input: [
+      { type: "additional_tools", tools: [
+        { type: "function", name: "apply_patch", parameters: { type: "object" } },
+        { type: "namespace", name: "functions", tools: [{ type: "function", name: "shell", parameters: { type: "object" } }] },
+      ] },
+      { type: "additional_tools", tools: [
+        { type: "custom", name: "apply_patch" },
+        { type: "namespace", name: "functions", tools: [
+          { type: "function", name: "shell", parameters: { type: "object" } },
+          { type: "custom", name: "read_file" },
+        ] },
+      ] },
+      { type: "message", role: "user", content: "检查文件" },
+    ],
+    tool_choice: { type: "custom", name: "apply_patch" },
+  };
+  const before = structuredClone(body);
+  const result = translateAgyRequest(body, "gemini-3.8-flash");
+  const request = result.wrapper.request as Json;
+  assert.equal(request.tools[0].functionDeclarations.length, 3);
+  assert.equal(result.tools.get("apply_patch")?.custom, true);
+  assert.deepEqual([...result.tools.values()], [
+    { name: "apply_patch", custom: true },
+    { name: "shell", custom: false, namespace: "functions" },
+    { name: "read_file", custom: true, namespace: "functions" },
+  ]);
+  assert.deepEqual(body, before);
+});
+
+test("agy 请求转换：非 Responses 来源不解析额外 input 的增补信封", TIMEOUT, () => {
+  const result = translateAgyRequest({
+    messages: [{ role: "user", content: "检查文件" }],
+    input: [{ type: "additional_tools", tools: null }],
+    tools: [{ type: "function", function: { name: "shell", parameters: { type: "object" } } }],
+  }, "gemini-3.8-flash", "chat-completions");
+  const request = result.wrapper.request as Json;
+  assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "检查文件" }] }]);
+  assert.equal(request.tools[0].functionDeclarations[0].name, "shell");
+});
+
+test("agy 请求转换：扁平 namespace 同名工具保持独立声明和调用身份", TIMEOUT, () => {
+  const body = {
+    tools: [{ type: "function", namespace: "ns1", name: "read", parameters: { type: "object", properties: { first: { type: "string" } } } }],
+    input: [
+      { type: "additional_tools", tools: [
+        { type: "function", namespace: "ns1", name: "read", parameters: { type: "object", properties: { ignored: { type: "number" } } } },
+        { type: "function", namespace: "ns2", name: "read", parameters: { type: "object", properties: { second: { type: "string" } } } },
+      ] },
+      { type: "function_call", namespace: "ns1", name: "read", call_id: "read_1", arguments: '{"first":"a"}' },
+      { type: "function_call_output", call_id: "read_1", output: "a" },
+      { type: "function_call", namespace: "ns2", name: "read", call_id: "read_2", arguments: '{"second":"b"}' },
+      { type: "function_call_output", call_id: "read_2", output: "b" },
+    ],
+    tool_choice: { type: "function", namespace: "ns2", name: "read" },
+  };
+  const before = structuredClone(body);
+  const result = translateAgyRequest(body, "gemini-3.8-flash");
+  const request = result.wrapper.request as Json;
+  const declarations = request.tools[0].functionDeclarations;
+  assert.equal(declarations.length, 2);
+  const [first, second] = declarations;
+  assert.notEqual(first.name, second.name);
+  assert.deepEqual(first.parameters.properties, { first: { type: "string" } });
+  assert.deepEqual(second.parameters.properties, { second: { type: "string" } });
+  assert.deepEqual([...result.tools.values()], [
+    { name: "read", custom: false, namespace: "ns1" },
+    { name: "read", custom: false, namespace: "ns2" },
+  ]);
+  assert.deepEqual(request.contents.map((content: Json) => content.parts[0].functionCall?.name ?? content.parts[0].functionResponse?.name),
+    [first.name, first.name, second.name, second.name]);
+  assert.deepEqual(request.toolConfig.functionCallingConfig, { mode: "ANY", allowedFunctionNames: [second.name] });
+  assert.deepEqual(body, before);
+});
+
 test("agy 请求转换：function_call 历史与输出配对映射 functionCall/functionResponse", TIMEOUT, () => {
   const { request } = translated({
     input: [

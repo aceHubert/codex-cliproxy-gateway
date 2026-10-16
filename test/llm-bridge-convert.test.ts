@@ -43,11 +43,12 @@ test("L1 修复：Responses 字符串 input 保留 instructions/tools/token/stre
   assert.deepEqual(notes, []);
 });
 
-test("Codex 信封项剥离：additional_tools 与 compaction_trigger 不进入消息历史且不报错", async () => {
+test("Codex 信封项归一化：additional_tools 并入工具且 compaction_trigger 不进入消息历史", async () => {
   // Codex 0.162 实发：MCP 工具中途挂载时 input 历史出现 additional_tools 信封项
   // （真实反例：zen 转发 502 BridgeConversionError「不支持的 Responses history 项
-  // 类型 additional_tools」）；compaction_trigger 是压缩请求标记。网关自身 Responses
-  // 路径对两者按信封剥离，桥接须同语义（丢弃并记录），中途增补的工具不并入本轮。
+  // 类型 additional_tools」）；compaction_trigger 是压缩请求标记。
+  // additional_tools 声明必须在移除信封前并入本轮 tools；compaction_trigger 仍按
+  // 原有行为剥离并记录，两类信封均不能生成用户消息。
   const { body, notes } = await convertRequest("chat-completions", "responses", {
     model: "m",
     input: [
@@ -61,12 +62,213 @@ test("Codex 信封项剥离：additional_tools 与 compaction_trigger 不进入�
   const messages = messagesOf(body);
   assert.equal(messages.length, 2, "信封项不得产生消息");
   assert.equal(messages[messages.length - 1]?.content, "again");
-  const tools = body.tools as AnyArray | undefined;
-  assert.equal(tools === undefined || tools.every((tool) => ((tool.function as Json | undefined)?.name as string) !== "mcp_tool"), true,
-    "中途增补的工具声明不并入本轮 tools");
+  const tools = body.tools as AnyArray;
+  assert.equal((tools[0]?.function as Json)?.name, "mcp_tool", "中途增补的工具声明应进入本轮 tools");
   assert.equal(notes.filter((note) => note.includes("additional_tools")).length, 1);
   assert.equal(notes.filter((note) => note.includes("compaction_trigger")).length, 1);
 });
+
+for (const target of ["chat-completions", "anthropic", "gemini"] as const) {
+  test(`additional_tools → ${target}：函数声明、参数与历史调用使用同一身份`, async () => {
+    const parameters = { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false };
+    const source = {
+      model: "m",
+      input: [
+        { type: "message", role: "user", content: "读取文件" },
+        { type: "additional_tools", tools: [{ type: "function", name: "read_file", description: "读取路径", parameters, strict: true }] },
+        { type: "function_call", call_id: "read_1", name: "read_file", arguments: '{"path":"a.txt"}' },
+        { type: "function_call_output", call_id: "read_1", output: "文件内容" },
+      ],
+      tool_choice: { type: "function", name: "read_file" },
+    };
+    const snapshot = structuredClone(source);
+    const { body, tools } = await convertRequest(target, "responses", source);
+    assert.deepEqual(source, snapshot, "提取信封和转换不得修改原始请求");
+    assert.deepEqual(tools.get("read_file"), { name: "read_file", custom: false });
+    if (target === "chat-completions") {
+      const declaration = (body.tools as AnyArray)[0]?.function as Json;
+      assert.equal(declaration.name, "read_file");
+      assert.equal(declaration.description, "读取路径");
+      assert.deepEqual(declaration.parameters, parameters);
+      assert.equal(declaration.strict, true);
+      assert.deepEqual(body.tool_choice, { type: "function", function: { name: "read_file" } });
+      const messages = messagesOf(body);
+      assert.equal(messages.length, 3);
+      assert.equal(((messages[1]?.tool_calls as AnyArray)[0]?.function as Json).name, "read_file");
+      assert.equal(((messages[1]?.tool_calls as AnyArray)[0]?.function as Json).arguments, '{"path":"a.txt"}');
+      assert.equal(messages[2]?.tool_call_id, "read_1");
+      assert.equal(messages[2]?.content, "文件内容");
+    } else if (target === "anthropic") {
+      const declaration = (body.tools as AnyArray)[0]!;
+      assert.equal(declaration.name, "read_file");
+      assert.deepEqual(declaration.input_schema, parameters);
+      assert.deepEqual(body.tool_choice, { type: "tool", name: "read_file" });
+      const messages = messagesOf(body);
+      assert.equal(messages.length, 3);
+      const call = (messages[1]?.content as AnyArray)[0]!;
+      assert.equal(call.name, "read_file");
+      assert.deepEqual(call.input, { path: "a.txt" });
+      const output = (messages[2]?.content as AnyArray)[0]!;
+      assert.equal(output.tool_use_id, "read_1");
+      assert.equal(output.content, "文件内容");
+    } else {
+      const declaration = ((body.tools as AnyArray)[0]?.functionDeclarations as AnyArray)[0]!;
+      assert.equal(declaration.name, "read_file");
+      assert.deepEqual(declaration.parametersJsonSchema ?? declaration.parameters, parameters);
+      assert.deepEqual(((body.toolConfig as Json).functionCallingConfig as Json).allowedFunctionNames, ["read_file"]);
+      const contents = body.contents as AnyArray;
+      assert.equal(contents.length, 3);
+      const call = ((contents[1]?.parts as AnyArray)[0]?.functionCall as Json);
+      assert.equal(call.name, "read_file");
+      assert.deepEqual(call.args, { path: "a.txt" });
+      const output = ((contents[2]?.parts as AnyArray)[0]?.functionResponse as Json);
+      assert.equal(output.name, "read_file");
+      assert.ok(JSON.stringify(output.response).includes("文件内容"));
+    }
+  });
+}
+
+for (const target of ["responses", "chat-completions"] as const) {
+  test(target === "responses"
+    ? "Responses 同协议保留 additional_tools 信封位置并识别增补工具身份"
+    : "additional_tools → Chat：多个信封合并去重、namespace 合并且顶层优先", async () => {
+    const topFunction = { type: "function", name: "shared", description: "顶层定义", strict: true, parameters: { type: "object", properties: { value: { type: "number" } } } };
+    const topNamespaceTool = { type: "custom", name: "patch", description: "顶层补丁", format: { type: "text" } };
+    const addedNamespaceTool = { type: "function", name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } };
+    const otherNamespace = { type: "namespace", name: "other", tools: [{ type: "custom", name: "patch" }] };
+    const source = {
+      model: "m",
+      tools: [topFunction, { type: "namespace", name: "files", description: "顶层命名空间", tools: [topNamespaceTool] }],
+      input: [
+        { type: "message", role: "user", content: "修改文件" },
+        { type: "additional_tools", tools: [
+          { type: "custom", name: "shared", description: "信封旧定义" },
+          { type: "namespace", name: "files", description: "信封命名空间", tools: [
+            { type: "custom", name: "patch", description: "信封旧补丁" },
+            addedNamespaceTool,
+          ] },
+          otherNamespace,
+        ] },
+        { type: "additional_tools", tools: [topFunction, { type: "namespace", name: "files", tools: [addedNamespaceTool] }] },
+        { type: "custom_tool_call", call_id: "patch_1", namespace: "files", name: "patch", input: "补丁文本" },
+        { type: "custom_tool_call_output", call_id: "patch_1", output: "完成" },
+        { type: "compaction_trigger" },
+      ],
+      tool_choice: { type: "custom", namespace: "files", name: "patch" },
+      unknownExtension: { keep: true },
+    };
+    const snapshot = structuredClone(source);
+    const { body, tools, strippedTools } = await convertRequest(target, "responses", source, { model: "service-model" });
+    if (target === "responses") {
+      assert.deepEqual(body, { ...source, model: "service-model" }, "同协议保留有序信封和历史的原始位置，仅应用模型覆盖");
+      assert.deepEqual(tools.get("shared"), { name: "shared", custom: false }, "身份识别仍以顶层声明为准");
+      assert.deepEqual(tools.get("read"), { name: "read", namespace: "files", custom: false }, "身份表须识别信封新增工具");
+    } else {
+      const declarations = body.tools as AnyArray;
+      assert.equal(declarations.length, 4, "重复信封应去重，同名 namespace 应合并内部工具");
+      assert.equal(tools.size, 4);
+      const shared = declarations.find((tool) => (tool.function as Json).name === "shared")?.function as Json;
+      assert.deepEqual(shared.parameters, topFunction.parameters);
+      assert.equal(shared.strict, true);
+      assert.equal(shared.description, "顶层定义");
+      assert.deepEqual(tools.get("shared"), { name: "shared", custom: false });
+      const filesPatch = [...tools.entries()].find(([, identity]) => identity.namespace === "files" && identity.name === "patch")?.[0];
+      const otherPatch = [...tools.entries()].find(([, identity]) => identity.namespace === "other" && identity.name === "patch")?.[0];
+      const filesRead = [...tools.entries()].find(([, identity]) => identity.namespace === "files" && identity.name === "read")?.[0];
+      assert.ok(filesPatch);
+      assert.ok(otherPatch);
+      assert.ok(filesRead);
+      assert.notEqual(filesPatch, otherPatch, "不同 namespace 内的同名工具不得合并");
+      const patch = declarations.find((tool) => (tool.function as Json).name === filesPatch)?.function as Json;
+      assert.equal(patch.description, "顶层命名空间\n\n顶层补丁");
+      const read = declarations.find((tool) => (tool.function as Json).name === filesRead)?.function as Json;
+      assert.deepEqual(read.parameters, addedNamespaceTool.parameters);
+      assert.deepEqual(body.tool_choice, { type: "function", function: { name: filesPatch } });
+      const messages = messagesOf(body);
+      assert.equal(messages.length, 3, "两类信封均不得进入跨协议消息历史");
+      assert.equal(((messages[1]?.tool_calls as AnyArray)[0]?.function as Json).name, filesPatch);
+      assert.equal(messages[2]?.content, "完成");
+      assert.equal(body.model, "service-model");
+    }
+    assert.deepEqual(strippedTools, []);
+    assert.deepEqual(source, snapshot, "合并 namespace 的内部数组也不得修改原对象");
+  });
+}
+
+test("additional_tools 命名空间 custom：跨协议声明、历史与 choice 共用身份并保留不同 namespace", async () => {
+  const source = {
+    model: "m",
+    input: [
+      { type: "message", role: "user", content: "修改文件" },
+      { type: "additional_tools", tools: [
+        { type: "namespace", name: "files", tools: [{ type: "custom", name: "patch", description: "补丁" }] },
+        { type: "namespace", name: "other", tools: [{ type: "custom", name: "patch", description: "另一补丁" }] },
+      ] },
+      { type: "custom_tool_call", call_id: "patch_1", namespace: "files", name: "patch", input: "补丁文本" },
+      { type: "custom_tool_call_output", call_id: "patch_1", output: "完成" },
+    ],
+    tool_choice: { type: "custom", namespace: "files", name: "patch" },
+  };
+  const snapshot = structuredClone(source);
+  const { body, tools } = await convertRequest("anthropic", "responses", source);
+  assert.equal(tools.size, 2, "不同 namespace 内同名工具必须保持独立身份");
+  const mappedName = [...tools.entries()].find(([, identity]) => identity.namespace === "files")?.[0];
+  assert.ok(mappedName);
+  assert.deepEqual(tools.get(mappedName), { name: "patch", namespace: "files", custom: true });
+  const declarations = body.tools as AnyArray;
+  assert.equal(new Set(declarations.map((tool) => tool.name)).size, 2);
+  assert.equal(declarations.find((tool) => tool.name === mappedName)?.description, "补丁");
+  assert.deepEqual(body.tool_choice, { type: "tool", name: mappedName });
+  const messages = messagesOf(body);
+  const call = (messages[1]?.content as AnyArray)[0]!;
+  assert.equal(call.name, mappedName);
+  assert.deepEqual(call.input, { input: "补丁文本" });
+  const output = (messages[2]?.content as AnyArray)[0]!;
+  assert.equal(output.tool_use_id, "patch_1");
+  assert.equal(output.content, "完成");
+  assert.deepEqual(source, snapshot);
+});
+
+test("additional_tools 顶层声明优先于信封且多个信封不会重复发射工具", async () => {
+  const parameters = { type: "object", properties: { current: { type: "boolean" } }, required: ["current"] };
+  const { body, tools } = await convertRequest("chat-completions", "responses", {
+    model: "m",
+    tools: [{ type: "function", name: "shared", description: "当前定义", parameters, strict: true }],
+    input: [
+      { type: "additional_tools", tools: [{ type: "custom", name: "shared", description: "历史类型" }, { type: "custom", name: "patch" }] },
+      { type: "additional_tools", tools: [{ type: "custom", name: "patch", description: "重复定义" }] },
+      { type: "message", role: "user", content: "hi" },
+    ],
+  });
+  const declarations = body.tools as AnyArray;
+  assert.equal(declarations.length, 2);
+  const shared = declarations.find((tool) => (tool.function as Json).name === "shared")?.function as Json;
+  assert.deepEqual(shared.parameters, parameters);
+  assert.equal(shared.description, "当前定义");
+  assert.equal(shared.strict, true);
+  assert.equal(tools.get("shared")?.custom, false, "优先定义的 function 身份不得被历史 custom 覆盖");
+  assert.equal(tools.get("patch")?.custom, true);
+});
+
+for (const target of ["responses", "chat-completions", "anthropic", "gemini"] as const) {
+  test(`additional_tools → ${target}：无效信封或工具声明明确报错`, async () => {
+    for (const envelope of [
+      { type: "additional_tools", tools: null },
+      { type: "additional_tools", tools: {} },
+      { type: "additional_tools", tools: "invalid" },
+      { type: "additional_tools", tools: [null] },
+      { type: "additional_tools", tools: [{ type: "function", parameters: {} }] },
+      { type: "additional_tools", tools: [{ type: "function", name: "f" }] },
+      { type: "additional_tools", tools: [{ type: "namespace", name: "ns", tools: {} }] },
+    ]) {
+      await assert.rejects(
+        () => convertRequest(target, "responses", { model: "m", input: [envelope, { type: "message", role: "user", content: "hi" }] }),
+        BridgeConversionError,
+        `无效声明不得被静默丢弃：${JSON.stringify(envelope)}`,
+      );
+    }
+  });
+}
 
 test("L2 修复：function_call + output 历史重建为 assistant.tool_calls 与 tool 消息", async () => {
   const { body } = await convertRequest("chat-completions", "responses", {

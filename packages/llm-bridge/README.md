@@ -13,6 +13,12 @@ JSON。协议类型直接引用 `@agent-proxy/plugin-api` 的 `ClientProtocol`
 与 namespace 信息，供响应侧还原；被剥离的服务器内置工具以 `strippedTools`
 结构化返回。
 
+跨协议转换会将 Codex `input[].additional_tools` 合并到顶层 `tools`，再移除信封；
+原生 Responses 直通保留信封位置，仅用合并视图注册工具身份。顶层同身份声明优先，同名 namespace 合并成员，
+保留 function/custom 的声明、历史和选择身份。自定义转换器可从
+`@agent-proxy/llm-bridge/responses-tools` 导入同步的
+`normalizeResponsesToolDeclarations(body)`，在专用工具规划前复用相同规则。
+
 ## 安装
 
 ```sh
