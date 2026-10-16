@@ -101,6 +101,25 @@ test("agy 目录解析拒绝无效结构", TIMEOUT, () => {
   assert.throws(() => parseAgyCatalogData({ models: { "bad/id": {} } }), /模型 id 无效/);
 });
 
+test("agy 目录同步剔除 -disabled 后缀模型，重定向目标同样剔除", TIMEOUT, () => {
+  const data = parseAgyCatalogData({
+    models: {
+      "gemini-3.8-flash": { displayName: "Gemini 3.8 Flash" },
+      "gemini-4-argon-disabled": { displayName: "Gemini 4 Argon" },
+    },
+    agentModelSorts: [{ displayName: "Recommended", groups: [{ modelIds: ["gemini-4-argon-disabled", "gemini-3.8-flash"] }] }],
+    deprecatedModelIds: {
+      "gemini-3.5-flash": { newModelId: "gemini-3.8-flash" },
+      "gemini-3-pro": { newModelId: "gemini-4-argon-disabled" },
+    },
+  });
+  assert.deepEqual(data.models.map((model) => model.id), ["gemini-3.8-flash"], "-disabled 模型不进目录");
+  assert.equal(data.reroute.get("gemini-3.5-flash"), "gemini-3.8-flash");
+  assert.equal(data.reroute.get("gemini-3-pro"), undefined, "指向 -disabled 模型的重定向一并剔除");
+  const catalog = buildAgyCatalog(data);
+  assert.deepEqual(catalog.models.map((model) => model.slug), ["agy/gemini-3.8-flash"]);
+});
+
 test("agy 目录合成：agy/ 前缀与显示名一致、能力字段来自 ModelDetails", TIMEOUT, () => {
   const catalog = buildAgyCatalog(parseAgyCatalogData(modelsResponse()));
   const flash = catalog.models[0]!;
