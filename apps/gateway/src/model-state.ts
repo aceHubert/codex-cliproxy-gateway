@@ -25,7 +25,8 @@ export async function rebuildStaticCatalog(
   { refreshAdapters = false }: { refreshAdapters?: boolean } = {},
 ): Promise<ModelCatalog> {
   const adapters = await source.collect(refreshAdapters, paths.runtimeHome);
-  if (adapters.failures.length) throw new Error(adapters.failures.join("；"));
+  // 插件可用性不决定上游选择能否保存；静态目录仅合并本次可用的模型。
+  for (const failure of adapters.failures) console.warn(`WARNING: ${failure}；已跳过该插件，不影响模型选择保存。`);
   return writeStaticCatalog(paths, config, adapters.entries, (model) => source.ownsModel(model));
 }
 
@@ -115,7 +116,7 @@ export async function updateCodexModelCatalog(
     } else if (refreshAdapters) {
       // 动态模式同样由显式模型命令刷新 agent；无需生成 Codex 静态快照。
       const adapters = await catalogSource.collect(true, paths.runtimeHome);
-      if (adapters.failures.length) throw new Error(adapters.failures.join("；"));
+      for (const failure of adapters.failures) console.warn(`WARNING: ${failure}；已跳过该插件，不影响模型选择保存。`);
       count = adapters.entries.length;
     }
     if (tomlChanged) {
