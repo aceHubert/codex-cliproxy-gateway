@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/gateway",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "description": "Agent Proxy 的 Bun 网关与 CLI 业务应用。",
   "type": "module",
   "bin": {

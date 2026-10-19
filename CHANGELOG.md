@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.14.2 (2026-10-19)
+
+#### :bug: Bug Fix
+* [#23](https://github.com/aceHubert/codex-cliproxy-gateway/pull/23) fix(models): 插件目录异常不阻断模型选择保存 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.14.0 (2026-10-16)
 
 #### :rocket: New Feature
