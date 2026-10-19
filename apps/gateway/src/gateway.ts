@@ -972,20 +972,21 @@ export type ModelGatewayHandler = ((request: Request) => Promise<Response>) & {
   modelsReady(): Promise<void>;
 };
 
-/** 启动允许未登录的插件缺席；显式刷新仍由注册表执行严格契约。 */
-async function startupPluginCatalog(
+/** 启动与配置热加载允许未登录的插件缺席；注册表仍保留严格的目录契约。 */
+async function availablePluginCatalog(
   registry: PluginRegistry,
   processLog: ProcessLogTarget | undefined,
   mountPath: string,
+  operation: "startup" | "reload",
 ): Promise<ModelCatalog> {
   const catalogs = await Promise.all(registry.plugins.map(async (plugin): Promise<ModelCatalog> => {
     try {
-      return await plugin.refreshCatalog();
+      return await (operation === "startup" ? plugin.refreshCatalog() : plugin.reloadCatalog());
     } catch {
       // 不记录原始异常：目录失败的详情可能包含认证信息或上游正文。
       logGatewayError(processLog, {
-        requestTime: localTime(), method: "START", url: `${mountPath}/models`, status: 503,
-        message: `插件 ${plugin.id} 启动目录刷新不可用；将尝试缓存目录，其余插件和 default 继续就绪。`,
+        requestTime: localTime(), method: operation === "startup" ? "START" : "RELOAD", url: `${mountPath}/models`, status: 503,
+        message: `插件 ${plugin.id} ${operation === "startup" ? "启动目录刷新" : "目录热加载"}不可用；将尝试缓存目录，其余插件和 default 继续就绪。`,
       });
       try { return await plugin.getCatalog(); }
       catch { return { models: [] }; }
@@ -1021,7 +1022,7 @@ export function createPluginGatewayHandler(
   let closed = false;
   let ready: Promise<void> | undefined;
   const modelsReady = (): Promise<void> => ready ??= registry.ready().then(() =>
-    config.upstreamOnly === true ? startupPluginCatalog(registry, processLog, mountPath) : registry.getCatalog()).then((catalog) => {
+    config.upstreamOnly === true ? availablePluginCatalog(registry, processLog, mountPath, "startup") : registry.getCatalog()).then((catalog) => {
     if (!closed && runtimePaths && config.upstreamOnly === true) {
       writeStaticCatalog(runtimePaths, config, catalog.models, ownsLocalModel);
     }
@@ -1031,7 +1032,7 @@ export function createPluginGatewayHandler(
     await modelsReady().catch(() => {});
     if (closed) return;
     // 先完成磁盘目录与派生元数据加载，再发布同一份排除规则给目录和推理入口。
-    const catalog = await registry.reloadCatalog();
+    const catalog = await availablePluginCatalog(registry, processLog, mountPath, "reload");
     if (closed) return;
     const nextFilter = compileModelFilter(next.excludedModels);
     const nextConfig = { ...config,

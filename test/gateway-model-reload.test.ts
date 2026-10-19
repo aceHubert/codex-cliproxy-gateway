@@ -9,6 +9,8 @@ import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
 import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
+import { PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
+import { createPluginGatewayHandler } from "../apps/gateway/src/gateway.ts";
 import { routingRegistry } from "./plugin-routing-fixture.ts";
 
 const TIMEOUT = { timeout: 60_000 };
@@ -37,6 +39,71 @@ function request(model: string): Request {
 function snapshot(model: string): ZcodeProviderSnapshot {
   return { family: "zai", providerID: "test-zai", plan: "api-key", apiKey: "fake-key",
     baseURL: "https://api.z.ai/api/anthropic", modelIds: [model] };
+}
+
+for (const upstreamOnly of [false, true]) {
+  test(`${upstreamOnly ? "静态" : "动态"}热加载允许插件目录失败并独立更新上游选择，后续可恢复`, TIMEOUT, async () => {
+    const { directory, config, paths } = fixture();
+    const originalFetch = globalThis.fetch;
+    const logFile = path.join(directory, "gateway.log");
+    let unavailable = false;
+    let healthyModel = "healthy/original";
+    let failingModel = "failing/cached";
+    let healthyReloads = 0;
+    const secret = "secret-token=https://private.example/catalog?token=private-key";
+    const plugin = (id: string, getModel: () => string): GatewayPlugin => ({
+      id, modelPatterns: [`${id}/*`],
+      handleHttp: () => new Response(null, { status: 204 }),
+      getCatalog: () => {
+        // 静态模式覆盖缓存也不可用时的空目录回退；动态模式保留插件已发布的缓存。
+        if (id === "failing" && unavailable && upstreamOnly) throw new Error(secret);
+        return { models: [{ slug: getModel() }] };
+      },
+      refreshCatalog: async () => ({ models: [{ slug: getModel() }] }),
+      reloadCatalog: async () => {
+        if (id === "failing" && unavailable) throw new Error(secret);
+        if (id === "healthy") healthyReloads++;
+        return { models: [{ slug: getModel() }] };
+      },
+      ready: async () => {}, close: () => {},
+    });
+    const registry = new PluginRegistry([
+      plugin("healthy", () => healthyModel), plugin("failing", () => failingModel),
+    ]);
+    globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-native" }] })) as unknown as typeof fetch;
+    const handler = createPluginGatewayHandler({ ...config, upstreamOnly }, registry, "fake-key", "invalid",
+      new Set(), new Set(), undefined, { file: logFile, maxBytes: 1_000_000 }, paths);
+    const visibleModels = async (): Promise<string[]> => {
+      const response = await handler(new Request("http://127.0.0.1/v1/models?client_version=test"));
+      assert.equal(response.status, 200);
+      const body = await response.json() as { models: Array<{ slug: string }> };
+      return body.models.map((entry) => entry.slug).sort();
+    };
+    try {
+      await handler.modelsReady();
+      unavailable = true;
+      healthyModel = "healthy/updated";
+      fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [{ slug: "new-choice" }] }));
+      const nextConfig = { ...config, selectedModels: ["new-choice"] };
+      await handler.reloadConfig(nextConfig);
+      assert.equal(healthyReloads, 1, "一家失败不能阻止其它插件热加载");
+      assert.deepEqual(await visibleModels(), upstreamOnly
+        ? ["healthy/updated", "new-choice"]
+        : ["cliproxy/new-choice", "failing/cached", "gpt-native", "healthy/updated"]);
+      const log = fs.readFileSync(logFile, "utf8");
+      assert.match(log, /插件 failing 目录热加载不可用/);
+      assert.doesNotMatch(log, /secret-token|private\.example|private-key/);
+      unavailable = false;
+      failingModel = "failing/recovered";
+      await handler.reloadConfig(nextConfig);
+      assert.equal(healthyReloads, 2);
+      assert.ok((await visibleModels()).includes("failing/recovered"));
+    } finally {
+      handler.close();
+      globalThis.fetch = originalFetch;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
 }
 
 test("模型热加载更新本地目录和推理排除规则并保持适配器实例", TIMEOUT, async () => {

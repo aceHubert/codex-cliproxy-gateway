@@ -94,16 +94,27 @@ test("临时 agent 默认只读目录，显式刷新一次且不启动模型心�
   });
 });
 
-test("agent 刷新失败且没有 last-good 时不发布部分静态目录，也不泄露错误正文", TIMEOUT, async () => {
+test("agent 刷新失败且没有缓存时仍发布可用静态目录，警告不泄露错误正文", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
-    const previous = writeStaticCatalog(paths, config, []);
+    writeStaticCatalog(paths, config, [{ slug: "agy/stale" }]);
     config.agy = true;
     const deps = { agy: agyDependencies(paths, async () => { throw new Error("sensitive-upstream-token"); }) };
     const result = await collectAdapterModels(config, deps, { refresh: true });
     assert.equal(result.failures.length, 1);
     assert.equal(result.failures.join("").includes("sensitive"), false);
-    await assert.rejects(rebuildStaticCatalog(paths, config, deps, { refreshAdapters: true }), /Antigravity 模型目录不可用/);
-    assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), previous);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+    try {
+      const catalog = await rebuildStaticCatalog(paths, config, deps, { refreshAdapters: true });
+      assert.deepEqual(catalog.models.map((entry) => entry.slug), ["gpt-test"]);
+      assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), catalog);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /WARNING: Antigravity 模型目录不可用/);
+      assert.equal(warnings.join("").includes("sensitive-upstream-token"), false);
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
 
@@ -199,9 +210,9 @@ test("动态模式的显式更新刷新 agent 一次但不生成静态目录", T
     assert.equal(fs.existsSync(codexCatalogFile(paths)), false);
     assert.equal(fs.existsSync(paths.configToml), false);
     const failure = { agy: agyDependencies(paths, async () => { throw new Error("private-failure"); }) };
-    // 换账号后原账号缓存不可复用，真实拉取失败必须报告。
+    // 换账号后原账号缓存不可复用，拉取失败只警告，不阻止模型更新。
     failure.agy.credentials = async () => ({ accessToken: "fake", expiryMs: Date.now() + 3_600_000, identity: "uncached", authMethod: "consumer" });
-    await assert.rejects(updateCodexModelCatalog(paths, config, failure, { refreshAdapters: true }), /Antigravity 模型目录不可用/);
+    assert.equal((await updateCodexModelCatalog(paths, config, failure, { refreshAdapters: true })).count, 0);
     assert.equal(fs.existsSync(codexCatalogFile(paths)), false);
   });
 });
