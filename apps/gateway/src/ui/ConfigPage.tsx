@@ -547,11 +547,10 @@ export function ConfigPage({
                           disabled={excludedDisabled}
                           onChange={(event) => setForm({ ...form, codebuddyAccount: event.target.value })}
                         >
-                          {/* auto 置顶（默认跟随项），其后列出具体登录；auto 项把「自动」
-                              标记放在账号标签之后——账号是最重要的信息，模式只作后缀。 */}
+                          {/* auto 置顶，显示时先标明自动模式，再附上当前命中的账号。 */}
                           <option value="auto">
                             {codebuddyAutoAccountLabel
-                              ? `${codebuddyAutoAccountLabel} · ${t("config:codebuddyAccountAuto")}`
+                              ? `${t("config:codebuddyAccountAuto")}(${codebuddyAutoAccountLabel})`
                               : t("config:codebuddyAccountAuto")}
                           </option>
                           {codebuddyAccountOptions.map((account) => (

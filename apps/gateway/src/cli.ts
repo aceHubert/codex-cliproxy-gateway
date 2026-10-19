@@ -27,7 +27,7 @@ import {
   hasRootTomlKey,
 } from "./toml.ts";
 import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
-import { fetchUpstreamCatalog, invalidateModelsCache } from "./catalog.ts";
+import { fetchUpstreamCatalog, filterExcludedModels, invalidateModelsCache } from "./catalog.ts";
 import { resolveCodexClientVersion } from "./codex-version.ts";
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
 import {
@@ -39,9 +39,12 @@ import {
   rebuildCatalog,
   upstreamClientVersion,
 } from "./upstream-catalog.ts";
-import { isLoopbackUrl, managedRuntimeCatalogFiles, startGateway } from "./gateway-composition.ts";
+import { isInstalledPluginModel, isLoopbackUrl, managedRuntimeCatalogFiles, startGateway } from "./gateway-composition.ts";
 import { applyModelCatalogToml, codexCatalogFile, collectAdapterModels, rebuildStaticCatalog, updateCodexModelCatalog, type ModelCatalogDependencies } from "./model-composition.ts";
 import { reloadGatewayModels } from "./model-reload.ts";
+import { pushModelsToTargets, type ModelPushTarget } from "./models-push.ts";
+import { createZcodePushTarget } from "./zcode-client-sync.ts";
+import { createDshPushTarget } from "./dsh-client-sync.ts";
 export { applyModelCatalogToml } from "./model-state.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
 import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
@@ -145,7 +148,7 @@ Usage:
   agent-proxy start|stop
   agent-proxy restart [--restart-codex]
   agent-proxy serve [--config PATH]
-  agent-proxy models [--sync] [--select SELECTOR] [--exclude [PATTERNS]] [--restart-codex]
+  agent-proxy models [--sync] [--select SELECTOR] [--exclude [PATTERNS]] [--push [TARGETS]] [--restart-codex]
   agent-proxy config [--zcode on|off] [--codebuddy on|off] [--qoder on|off] [--agy on|off] [--opencode-zen on|off] [--log on|off] [--debug on|off] [--max-request-logs N] [--max-log-size SIZE]
   agent-proxy codebuddy --switch
   agent-proxy web
@@ -200,6 +203,19 @@ Models:
                         compatibility model (space toggles exclusion, enter
                         saves)
   --model-merge-json URL  update the cached models.json override
+  --push [TARGETS]     push the local agent plugin models into client tools;
+                        a checkbox picker confirms the list first (every model
+                        preselected — uncheck what you do not want and press
+                        Enter; requires a terminal) and the managed
+                        provider's model list is then fully replaced by ID
+                        (manual additions inside the managed provider are
+                        removed); upstream cliproxy/newapi and official models
+                        are not pushed (authorization); the zcode plugin's own
+                        models are never pushed to zcode; each tool gets a
+                        managed "agent-proxy" provider created on first push;
+                        targets: zcode, dsh; without a value every target is
+                        pushed; each modified file is backed up first; always
+                        runs after --sync/--exclude
   --restart-codex       stop Codex app-server after sync or exclusion changes
                         to refresh the model picker; active tasks may error
                         and require recovery or reopening
@@ -281,6 +297,15 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
       if (next === undefined || next.startsWith("--")) options.exclude = true;
       else {
         options.exclude = next;
+        i += 1;
+      }
+      continue;
+    }
+    if (key === "push") {
+      // --push 的值可选：无值推送全部内置目标，有值按逗号拆分为目标子集。
+      if (next === undefined || next.startsWith("--")) options.push = true;
+      else {
+        options.push = next;
         i += 1;
       }
       continue;
@@ -1446,6 +1471,76 @@ async function withModelFileRollback<T>(paths: ResolvedPaths, catalogPath: strin
   }
 }
 
+/** `models --push` 的交互选择依赖注入：勾选器的输入输出可替换（测试用）。 */
+export interface PushModelsDependencies {
+  input?: typeof process.stdin;
+  output?: typeof process.stdout;
+}
+
+/**
+ * `models --push` 的编排：只采集本地 agent 插件模型（`collectAdapterModels` 即
+ * 插件目录收集本身；上游 cliproxy/newapi 与官方模型不推送——用户裁决：存在授权
+ * 问题）。push 与 upstreamOnly 无关、零网络：恒走 reloadCatalog 消费本地已发现的
+ * 插件目录缓存（~/.agent-proxy-gateway/<plugin>-catalog.json），目录内容的更新由
+ * 网关运行时刷新与 models --sync 负责。zcode 插件模型的剔除由 zcode 目标自己做
+ * （ZCode 直连自家上游），管道不做目标特判。
+ *
+ * 推送前经交互勾选确认（用户裁决：不提供 --select 跳过）：全部预勾选，直接回车
+ * 即全量推送；无终端时报可执行错误。目标名校验先于勾选，拼写错误不必进入选择器。
+ */
+export async function runModelsPush(
+  targetOption: string | undefined,
+  config: GatewayConfig,
+  dependencies: PushModelsDependencies = {},
+): Promise<void> {
+  const targets: ModelPushTarget[] = [
+    createZcodePushTarget({ config }),
+    createDshPushTarget({ config }),
+  ];
+  if (targetOption !== undefined) {
+    const known = targets.map((target) => target.id);
+    for (const id of [...new Set(targetOption.split(",").map((value) => value.trim().toLowerCase()).filter(Boolean))]) {
+      if (!known.includes(id)) throw new Error(`unknown --push target "${id}"; available targets: ${known.join(", ")}`);
+    }
+  }
+  const { entries, failures } = await collectAdapterModels(config, {}, { refresh: false });
+  const scoped = filterExcludedModels(
+    { models: [...entries] },
+    config.excludedModels,
+    isInstalledPluginModel,
+  ).models;
+  if (scoped.length === 0) {
+    throw new Error(
+      "model push aborted; no local adapter models to push"
+      + " (enable an adapter via config --zcode on / --codebuddy on / … and refresh its catalog first)",
+    );
+  }
+  const input = dependencies.input ?? process.stdin;
+  const output = dependencies.output ?? process.stdout;
+  if (!input.isTTY || !output.isTTY) {
+    throw new Error(
+      "models --push requires an interactive terminal to confirm the model list"
+      + " (every model is preselected and Enter pushes them all)",
+    );
+  }
+  const selectedSlugs = await chooseModels({
+    availableModels: scoped,
+    currentSelection: scoped.map((model) => model.slug),
+    requireNonEmpty: true,
+    input,
+    output,
+    title: "Local plugin models - space toggles, Enter pushes",
+  });
+  const selectedSet = new Set(selectedSlugs);
+  await pushModelsToTargets({
+    targetOption,
+    entries: scoped.filter((model) => selectedSet.has(model.slug)),
+    failures,
+    config,
+    targets,
+  });
+}
+
 async function models(options: CliOptions): Promise<void> {
   const restartCodex = options["restart-codex"] === true;
   // 模型更新只消费已保存的模式，模式切换由 config 负责。
@@ -1458,6 +1553,12 @@ async function models(options: CliOptions): Promise<void> {
   const upstreamOnly = config.upstreamOnly === true;
   if (modelMergeJson) config.modelMergeJson = modelMergeJson;
   const currentSelection = configuredSelectedModels(paths, config);
+  // --push 不与任何现有 flag 互斥：一律在前置操作成功落盘后最后执行。
+  const pushDeferred = async (): Promise<void> => {
+    if (options.push !== undefined) {
+      await runModelsPush(options.push === true ? undefined : String(options.push), config);
+    }
+  };
 
   if (options.exclude !== undefined) {
     if (options.sync === true) throw new Error("--exclude cannot be combined with --sync");
@@ -1465,12 +1566,18 @@ async function models(options: CliOptions): Promise<void> {
     // --select 语义属于上游模型选择，与排除规则无关，显式拒绝避免静默忽略。
     if (options.select !== undefined) throw new Error("--select cannot be combined with --exclude");
     await excludeModels(paths, config, options.exclude as true | string, restartCodex);
+    await pushDeferred();
     return;
   }
 
   if (options.sync !== true) {
-    printCurrentModels(config, currentSelection);
-    await printCompatibleModels(config);
+    // --push 单独使用时不再先打印只读清单（Selected/Active/Excluded 三段）：
+    // 勾选列表本身就是当前可用目录过滤一次后的可选项，直接进入选择。
+    if (options.push === undefined) {
+      printCurrentModels(config, currentSelection);
+      await printCompatibleModels(config);
+    }
+    await pushDeferred();
     return;
   }
 
@@ -1538,10 +1645,10 @@ async function models(options: CliOptions): Promise<void> {
     } else {
       console.log("Dynamic catalog synced; Codex refreshes /models periodically, but the current model picker may require --restart-codex.");
     }
-    return;
+  } else {
+    await refreshCodexAppServer();
   }
-
-  await refreshCodexAppServer();
+  await pushDeferred();
 }
 
 async function status(): Promise<void> {
@@ -1849,7 +1956,7 @@ export async function promptCodebuddyAccountSelection(
   const items: AccountMenuItem[] = [
     {
       value: "auto",
-      label: `${current?.label ?? "no login yet"} (auto, follows the most recently refreshed login)`,
+      label: current ? `Auto(${current.label})` : "Auto",
       selectable: true,
     },
     ...entries
@@ -2081,7 +2188,7 @@ async function configCommand(options: CliOptions): Promise<void> {
 /**
  * 顶层 `codebuddy --switch`：CodeBuddy 账号选择的唯一入口（config 只管开关），
  * 复用 config 的写盘管线（校验→写盘→state 同步→审计→失效目录缓存→重启）。
- * 取消或非交互终端都不写配置；缺省即 auto。dependencies 供测试注入按键源。
+ * 取消、选择未变或非交互终端都不写配置；缺省即 auto。dependencies 供测试注入按键源。
  */
 export async function codebuddyCommand(dependencies: CodebuddyAccountSwitchDependencies = {}): Promise<void> {
   requireMacOS();
@@ -2092,6 +2199,11 @@ export async function codebuddyCommand(dependencies: CodebuddyAccountSwitchDepen
   const selection = await promptCodebuddyAccountSelection(dependencies);
   if (selection === undefined) {
     console.log("CodeBuddy account switch cancelled; no account change was saved.");
+    return;
+  }
+  // 缺省值与显式 auto 等价；仅实际选择值变化时才写盘、清缓存并重启。
+  if (selection === (config.codebuddyAccount ?? "auto")) {
+    console.log("CodeBuddy account unchanged; nothing to save.");
     return;
   }
   config.codebuddyAccount = selection;
@@ -2304,7 +2416,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   uninstall: ["restart-codex"],
   restart: ["restart-codex"],
   serve: ["config"],
-  models: ["sync", "select", "restart-codex", "model-merge-json", "exclude"],
+  models: ["sync", "select", "restart-codex", "model-merge-json", "exclude", "push"],
   config: ["upstream-only", "restart-codex", "zcode", "codebuddy", "qoder", "agy", "opencode-zen", "log", "debug", "max-request-logs", "max-log-size"],
   codebuddy: ["switch"],
   web: ["start", "daemon", "status", "stop", "restart"],
