@@ -138,7 +138,7 @@ test("agy 目录内容变化时失效 Codex 的 models 缓存", TIMEOUT, async (
   try {
     const credentialFile = path.join(directory, "token.json");
     fs.writeFileSync(credentialFile, JSON.stringify({ token: { access_token: "ya29.x", refresh_token: "seed-a", expiry: "2099-01-01T00:00:00Z" } }));
-    const credentials = () => Promise.resolve(loadAgyCredentials({ credentialFile }));
+    const credentials = () => Promise.resolve(loadAgyCredentials({ credentialFile, os: "linux" }));
     const modelsCache = path.join(directory, "models_cache.json");
     fs.writeFileSync(modelsCache, JSON.stringify({ models: [{ slug: "gpt-5", version: 1 }] }));
     let fetchCount = 0;
@@ -272,7 +272,7 @@ test("agy 家族信息随目录缓存落盘，磁盘缓存回退时仍可解析�
   try {
     const credentialFile = path.join(directory, "token.json");
     fs.writeFileSync(credentialFile, JSON.stringify({ token: { access_token: "ya29.x", refresh_token: "seed-a", expiry: "2099-01-01T00:00:00Z" } }));
-    const credentials = () => Promise.resolve(loadAgyCredentials({ credentialFile }));
+    const credentials = () => Promise.resolve(loadAgyCredentials({ credentialFile, os: "linux" }));
     const first = createAgyCatalogStore({
       cacheDirectory: directory, credentials, now: () => 0,
       fetchCatalog: async () => tieredModelsResponse(),
