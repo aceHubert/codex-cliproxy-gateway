@@ -39,7 +39,7 @@
     },
     "apps/gateway": {
       "name": "@agent-proxy/gateway",
-      "version": "0.15.0",
+      "version": "0.15.1",
       "bin": {
         "agent-proxy": "./dist/index.js",
       },
@@ -63,7 +63,7 @@
     },
     "packages/agy": {
       "name": "@agent-proxy/agy",
-      "version": "0.15.0",
+      "version": "0.15.1",
       "dependencies": {
         "@agent-proxy/plugin-api": "workspace:*",
       },
