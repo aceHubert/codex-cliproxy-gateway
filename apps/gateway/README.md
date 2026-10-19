@@ -173,6 +173,25 @@ agent-proxy models --exclude none
 | ~~作用域外规则~~ | ~~`cliproxy/…`、官方模型 ID~~ | **写入时拒绝**：上游模型用 `models --sync` 选择；官方模型不可排除 |
 
 
+### 推送模型到客户端工具（--push）
+
+把网关本地 agent 插件的模型清单（应用排除规则）写入本机客户端工具的受管供应商；
+上游 cliproxy/newapi 与官方模型**不推送**（授权原因），zcode 插件自身的模型也不会
+推送给 zcode（它本就直连自家上游）：
+
+```bash
+# 推送全部内置目标（zcode 与 dsh）
+agent-proxy models --push
+
+# 只推送其中一个目标
+agent-proxy models --push zcode
+agent-proxy models --push dsh
+
+# 先同步上游目录再推送；也可与 --exclude 组合，--push 一律在其他操作成功后最后执行
+agent-proxy models --sync --push
+```
+
+
 ### 何时需要重启 Codex
 
 - 安装后、切换混合/仅上游模式后：重启 Codex。

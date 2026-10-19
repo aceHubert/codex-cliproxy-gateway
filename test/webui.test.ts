@@ -989,6 +989,65 @@ test("POST /ui/api/upstream/models rebuilds the catalog and persists the selecti
   }
 });
 
+for (const endpoint of ["/ui/api/upstream/models", "/ui/api/config"]) {
+  for (const upstreamOnly of [false, true]) {
+    test(`POST ${endpoint} 在${upstreamOnly ? "静态" : "动态"}模式下仍保存插件目录刷新失败时的模型选择`, { timeout: 60_000 }, async () => {
+      const upstream = await startFakeUpstream((_request, response) => {
+        response.setHeader("content-type", "application/json");
+        response.end(JSON.stringify({ models: [
+          { slug: "glm-5.3" }, { slug: "kimi-k2" }, { slug: "deepseek-chat" },
+        ] }));
+      });
+      let agentFetches = 0;
+      const { handler, paths, home } = await makeFixture({
+        config: { upstreamBaseUrl: upstream.url, upstreamOnly, agy: true },
+        webUi: {
+          upstreamDeps: { readKey: () => "" },
+          modelDeps: {
+            reloadModels: async () => ({ loaded: true, revision: "unavailable-agent" }),
+            updateCodexCatalog: (modelPaths, config, _deps, options) => updateCodexModelCatalog(modelPaths, config, {
+              agy: {
+                cacheDirectory: modelPaths.runtimeHome,
+                credentials: async () => ({
+                  accessToken: "fake-test-token", expiryMs: Date.now() + 3_600_000,
+                  identity: "fixture", authMethod: "consumer",
+                }),
+                fetch: async () => { agentFetches++; throw new Error("目录请求失败"); },
+                setInterval: (() => { throw new Error("禁止创建后台计时器"); }) as typeof setInterval,
+                refreshCatalogOnStart: false,
+                catalogMode: "manual",
+              },
+            }, options),
+          },
+        },
+      });
+      try {
+        fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, config: null }));
+        // 独立临时目录中没有插件缓存，失败不能由历史模型目录掩盖。
+        const response = await handler(authedRequest(endpoint, {
+          json: { selectedModels: ["deepseek-chat", "kimi-k2"] },
+        }));
+        assert.equal(response.status, 200, await response.clone().text());
+        assert.ok(agentFetches > 0, "必须实际尝试刷新插件目录");
+        const selected = ["kimi-k2", "deepseek-chat"];
+        const saved = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8")) as { selectedModels: string[] };
+        assert.deepEqual(saved.selectedModels, selected);
+        const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8")) as { config: { selectedModels: string[] } };
+        assert.deepEqual(state.config.selectedModels, selected);
+        const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8")) as { models: Array<{ slug: string }> };
+        assert.deepEqual(catalog.models.map((model) => model.slug), selected);
+        if (upstreamOnly) {
+          const codexCatalog = JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")) as { models: Array<{ slug: string }> };
+          assert.deepEqual(codexCatalog.models.map((model) => model.slug), selected);
+        }
+      } finally {
+        await upstream.close();
+        fs.rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
+}
+
 test("POST /ui/api/upstream/models rejects an empty combined static catalog and keeps the cache", async () => {
   const upstream = await startFakeUpstream((_request, response) => {
     response.setHeader("content-type", "application/json");

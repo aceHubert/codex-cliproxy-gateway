@@ -3901,3 +3901,33 @@ test("catalog includes only explicitly selected CLIProxy models", () => {
     ["gpt-native", "cliproxy/chosen-model"],
   );
 });
+
+test("OpenAI list 形态的 /v1/models 带非标显示名字段（display_name 与 name）", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => Response.json({ models: [
+    { slug: "alpha", display_name: "Alpha Pro" },
+    { slug: "beta" },
+  ] })) as unknown as typeof fetch;
+  try {
+    const handler = createGatewayHandler({
+      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
+      host: "127.0.0.1",
+      port: 8320,
+      mountPath: "/v1",
+      prefix: "cliproxy/",
+      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
+      upstreamBaseUrl: "https://cliproxy.example/v1",
+      catalogPath: "/tmp/missing-catalog.json",
+    }, "proxy-key");
+    const response = await handler(new Request("http://127.0.0.1:8320/v1/models"));
+    assert.equal(response.status, 200);
+    const body = await response.json() as { data: Array<Record<string, unknown>> };
+    const alpha = body.data.find((model) => model.id === "alpha");
+    const beta = body.data.find((model) => model.id === "beta");
+    assert.equal(alpha?.display_name, "Alpha Pro");
+    assert.equal(alpha?.name, "Alpha Pro");
+    assert.equal("display_name" in (beta ?? {}), false, "display_name 缺失时不臆造字段");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

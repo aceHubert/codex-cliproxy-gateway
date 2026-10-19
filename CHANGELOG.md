@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.15.0 (2026-10-19)
+
+#### :rocket: New Feature
+* [#24](https://github.com/aceHubert/codex-cliproxy-gateway/pull/24) feat(cli): 新增 models --push 推送模型清单到客户端工具 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
+## v0.14.2 (2026-10-19)
+
+#### :bug: Bug Fix
+* [#23](https://github.com/aceHubert/codex-cliproxy-gateway/pull/23) fix(models): 插件目录异常不阻断模型选择保存 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.14.0 (2026-10-16)
 
 #### :rocket: New Feature

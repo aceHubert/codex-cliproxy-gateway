@@ -68,7 +68,7 @@ test("dynamic /models refreshes official catalog and merges only CLIProxy rows",
       object: "list",
       data: [
         { id: "gpt-fresh", object: "model", owned_by: "openai" },
-        { id: "cliproxy/test-model", object: "model", owned_by: "cliproxy" },
+        { id: "cliproxy/test-model", object: "model", display_name: "test-model", name: "test-model", owned_by: "cliproxy" },
       ],
     });
     assert.equal(fetchCount, 2);
@@ -192,7 +192,7 @@ test("upstream-only /models 只消费合成静态目录，不访问官方", asyn
     const openai = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     assert.deepEqual(await openai.json(), {
       object: "list",
-      data: [{ id: "gpt-5.6-sol", object: "model", owned_by: "cliproxy" }],
+      data: [{ id: "gpt-5.6-sol", object: "model", display_name: "GPT-5.6 Sol", name: "GPT-5.6 Sol", owned_by: "cliproxy" }],
     });
     assert.deepEqual(await (await handler(new Request("http://127.0.0.1:8320/healthz"))).json(), {
       ok: true,

@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/gateway",
-  "version": "0.14.1",
+  "version": "0.15.0",
   "description": "Agent Proxy 的 Bun 网关与 CLI 业务应用。",
   "type": "module",
   "bin": {
@@ -31,7 +31,8 @@
     "i18next": "^26.4.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-i18next": "^17.0.16"
+    "react-i18next": "^17.0.16",
+    "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@agent-proxy/models": "workspace:*"
