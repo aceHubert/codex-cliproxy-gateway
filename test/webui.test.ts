@@ -112,6 +112,7 @@ async function makeFixture(overrides: {
   const uiHtmlPath = path.join(home, "ui-index.html");
   fs.writeFileSync(uiHtmlPath, "<!doctype html><html><body><div id=\"root\"></div></body></html>");
   const webUi: WebUiContext = { paths, uiHtmlPath,
+    providerDeps: { agyCredentialProbe: { os: "linux" } },
     modelDeps: {
       reloadModels: async () => ({ loaded: true, revision: "fixture" }),
       wait: async () => {},
@@ -471,7 +472,7 @@ test("UI responses redact URL query strings that may carry tokens", async () => 
   }
 });
 
-test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据内容", async () => {
+test("GET /ui/api/config 的 provider 探测支持 agy 钥匙串且不回显凭据内容", async () => {
   const fixture = await makeFixture();
   const { paths, config, home, uiHtmlPath } = fixture;
   // 探测路径显式注入到临时 home，绝不碰真机的 ~/.zcode 与认证目录。
@@ -479,11 +480,15 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
   fs.mkdirSync(authDir, { recursive: true });
   const infoFile = path.join(authDir, "Tencent-Cloud.coding-copilot.info");
   const agyCredentialFile = path.join(home, "antigravity-oauth-token");
+  let keychainPresent = false;
   const handler = (request: Request) =>
     handleWebUiRequest(request, config, {
       paths,
       uiHtmlPath,
-      providerDeps: { zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir, agyCredentialFile },
+      providerDeps: {
+        zcodeHome: path.join(home, ".zcode"), codebuddyAuthDir: authDir, agyCredentialFile,
+        agyCredentialProbe: { os: "darwin", probeKeychain: () => keychainPresent },
+      },
     }, config.port);
   try {
     const absent = await (await handler(authedRequest("/ui/api/config"))).json() as {
@@ -492,10 +497,17 @@ test("GET /ui/api/config 的 provider 探测只看本机文件、不回显凭据
     };
     assert.equal(absent.detected.zcode, false, "无 ~/.zcode 时不显示 ZCode 开关");
     assert.equal(absent.detected.codebuddy, false, "无 .info 时不显示 CodeBuddy 开关");
-    assert.equal(absent.detected.agy, false, "无凭据文件时不显示 Antigravity 开关");
+    assert.equal(absent.detected.agy, false, "文件与钥匙串均缺失时不显示 Antigravity 开关");
     assert.equal(absent.editable.agy, false, "agy 开关缺省为关闭");
     // OpenCode Zen 无本机凭据依赖：开关值始终随配置返回（缺省关闭），不参与探测显隐。
     assert.equal(absent.editable.opencodeZen, false, "opencodeZen 开关缺省为关闭");
+
+    keychainPresent = true;
+    const keychainOnly = await (await handler(authedRequest("/ui/api/config"))).json() as {
+      detected: { agy: boolean };
+    };
+    assert.equal(keychainOnly.detected.agy, true, "仅钥匙串存在时也显示 Antigravity 开关");
+    keychainPresent = false;
 
     fs.writeFileSync(agyCredentialFile, JSON.stringify({ token: { access_token: "ya29.fake" } }));
     const agyPresent = await (await handler(authedRequest("/ui/api/config"))).json() as {
