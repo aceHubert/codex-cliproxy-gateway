@@ -822,6 +822,11 @@ function modelCatalogResponse(
     data: catalog.models.map((model) => ({
       id: model.slug,
       object: "model",
+      // 非标显示名字段：OpenAI list 形态本身不带显示名，但 zcode 等客户端的供应商
+      // 模型列表按运行时拉取渲染名称，缺字段时只能显示裸 ID。
+      ...(typeof model.display_name === "string" && model.display_name
+        ? { display_name: model.display_name, name: model.display_name }
+        : {}),
       owned_by: registry.match(model.slug)?.plugin.id ?? (owner === "mixed"
         ? model.slug.startsWith(prefix) ? "cliproxy" : "openai"
         : owner),
