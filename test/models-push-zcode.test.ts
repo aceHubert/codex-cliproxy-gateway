@@ -172,6 +172,27 @@ test("pushZcodeModels 为有无上下文窗口的模型写入 ZCode 运行时图
   }
 });
 
+test("pushZcodeModels 把目录档位写入规则 optionSpecs.reasoningLevel（档位选择器只读规则字段）", () => {
+  const fixture = makeZcodeFixture();
+  try {
+    const models: ModelEntry[] = [
+      { slug: "agy/gemini-4-argon", display_name: "Gemini 4 Argon",
+        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }, { effort: "high" }] },
+      { slug: "opencode-zen/mimo-v2.6-flash-free" },
+    ];
+    pushZcodeModels(models, pushOptions(fixture.home));
+    const providerDoc = readJson(fixture.providerConfigFile);
+    const managedId = managedRule(providerDoc).providerId;
+    const rules = providerDoc.config.modelConfigRules.providerModelRules.filter((item: any) => item.providerId === managedId);
+    // values 即选择器选项（目录顺序，默认档位取末位）；无档位模型不写，保持 ZCode 开关兜底。
+    assert.deepEqual(rules.find((item: any) => item.modelId === "agy/gemini-4-argon").config.optionSpecs,
+      { reasoningLevel: { values: ["low", "medium", "high"] } });
+    assert.equal(rules.find((item: any) => item.modelId === "opencode-zen/mimo-v2.6-flash-free").config.optionSpecs, undefined);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("pushZcodeModels 全量重建存量模型能力并清理受管手动规则，保留其他 provider 和幂等性", () => {
   const fixture = makeZcodeFixture();
   try {
@@ -363,6 +384,7 @@ test("pushZcodeModels 按当前目录重建显示名并移除过时上下文和�
       (item: any) => item.providerId === managedId && item.modelId === "agy/gemini-4-argon",
     );
     oldRule.config.properties = { contextWindow: 1000, inputFormat: { supportsImage: true } };
+    oldRule.config.optionSpecs = { reasoningLevel: { values: ["xhigh"] } };
     delete providerDoc.config.modelConfigRules.manualProviderModelRules;
     fs.writeFileSync(fixture.configFile, JSON.stringify(configDoc, null, 2));
     fs.writeFileSync(fixture.providerConfigFile, JSON.stringify(providerDoc, null, 2));
@@ -376,6 +398,10 @@ test("pushZcodeModels 按当前目录重建显示名并移除过时上下文和�
     assert.deepEqual(afterRules.providerModelRules.find(
       (item: any) => item.providerId === managedId && item.modelId === "agy/gemini-4-argon",
     ).config.properties, { inputFormat: { supportsImage: false } }, "目录没有上下文时清除旧上下文");
+    const rebuiltRule = readJson(fixture.providerConfigFile).config.modelConfigRules.providerModelRules.find(
+      (item: any) => item.providerId === managedId && item.modelId === "agy/gemini-4-argon",
+    );
+    assert.equal(rebuiltRule.config.optionSpecs, undefined, "目录没有档位时清除旧档位规则");
     assert.ok(!("manualProviderModelRules" in afterRules), "缺少手动规则数组时不强制创建");
   } finally {
     fixture.cleanup();
