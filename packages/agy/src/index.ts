@@ -1,4 +1,4 @@
-import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
+import { bindHostMethods, getHostServices, withHostServices } from "@agent-proxy/plugin-api";
 import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
 import path from "node:path";
 import { isIP } from "node:net";
@@ -291,9 +291,15 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
         const translated = translateAgyRequest(input, resolvedModel, to);
         abort.signal.throwIfAborted();
         const upstream = await transport.streamInfer(credential, translated.wrapper, abort.signal);
+        // 流式响应在 forward 返回后由客户端 pull 驱动，下列回调可能在调用上下文之外
+        // 触发（Bun 的流调度不继承 withHostServices 的 AsyncLocalStorage）；日志等
+        // 宿主服务调用必须重入当前宿主上下文，否则 logExchange 抛错被 safely 吞掉、
+        // 请求日志静默丢失。
+        const host = getHostServices();
+        const inHostContext = <T>(callback: () => T): T => withHostServices(host, callback);
         const response = await createAgyClientResponse(to, upstream, {
           model, tools: translated.tools, stream, signal: abort.signal,
-          sanitizeError: (error) => {
+          sanitizeError: (error) => inHostContext(() => {
             // 上游流内错误的原始对象只进本机网关日志（截断），供排查；客户端只见预定义分类。
             if (error?.code !== "response_cancelled") {
               logGatewayError(sink?.processLog, {
@@ -304,17 +310,17 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
               });
             }
             return safeAgyUpstreamError(0, `${String(error.code ?? "")} ${String(error.message ?? "")}`);
-          },
-          abort: () => { abort.abort(); cleanup(); },
-          onChunk: (chunk) => { if (sink) chunks += chunk; },
-          onComplete: (payload) => {
+          }),
+          abort: () => inHostContext(() => { abort.abort(); cleanup(); }),
+          onChunk: (chunk) => inHostContext(() => { if (sink) chunks += chunk; }),
+          onComplete: (payload) => inHostContext(() => {
             cleanup();
             const stripped = translated.dropped.length ? `\n--- stripped built-in tools: ${translated.dropped.join(", ")} ---\n` : "";
             if (!mapResult) log(stream ? 200 : payload.status === "failed" ? 502 : 200,
               stream ? `${chunks}${stripped}\n--- response.${String(payload.status)} ---\n${JSON.stringify(payload)}`
                 : `${JSON.stringify(payload)}${stripped}`,
               new Headers({ "content-type": stream ? "text/event-stream" : "application/json" }));
-          },
+          }),
         });
         if (!mapResult) return response;
         const payload: unknown = await response.json();

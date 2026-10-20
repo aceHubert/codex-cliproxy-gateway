@@ -431,6 +431,9 @@ function normalizeSourceItems(body: Record<string, unknown>, to: ClientProtocol)
     const calls: unknown[] = [];
     const results: unknown[] = [];
     const parts: unknown[] = [];
+    // 带响应侧 agn1: 信封的 thinking 块回放为 reasoning 项，由共用路径把签名挂回
+    // 下一个 functionCall（上游强制要求 thoughtSignature，缺失直接 400）。
+    const signatures: unknown[] = [];
     for (const block of raw.content) {
       if (!record(block)) fail("messages 包含无效内容块");
       if (block.type === "tool_use") {
@@ -447,12 +450,19 @@ function normalizeSourceItems(body: Record<string, unknown>, to: ClientProtocol)
             : `data:${String(source?.media_type ?? "image/png")};base64,${String(source?.data ?? "")}`;
           parts.push({ type: "input_image", image_url: url });
         } else {
-          parts.push({ type: "input_text", text: `[thinking] ${typeof block.thinking === "string" ? block.thinking : ""}` });
+          const signature = typeof block.signature === "string" ? block.signature : "";
+          if (signature.startsWith("agn1:")) {
+            // 签名 thinking 块只回放 agn1 信封，思考文本不回放（thought 属于模型私有态）。
+            signatures.push({ type: "reasoning", encrypted_content: signature });
+          } else {
+            parts.push({ type: "input_text", text: `[thinking] ${typeof block.thinking === "string" ? block.thinking : ""}` });
+          }
         }
       }
     }
     if (results.length > 0) items.push(...results);
     else if (parts.length > 0) items.push({ type: "message", role: raw.role, content: parts });
+    if (signatures.length > 0) items.push(...signatures);
     if (calls.length > 0) items.push(...calls);
   }
   // Anthropic 的 system（字符串或块数组）语义等同 Responses instructions。

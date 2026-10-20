@@ -7,6 +7,9 @@ import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts
 import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "@agent-proxy/agy";
+import { withHostServices } from "@agent-proxy/plugin-api";
+import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
 import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
@@ -528,4 +531,61 @@ test("Antigravity UA 与内置提示词取自本模块指纹数据文件，版�
   assert.ok(!data.agentSystemPrompt.includes("Work autonomously"), "autonomous 守卫块整块删除");
   assert.ok(data.agentSystemPromptVariant.startsWith("You are Antigravity Agent,"));
   assert.ok(data.titleSystemPrompt.startsWith("You are a conversation title generator."));
+});
+
+/** 模块顶层处于任何 withHostServices 作用域之外；在这条协程里执行的任务不携带
+ *  宿主 AsyncLocalStorage 上下文，模拟真实网关中流式响应由客户端 pull 驱动、
+ *  回调在 forward 调用上下文之外触发的场景。 */
+const outsideTasks: Array<() => Promise<void>> = [];
+let outsideWake: (() => void) | undefined;
+void (async () => {
+  while (true) {
+    await new Promise<void>((resolve) => { outsideWake = resolve; });
+    for (const task of outsideTasks.splice(0)) await task();
+  }
+})();
+function runOutsideHostScope<T>(task: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    outsideTasks.push(async () => {
+      try { resolve(await task()); } catch (error) { reject(error); }
+    });
+    outsideWake?.();
+  });
+}
+
+test("agy 流式响应在宿主作用域外消费仍写入请求日志", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-stream-logging-"));
+  const paths = resolvePaths(process.env, directory);
+  const wideConfig: GatewayConfig = {
+    zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
+    host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,
+    officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
+    catalogPath: path.join(directory, "catalog.json"),
+    requestLogging: true,
+  };
+  const host = createGatewayHostServices(wideConfig, undefined, paths);
+  // 适配器创建须在宿主上下文内完成（bindHostMethods 在创建时捕获宿主实例）。
+  const adapter = withHostServices(host, () => createAgyAdapter(wideConfig, {
+    cacheDirectory: directory,
+    catalogMode: "manual",
+    credentials: async () => credential(),
+    fetch: async (url) => (url.includes(":fetchAvailableModels") ? Response.json(catalogData()) : upstream()),
+  }));
+  try {
+    const response = await adapter.forward(
+      new Request("http://127.0.0.1:8327/v1/messages"),
+      { model: MODEL, stream: true, messages: [{ role: "user", content: [{ type: "text", text: "TCP 状态" }] }] },
+      "anthropic",
+    );
+    // 回归：流式回调曾脱离宿主上下文，logExchange 抛错被 safely 吞掉，请求日志静默丢失。
+    const text = await runOutsideHostScope(async () => response.text());
+    assert.match(text, /message_stop/);
+    const files = fs.readdirSync(paths.logDir).filter((name) => name.startsWith("agy-v1-messages-http-"));
+    assert.equal(files.length, 1, "流式成功请求应写入请求日志");
+    const content = fs.readFileSync(path.join(paths.logDir, files[0]!), "utf8");
+    assert.match(content, /--- response status: 200/);
+  } finally {
+    adapter.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -123,6 +123,27 @@ function finishDisposition(finishReason: string | undefined): { status: "complet
 
 /* ====================== 四种客户端协议的独立渲染层 ====================== */
 
+/**
+ * 渲染事件迭代器 → pull 型增量 SSE 响应：客户端每拉一次消费一帧上游事件，
+ * 背压沿链路回传；取消时同步取消上游流，让 streamGenerateContent 一并中止。
+ */
+function incrementalSseResponse(chunks: AsyncGenerator<string>, upstream: ReadableStream<Uint8Array>): Response {
+  return new Response(new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await chunks.next();
+        if (next.done) { controller.close(); return; }
+        controller.enqueue(encoder.encode(next.value));
+      } catch (error) { controller.error(error); }
+    },
+    async cancel() {
+      // 先取消上游以解除挂起的读取，再终结渲染迭代器释放读取锁。
+      await upstream.cancel().catch(() => undefined);
+      await chunks.return(undefined).catch(() => undefined);
+    },
+  }, { highWaterMark: 0 }), { headers: sseHeaders() });
+}
+
 interface ClientRenderState {
   model: string;
   stream: boolean;
@@ -131,7 +152,8 @@ interface ClientRenderState {
 
 /**
  * AGY 自产 Responses SSE → Chat Completions chunks（含 [DONE]）。本渲染器属于
- * agy 插件包（不依赖桥接包）：解析自身产出的受信事件流并重组为客户端协议外壳。
+ * agy 插件包（不依赖桥接包）：解析自身产出的受信事件流并重组为客户端协议外壳，
+ * 逐帧增量下发（非流式客户端由渲染器聚合）。
  */
 async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
   const id = `chatcmpl-${crypto.randomUUID().replaceAll("-", "")}`;
@@ -140,43 +162,55 @@ async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state:
   let finish = "stop";
   let model = state.model;
   const frames: string[] = [];
-  const push = (delta: Json): void => {
-    frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
+  const push = (delta: Json): string => {
+    const chunk = `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`;
+    frames.push(chunk);
+    return chunk;
   };
   let contentStarted = false;
-  for await (const frame of iterateOwnSse(responsesSse)) {
-    if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
-      contentStarted = true;
-      push({ content: frame.delta, role: contentStarted && !frames.length ? "assistant" : undefined });
-    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
-      push({ reasoning_content: frame.delta });
-    } else if (frame.type === "response.refusal.delta" && typeof frame.delta === "string") {
-      push({ refusal: frame.delta });
-    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
-      const item = record(frame.item, "item");
-      push({ role: "assistant", tool_calls: [{ index: Number(frame.output_index ?? 0), id: item.call_id ?? "", type: "function", function: { name: item.name ?? "", arguments: "" } }] });
-    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
-      push({ tool_calls: [{ index: Number(frame.output_index ?? 0), function: { arguments: frame.delta } }] });
-    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
-      const response = record(frame.response, "response");
-      if (typeof response.model === "string") model = state.model;
-      const output = Array.isArray(response.output) ? response.output : [];
-      finish = response.status === "incomplete" ? "length" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_calls" : "stop";
-      if (record(response.usage ?? {}, "usage") && response.usage !== null) {
-        const value = record(response.usage, "usage");
-        usage = value;
+  async function* iterate(): AsyncGenerator<string> {
+    for await (const frame of iterateOwnSse(responsesSse)) {
+      const from = frames.length;
+      if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+        contentStarted = true;
+        push({ content: frame.delta, role: contentStarted && !frames.length ? "assistant" : undefined });
+      } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+        push({ reasoning_content: frame.delta });
+      } else if (frame.type === "response.refusal.delta" && typeof frame.delta === "string") {
+        push({ refusal: frame.delta });
+      } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+        const item = record(frame.item, "item");
+        push({ role: "assistant", tool_calls: [{ index: Number(frame.output_index ?? 0), id: item.call_id ?? "", type: "function", function: { name: item.name ?? "", arguments: "" } }] });
+      } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+        push({ tool_calls: [{ index: Number(frame.output_index ?? 0), function: { arguments: frame.delta } }] });
+      } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+        const response = record(frame.response, "response");
+        if (typeof response.model === "string") model = state.model;
+        const output = Array.isArray(response.output) ? response.output : [];
+        finish = response.status === "incomplete" ? "length" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_calls" : "stop";
+        if (record(response.usage ?? {}, "usage") && response.usage !== null) {
+          const value = record(response.usage, "usage");
+          usage = value;
+        }
       }
+      if (frames.length === from) continue;
+      const chunk = frames.slice(from).join("");
+      safely(() => state.onChunk?.(chunk));
+      yield chunk;
     }
+    const tail = [
+      `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] })}\n\n`,
+      ...(usage ? [`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage })}\n\n`] : []),
+      "data: [DONE]\n\n",
+    ];
+    frames.push(...tail);
+    const text = tail.join("");
+    safely(() => state.onChunk?.(text));
+    yield text;
   }
-  frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: {}, finish_reason: finish }] })}\n\n`);
-  if (usage) {
-    frames.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [], usage })}\n\n`);
-  }
-  frames.push("data: [DONE]\n\n");
-  const text = frames.join("");
-  safely(() => state.onChunk?.(text));
   if (!state.stream) {
     // 非流式：聚合为完整 completion JSON。
+    for await (const chunk of iterate()) void chunk;
     let content = "";
     const toolCalls = new Map<number, { id: string; function: { name: string; arguments: string } }>();
     let reasoning = "";
@@ -210,157 +244,190 @@ async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state:
     };
     return Response.json(completion);
   }
-  return new Response(strBytes(text), { headers: sseHeaders() });
+  return incrementalSseResponse(iterate(), responsesSse);
 }
 
-/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON（零桥接依赖）。 */
+/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON（零桥接依赖，文本增量下发）。 */
 async function renderGeminiClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
   let finish = "STOP";
   let model = state.model;
   const parts: Json[] = [];
   const toolArgs = new Map<string, string>();
   const toolNames = new Map<string, string>();
-  let toolCalled = false;
   let usage: Json | undefined;
-  for await (const frame of iterateOwnSse(responsesSse)) {
-    if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
-      parts.push({ text: frame.delta });
-    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
-      parts.push({ text: frame.delta, thought: true });
-    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
-      const item = record(frame.item, "item");
-      const callId = typeof item.call_id === "string" ? item.call_id : "";
-      toolArgs.set(callId, "");
-      toolNames.set(callId, typeof item.name === "string" ? item.name : "");
-    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
-      const callId = [...toolArgs.keys()].at(-1) ?? "";
-      toolArgs.set(callId, (toolArgs.get(callId) ?? "") + frame.delta);
-    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
-      const response = record(frame.response, "response");
-      if (typeof response.model === "string") model = state.model;
-      const output = Array.isArray(response.output) ? response.output : [];
-      finish = response.status === "incomplete" ? "MAX_TOKENS" : "STOP";
-      if (response.status === "failed") finish = "OTHER";
-      if (record(response.usage ?? {}, "usage") && response.usage !== null) usage = record(response.usage, "usage");
-      void output;
-    }
-  }
-  // functionCall parts 依到达顺序附加在正文之后（Gemini 的候选内容是单序列）。
-  for (const [callId, argsText] of toolArgs) {
-    let args: Json = {};
-    try {
-      args = record(JSON.parse(argsText || "{}"), "args");
-    } catch { args = {}; }
-    parts.push({ functionCall: { name: toolNames.get(callId) ?? "", args } });
-    toolCalled = true;
-  }
-  void toolCalled;
-  const inputTokens = typeof usage?.input_tokens === "number" ? usage.input_tokens : 0;
-  const outputTokens = typeof usage?.output_tokens === "number" ? usage.output_tokens : 0;
-  const usageMetadata: Json | undefined = usage
-    ? {
+  const usageMetadata = (): Json | undefined => {
+    if (!usage) return undefined;
+    const inputTokens = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+    const outputTokens = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+    return {
       promptTokenCount: inputTokens,
       candidatesTokenCount: outputTokens,
       totalTokenCount: typeof usage.total_tokens === "number" ? usage.total_tokens : inputTokens + outputTokens,
+    };
+  };
+  async function* iterate(): AsyncGenerator<string> {
+    const frameFor = (part: Json): string => `data: ${JSON.stringify({ candidates: [{ content: { parts: [part], role: "model" } }], modelVersion: model })}\n\n`;
+    for await (const frame of iterateOwnSse(responsesSse)) {
+      if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+        const part: Json = { text: frame.delta };
+        parts.push(part);
+        const text = frameFor(part);
+        safely(() => state.onChunk?.(text));
+        yield text;
+      } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+        const part: Json = { text: frame.delta, thought: true };
+        parts.push(part);
+        const text = frameFor(part);
+        safely(() => state.onChunk?.(text));
+        yield text;
+      } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
+        const item = record(frame.item, "item");
+        const callId = typeof item.call_id === "string" ? item.call_id : "";
+        toolArgs.set(callId, "");
+        toolNames.set(callId, typeof item.name === "string" ? item.name : "");
+      } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+        const callId = [...toolArgs.keys()].at(-1) ?? "";
+        toolArgs.set(callId, (toolArgs.get(callId) ?? "") + frame.delta);
+      } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+        const response = record(frame.response, "response");
+        if (typeof response.model === "string") model = state.model;
+        finish = response.status === "incomplete" ? "MAX_TOKENS" : "STOP";
+        if (response.status === "failed") finish = "OTHER";
+        if (record(response.usage ?? {}, "usage") && response.usage !== null) usage = record(response.usage, "usage");
+      }
     }
-    : undefined;
-  if (state.stream) {
-    const frames: string[] = [];
-    for (const part of parts) {
-      const chunk: Json = { candidates: [{ content: { parts: [part], role: "model" } }], modelVersion: model };
-      frames.push(`data: ${JSON.stringify(chunk)}\n\n`);
+    // functionCall parts 依到达顺序附加在正文之后（Gemini 的候选内容是单序列）。
+    for (const [callId, argsText] of toolArgs) {
+      let args: Json = {};
+      try {
+        args = record(JSON.parse(argsText || "{}"), "args");
+      } catch { args = {}; }
+      const part: Json = { functionCall: { name: toolNames.get(callId) ?? "", args } };
+      parts.push(part);
+      const text = frameFor(part);
+      safely(() => state.onChunk?.(text));
+      yield text;
     }
-    const terminal: Json = { candidates: [{ content: { role: "model" }, finishReason: finish }], modelVersion: model, ...(usageMetadata ? { usageMetadata } : {}) };
-    frames.push(`data: ${JSON.stringify(terminal)}\n\n`);
-    const text = frames.join("");
+    const terminal: Json = { candidates: [{ content: { role: "model" }, finishReason: finish }], modelVersion: model, ...(usageMetadata() ? { usageMetadata: usageMetadata() } : {}) };
+    const text = `data: ${JSON.stringify(terminal)}\n\n`;
     safely(() => state.onChunk?.(text));
-    return new Response(strBytes(text), { headers: sseHeaders() });
+    yield text;
   }
+  if (state.stream) return incrementalSseResponse(iterate(), responsesSse);
+  // 非流式：聚合为完整 generateContent JSON。
+  for await (const chunk of iterate()) void chunk;
   const completion: Json = {
     candidates: [{ content: { ...(parts.length > 0 ? { parts } : { parts: [{ text: "" }] }), role: "model" }, finishReason: finish }],
     modelVersion: model,
-    ...(usageMetadata ? { usageMetadata } : {}),
+    ...(usageMetadata() ? { usageMetadata: usageMetadata() } : {}),
   };
   safely(() => state.onChunk?.(JSON.stringify(completion)));
   return Response.json(completion);
 }
 
-/** AGY 自产 Responses SSE → Anthropic Messages 事件（message_start/块生命周期/终态）。 */
+/** AGY 自产 Responses SSE → Anthropic Messages 事件（message_start/块生命周期/终态），逐帧增量下发。 */
 async function renderAnthropicClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
   const id = `msg_${crypto.randomUUID().replaceAll("-", "")}`;
   let model = state.model;
   const frames: string[] = [];
+  const emit = (event: string, payload: Json): void => {
+    frames.push(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
   let started = false;
   let blockIndex = -1;
   let blockKind: "text" | "thinking" | "tool" | undefined;
   let textValue = "";
   let thinkingValue = "";
-  const openTool = (): void => {
+  const openTool = (item: Json): void => {
     blockIndex += 1;
     blockKind = "tool";
-    frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: "", name: "", input: {} } })}\n\n`);
+    emit("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input: {} } });
+  };
+  const openThinking = (): void => {
+    blockIndex += 1;
+    blockKind = "thinking";
+    thinkingValue = "";
+    emit("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "thinking", thinking: "", signature: "" } });
+  };
+  const openText = (): void => {
+    blockIndex += 1;
+    blockKind = "text";
+    textValue = "";
+    emit("content_block_start", { type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } });
   };
   const closeBlock = (): void => {
     if (blockKind === undefined) return;
-    frames.push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: blockIndex })}\n\n`);
+    emit("content_block_stop", { type: "content_block_stop", index: blockIndex });
     blockKind = undefined;
   };
   let usage: Json = {};
   let stopReason = "end_turn";
-  for await (const frame of iterateOwnSse(responsesSse)) {
-    if (frame.type === "response.created" || frame.type === "response.in_progress") {
-      if (started) continue;
-      started = true;
-      const response = record(frame.response, "response");
-      if (typeof response.model === "string") model = state.model;
-      frames.push(`event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`);
-      frames.push('event: ping\ndata: {"type": "ping"}\n\n');
-    } else if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
-      if (blockKind !== "text") {
+  async function* iterate(): AsyncGenerator<string> {
+    for await (const frame of iterateOwnSse(responsesSse)) {
+      const from = frames.length;
+      if (frame.type === "response.created" || frame.type === "response.in_progress") {
+        if (!started) {
+          started = true;
+          const response = record(frame.response, "response");
+          if (typeof response.model === "string") model = state.model;
+          emit("message_start", { type: "message_start", message: { id, type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } });
+          emit("ping", { type: "ping" });
+        }
+      } else if (frame.type === "response.output_text.delta" && typeof frame.delta === "string") {
+        if (blockKind !== "text") {
+          closeBlock();
+          openText();
+        }
+        textValue += frame.delta;
+        emit("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: frame.delta } });
+      } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
+        if (blockKind !== "thinking") {
+          closeBlock();
+          openThinking();
+        }
+        thinkingValue += frame.delta;
+        emit("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "thinking_delta", thinking: frame.delta } });
+      } else if (frame.type === "response.output_item.added") {
+        const item = record(frame.item, "item");
+        if (item.type === "function_call") {
+          closeBlock();
+          openTool(item);
+        } else if (item.type === "reasoning" && typeof item.encrypted_content === "string" && item.encrypted_content.startsWith("agn1:")) {
+          // thoughtSignature 信封项：渲染为带 signature 的独立 thinking 块，客户端
+          // 下一轮回传后由请求侧还原挂回 functionCall（上游缺失直接 400）。
+          closeBlock();
+          openThinking();
+          emit("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "signature_delta", signature: item.encrypted_content } });
+          closeBlock();
+        }
+      } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
+        emit("content_block_delta", { type: "content_block_delta", index: blockIndex, delta: { type: "input_json_delta", partial_json: frame.delta } });
+      } else if (frame.type === "response.output_item.done" && record(frame.item, "item").type === "function_call") {
         closeBlock();
-        blockIndex += 1;
-        blockKind = "text";
-        textValue = "";
-        frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "text", text: "" } })}\n\n`);
-      }
-      textValue += frame.delta;
-      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "text_delta", text: frame.delta } })}\n\n`);
-    } else if (frame.type === "response.reasoning_summary_text.delta" && typeof frame.delta === "string") {
-      if (blockKind !== "thinking") {
+      } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
+        const response = record(frame.response, "response");
         closeBlock();
-        blockIndex += 1;
-        blockKind = "thinking";
-        thinkingValue = "";
-        frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "thinking", thinking: "" } })}\n\n`);
+        if (record(response.usage ?? {}, "usage") && response.usage !== null) {
+          const value = record(response.usage, "usage");
+          usage = { input_tokens: typeof value.input_tokens === "number" ? value.input_tokens : 0, output_tokens: typeof value.output_tokens === "number" ? value.output_tokens : 0 };
+        }
+        const output = Array.isArray(response.output) ? response.output : [];
+        stopReason = response.status === "incomplete" ? "max_tokens" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_use" : "end_turn";
       }
-      thinkingValue += frame.delta;
-      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "thinking_delta", thinking: frame.delta } })}\n\n`);
-    } else if (frame.type === "response.output_item.added" && record(frame.item, "item").type === "function_call") {
-      closeBlock();
-      openTool();
-      const item = record(frame.item, "item");
-      frames.push(`event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: blockIndex, content_block: { type: "tool_use", id: item.call_id ?? "", name: item.name ?? "", input: {} } })}\n\n`);
-    } else if (frame.type === "response.function_call_arguments.delta" && typeof frame.delta === "string") {
-      frames.push(`event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: blockIndex, delta: { type: "input_json_delta", partial_json: frame.delta } })}\n\n`);
-    } else if (frame.type === "response.output_item.done" && record(frame.item, "item").type === "function_call") {
-      closeBlock();
-    } else if (frame.type === "response.completed" || frame.type === "response.incomplete" || frame.type === "response.failed") {
-      const response = record(frame.response, "response");
-      closeBlock();
-      if (record(response.usage ?? {}, "usage") && response.usage !== null) {
-        const value = record(response.usage, "usage");
-        usage = { input_tokens: typeof value.input_tokens === "number" ? value.input_tokens : 0, output_tokens: typeof value.output_tokens === "number" ? value.output_tokens : 0 };
-      }
-      const output = Array.isArray(response.output) ? response.output : [];
-      stopReason = response.status === "incomplete" ? "max_tokens" : output.some((entry) => record(entry, "output").type === "function_call") ? "tool_use" : "end_turn";
+      if (frames.length === from) continue;
+      const chunk = frames.slice(from).join("");
+      safely(() => state.onChunk?.(chunk));
+      yield chunk;
     }
+    emit("message_delta", { type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0 } });
+    emit("message_stop", { type: "message_stop" });
+    const tail = frames.slice(-2).join("");
+    safely(() => state.onChunk?.(tail));
+    yield tail;
   }
-  frames.push(`event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: stopReason, stop_sequence: null }, usage: { output_tokens: typeof usage.output_tokens === "number" ? usage.output_tokens : 0 } })}\n\n`);
-  frames.push('event: message_stop\ndata: {"type": "message_stop"}\n\n');
-  const text = frames.join("");
-  safely(() => state.onChunk?.(text));
   if (!state.stream) {
     // 非流式：聚合为完整 Message JSON。
+    for await (const chunk of iterate()) void chunk;
     const content: Json[] = [];
     let current: Json | undefined;
     for (const frame of frames) {
@@ -381,6 +448,7 @@ async function renderAnthropicClient(responsesSse: ReadableStream<Uint8Array>, s
       if (!target) continue;
       if (delta.type === "text_delta" && typeof delta.text === "string") target.text = `${target.text}${delta.text}`;
       else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") target.thinking = `${target.thinking}${delta.thinking}`;
+      else if (delta.type === "signature_delta" && typeof delta.signature === "string") target.signature = `${target.signature}${delta.signature}`;
       else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
         // 参数按块整段缓存后一次性解析（上游 functionCall 本就整帧到达）。
         try {
@@ -397,7 +465,7 @@ async function renderAnthropicClient(responsesSse: ReadableStream<Uint8Array>, s
     };
     return Response.json(message);
   }
-  return new Response(strBytes(text), { headers: sseHeaders() });
+  return incrementalSseResponse(iterate(), responsesSse);
 }
 
 /** 解析 AGY 自产的 Responses SSE（受信输入：严格 JSON，忽略 event 行）。 */
@@ -423,13 +491,6 @@ async function* iterateOwnSse(body: ReadableStream<Uint8Array>): AsyncGenerator<
   } finally {
     try { reader.releaseLock(); } catch { /* 读取已由取消收尾。 */ }
   }
-}
-
-function strBytes(text: string): ArrayBuffer {
-  const bytes = encoder.encode(text);
-  const buffer = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(buffer).set(bytes);
-  return buffer;
 }
 
 function sseHeaders(): Headers {
