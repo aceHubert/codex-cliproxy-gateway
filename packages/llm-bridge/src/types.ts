@@ -37,7 +37,7 @@ export interface ConvertRequestOptions {
 }
 
 export interface ConvertRequestResult {
-  /** 目标协议请求体；from === to 时为源体的结构化克隆直通。 */
+  /** 目标协议请求体；from === to 时结构化克隆直通，保留工具信封的位置。 */
   body: Record<string, unknown>;
   /** 工具身份映射（含 custom/namespace 语义），供响应侧还原。 */
   tools: ToolIdentityMap;

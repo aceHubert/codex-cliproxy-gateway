@@ -651,7 +651,10 @@ test("Responses 入口：非 muse-spark 的 responses 协议模型不受净化�
       body: JSON.stringify({
         model: "opencode-zen/gpt-echo-responses",
         input: [
-          { type: "additional_tools", role: "developer", tools: [{ type: "web_search", search_content_types: ["news"] }] },
+          { type: "additional_tools", role: "developer", tools: [
+            { type: "web_search", search_content_types: ["news"] },
+            { type: "function", name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } },
+          ] },
           { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
         ],
         stream: true,
@@ -661,8 +664,12 @@ test("Responses 入口：非 muse-spark 的 responses 协议模型不受净化�
     await response.text();
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
     const input = up.body.input as Json[];
-    assert.equal(input.length, 2, "非 muse-spark 模型不剥离 additional_tools");
-    assert.deepEqual(input[0]!.tools, [{ type: "web_search", search_content_types: ["news"] }], "信封项内容原样保留（含 web_search 参数）");
+    assert.equal(input.length, 2, "原生 Responses 保留 additional_tools 的历史位置");
+    assert.deepEqual(input[0]!.tools, [
+      { type: "web_search", search_content_types: ["news"] },
+      { type: "function", name: "read", parameters: { type: "object", properties: { path: { type: "string" } } } },
+    ], "非 muse-spark 原样保留声明和搜索参数");
+    assert.ok((up.body.tools as Json[]).some((tool) => tool.name === "read"), "历史信封里的 read 不替代门禁所检查的顶层声明");
   });
 });
 
@@ -691,11 +698,13 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
         model: "opencode-zen/nemotron-3.5-lightning-free",
         instructions: "SYS-INSTR",
         input: [
+          { type: "additional_tools", role: "developer", tools: [
+            { type: "function", name: "lookup_issue", description: "lookup", parameters: { type: "object", properties: { issue: { type: "number" } } } },
+          ] },
           { type: "message", role: "user", content: [{ type: "input_text", text: "look up 42" }] },
           { type: "function_call", call_id: "call_1", name: "lookup_issue", arguments: "{\"issue\":42}" },
           { type: "function_call_output", call_id: "call_1", output: "issue 42: example" },
         ],
-        tools: [{ type: "function", name: "lookup_issue", description: "lookup", parameters: { type: "object", properties: { issue: { type: "number" } } } }],
         stream: true,
       }),
     }));
@@ -709,7 +718,54 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
     assert.ok(String(messages[0]!.content).startsWith("SYS-INSTR"), "客户端 instructions 原样成为首条 system（不注入模板）");
     assert.ok(messages.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls[0].id === "call_1"));
     assert.ok(messages.some((message) => message.role === "tool" && message.tool_call_id === "call_1"));
+    assert.deepEqual((up.body.tools as Json[]).map((tool) => tool.function.name), ["lookup_issue", "read"], "真实工具先保留，再增补门禁 read");
     assert.equal(up.body.stream, true);
+  });
+});
+
+test("Responses 增补的 custom 工具经过 Zen 门禁后仍可调用并还原命名空间", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create(undefined, {
+      fetch: async (url, init) => {
+        const target = String(url);
+        if (target.endsWith("/inference/v1/models")) return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] });
+        if (target === "https://models.opencode.ai/api.json") {
+          return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
+        }
+        if (target.endsWith("/inference/v1/chat/completions")) {
+          const body = JSON.parse(String(init?.body)) as Json;
+          const tools = body.tools as Json[];
+          const exec = tools.find((tool) => tool.function.name !== "read");
+          assert.ok(exec, "门禁 read 之外必须保留真实工具");
+          assert.equal(tools.length, 2);
+          return sse([
+            chunkFrame({ role: "assistant", tool_calls: [{
+              index: 0, id: "call_exec", type: "function",
+              function: { name: exec.function.name, arguments: JSON.stringify({ input: "return 1;" }) },
+            }] }),
+            chunkFrame({}, "tool_calls"),
+          ]);
+        }
+        throw new Error(`未模拟调用 ${target}`);
+      },
+    });
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: MODEL, stream: false, input: [
+        { type: "additional_tools", role: "developer", tools: [{
+          type: "namespace", name: "functions", tools: [{ type: "custom", name: "exec", description: "执行工具", format: { type: "text" } }],
+        }] },
+        { role: "user", content: "执行工具" },
+      ] }),
+    }));
+    assert.equal(response.status, 200);
+    const result = await response.json() as Json;
+    const call = (result.output as Json[]).find((item) => item.type === "custom_tool_call");
+    assert.ok(call);
+    assert.equal(call.name, "exec");
+    assert.equal(call.namespace, "functions");
+    assert.equal(call.call_id, "call_exec");
+    assert.equal(call.input, "return 1;");
   });
 });
 

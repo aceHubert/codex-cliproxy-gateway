@@ -25,7 +25,7 @@ import type { OpencodeZenModelProtocol, OpencodeZenProbeResult } from "./catalog
 import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
 import { convertOpencodeZenRequest, mergeOpencodeZenToolIdentities, renderOpencodeZenClientOutput } from "./convert.ts";
 import type { OpencodeZenPreparedRequest } from "./convert.ts";
-import { clientErrorResponse } from "@agent-proxy/llm-bridge";
+import { clientErrorResponse, normalizeResponsesToolDeclarations } from "@agent-proxy/llm-bridge";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createOpencodeZenUserAgentStore } from "./user-agent.ts";
@@ -316,7 +316,11 @@ function adaptOpencodeZenUpstreamRequest(
   ctx: ZenUpstreamContext,
 ): ZenUpstreamRequest {
   const adapters = to === from ? ZEN_SAME_PROTOCOL_ADAPTATIONS : ZEN_CROSS_PROTOCOL_ADAPTATIONS;
-  const adapted = adapters[from](converted, ctx);
+  // muse-spark 不识别工具信封；其余原生 Responses 仍按原位置直通。
+  const prepared = to === "responses" && isOpencodeZenMuseSparkUpstreamModel(ctx.upstreamModel)
+    ? { ...converted, body: normalizeResponsesToolDeclarations(converted.body) }
+    : converted;
+  const adapted = adapters[from](prepared, ctx);
   // muse-spark 家族的 /responses 实现受限：适配出口统一做模型级净化，其余模型零变化。
   if (isOpencodeZenMuseSparkUpstreamModel(ctx.upstreamModel)) {
     adapted.body = sanitizeOpencodeZenMuseSparkResponsesBody(adapted.body);
@@ -337,19 +341,9 @@ function isOpencodeZenMuseSparkUpstreamModel(model: string): boolean {
   return model.startsWith(MUSE_SPARK_MODEL_PREFIX);
 }
 
-/** 工具声明去重键：namespace/function/custom/web_search 的身份都落在 type + name 上。 */
-function museSparkToolKey(tool: Record<string, unknown>): string {
-  const type = typeof tool.type === "string" ? tool.type : "";
-  const name = typeof tool.name === "string" ? tool.name : "";
-  return `${type}:${name}`;
-}
-
 /**
  * muse-spark 请求体净化（对不含相关字段的请求体是零变化直返）：
- * - Codex 0.162 起工具声明装在 input 的 `additional_tools` 信封项里（顶层 tools
- *   消失），上游不识别该 input 项类型（400 "`input[0]` did not match any supported
- *   type"）。剥离信封项，工具声明原样提升到顶层 tools——namespace 形态上游可过，
- *   不展平不改名，保证工具调用历史与声明名一致；与顶层同名时保留顶层声明。
+ * - `additional_tools` 信封已由公共桥接入口归一化，此处只处理模型特有的限制。
  * - `search_content_types` 仅 `web_search_preview` 合法，从 `web_search` 定义剥离
  *   （cliproxy 时代同款过滤，2026-10-15 上游复测确认报文）。
  * - 上游不支持 `custom` 工具（400 "`custom` tools are not supported on this
@@ -362,34 +356,13 @@ function museSparkToolKey(tool: Record<string, unknown>): string {
  *   namespace 内层工具同样处理。
  */
 function sanitizeOpencodeZenMuseSparkResponsesBody(body: Record<string, unknown>): Record<string, unknown> {
-  const hoisted: unknown[] = [];
-  const input = Array.isArray(body.input)
-    ? body.input.filter((item) => {
-      if (!isRecord(item) || item.type !== "additional_tools") return true;
-      if (Array.isArray(item.tools)) hoisted.push(...item.tools);
-      return false;
-    })
-    : undefined;
-  let sanitized = body;
-  if (input !== undefined && hoisted.length > 0) {
-    const tools = [...(Array.isArray(body.tools) ? body.tools : [])];
-    const known = new Set(tools.filter(isRecord).map(museSparkToolKey));
-    for (const tool of hoisted) {
-      if (!isRecord(tool) || known.has(museSparkToolKey(tool))) continue;
-      known.add(museSparkToolKey(tool));
-      tools.push(tool);
-    }
-    sanitized = { ...body, input, tools };
-  } else if (input !== undefined) {
-    sanitized = { ...body, input };
-  }
-  if (!Array.isArray(sanitized.tools)) return sanitized;
-  const tools = sanitized.tools
+  if (!Array.isArray(body.tools)) return body;
+  const tools = body.tools
     .map(dropMuseSparkCustomTools)
     .filter((tool) => tool !== undefined)
     .map((tool) => fillMuseSparkToolDescription(stripMuseSparkWebSearchContentType(tool)));
-  if (!tools.some((tool, index) => tool !== (sanitized.tools as unknown[])[index])) return sanitized;
-  return { ...sanitized, tools };
+  if (tools.length === body.tools.length && !tools.some((tool, index) => tool !== (body.tools as unknown[])[index])) return body;
+  return { ...body, tools };
 }
 
 /**

@@ -40,6 +40,55 @@ function fail(message: string): never { throw new AgyRequestError(message); }
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
+
+/** AGY 保持独立转换：增补信封先提升为声明，避免进入普通历史回放。 */
+function normalizeAdditionalTools(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.input)) return body;
+  const envelopes = body.input.filter((item): item is Record<string, unknown> => record(item) && item.type === "additional_tools");
+  if (envelopes.length === 0) return body;
+  if (body.tools !== undefined && !Array.isArray(body.tools)) fail("additional_tools 合并要求 tools 为数组");
+  const groups: unknown[][] = [(body.tools as unknown[] | undefined) ?? []];
+  for (const envelope of envelopes) {
+    if (!Array.isArray(envelope.tools)) fail("additional_tools.tools 必须是数组");
+    groups.push(envelope.tools);
+  }
+  const merge = (entries: unknown[][], inNamespace = false): Record<string, unknown>[] => {
+    const tools: Record<string, unknown>[] = [];
+    const indices = new Map<string, number>();
+    for (const group of entries) {
+      for (const raw of group) {
+        if (!record(raw) || typeof raw.type !== "string" || !raw.type) fail("additional_tools.tools 包含无效工具声明");
+        if (["function", "custom", "namespace"].includes(raw.type) && (typeof raw.name !== "string" || !raw.name)) {
+          fail("additional_tools 工具 name 必须是非空字符串");
+        }
+        if (raw.type === "function" && !record(raw.parameters)) fail(`additional_tools function 工具 ${String(raw.name)} 缺少对象 parameters`);
+        let tool = raw;
+        if (raw.type === "namespace") {
+          if (inNamespace || !Array.isArray(raw.tools)) fail("additional_tools namespace.tools 必须是工具数组且不得嵌套 namespace");
+          tool = { ...raw, tools: merge([raw.tools], true) };
+        }
+        // function/custom 共用名称身份，顶层声明优先于历史信封中的旧类型。
+        const type = tool.type === "function" || tool.type === "custom" ? "callable" : tool.type;
+        const key = JSON.stringify([type, tool.namespace ?? null, tool.name ?? null]);
+        const index = indices.get(key);
+        if (index === undefined) {
+          indices.set(key, tools.length);
+          tools.push(tool);
+        } else if (tool.type === "namespace") {
+          const existing = tools[index]!;
+          tools[index] = { ...existing, tools: merge([existing.tools as unknown[], tool.tools as unknown[]], true) };
+        }
+      }
+    }
+    return tools;
+  };
+  return {
+    ...body,
+    tools: merge(groups),
+    input: body.input.filter((item) => !record(item) || item.type !== "additional_tools"),
+  };
+}
+
 function string(value: unknown, field: string): string {
   if (typeof value !== "string") fail(`${field} 必须是字符串`);
   return value;
@@ -444,6 +493,7 @@ function normalizeSourceItems(body: Record<string, unknown>, to: ClientProtocol)
 
 export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string, to: ClientProtocol = "responses"): AgyTranslatedRequest {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
+  if (to === "responses") body = normalizeAdditionalTools(body);
   body = normalizeSourceItems(body, to);
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("Antigravity 不支持 previous_response_id；请提供完整 input 历史");

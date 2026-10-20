@@ -6,7 +6,7 @@
  * 以 @ai-sdk/*（ai 引擎层，见 engine.ts）为出站拼装底座：三来源先规范化为引擎
  * prompt（V4 消息/部件），经离线捕获得到目标协议请求体，再按目标协议补齐引擎
  * 不表达的合同字段（stream/parallel/strict/reasoning_effort/text.format 等）。
- * to === from 时结构化克隆直通，不执行任何厂商政策。工具身份（custom /
+ * to === from 时结构化克隆直通，保留 Codex 工具信封的位置，不执行任何厂商政策。工具身份（custom /
  * namespace 安全名）在声明、调用历史与 named tool_choice 间共用同一映射，映射
  * 表随结果返回供响应侧还原。
  */
@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { buildTargetBody, type EngineFunctionTool, type EnginePrompt, type EngineToolChoice } from "./engine.ts";
+import { normalizeResponsesToolDeclarations } from "./responses-tools.ts";
 import {
   BridgeConversionError,
   type ConvertRequestOptions,
@@ -469,11 +470,8 @@ function responsesSourceToPrepared(body: Json, registry: ToolRegistry): Prepared
       registry.note(`已剥离 ${type} history 项（插件前处理负责回放或降级）`);
       continue;
     }
-    if (type === "additional_tools" || type === "compaction_trigger") {
-      // additional_tools 是客户端中途增补工具声明的信封项（Codex 实发，MCP 工具挂载
-      // 时进入 input 历史），compaction_trigger 是压缩请求标记：两者不是消息历史，
-      // 网关自身 Responses 路径同样剥离（gateway.ts 的 input 过滤），桥接按同语义
-      // 丢弃并记录；中途增补的工具声明不并入本轮 tools（与网关行为一致）。
+    if (type === "compaction_trigger") {
+      // 工具信封已在入口提升；压缩标记没有工具声明，不进入消息历史。
       registry.note(`已剥离 ${type} history 项（工具增补/压缩标记，不进入消息历史）`);
       continue;
     }
@@ -1327,21 +1325,24 @@ export async function convertRequest(
   from: ClientProtocol,
   /** 调用方 route 协议（to）：请求的源协议、响应的终点。 */
   to: ClientProtocol,
-  body: unknown,
+  inputBody: unknown,
   options?: ConvertRequestOptions,
 ): Promise<ConvertRequestResult> {
-  if (!isRecord(body)) fail("请求正文必须是 JSON 对象");
+  if (!isRecord(inputBody)) fail("请求正文必须是 JSON 对象");
   const notes: string[] = [];
+  const body = to === "responses" ? normalizeResponsesToolDeclarations(inputBody) : inputBody;
   const registry = new ToolRegistry(notes, options?.mapToolName);
 
   if (to === from) {
-    // 同协议直通：保留全部可表达字段与扩展，不执行任何政策；身份表用原名注册
+    // 原生 Responses 保留声明在历史中的位置与缓存前缀；只用合并视图收集身份。
     // （body 未改名，映射名与实际工具一致），供响应侧还原，且不进入 AI SDK 引擎。
     collectPassthroughIdentityNames(to, body, registry);
-    const passthrough = structuredClone(body);
+    const passthrough = structuredClone(inputBody);
     if (options?.model !== undefined) passthrough.model = options.model;
     return { body: passthrough, tools: registry.map, notes, strippedTools: registry.strippedTools };
   }
+
+  if (body !== inputBody) notes.push("已合并 additional_tools 工具声明并移除历史信封");
 
   const prepared = to === "responses"
     ? responsesSourceToPrepared(body, registry)

@@ -13,8 +13,8 @@ import { buildCodebuddyCatalogHeaders, catalogRevision, CODEBUDDY_AGENT_SYSTEM_P
  * CodeBuddy/WorkBuddy 官方目录：`GET {endpoint}/v3/config` 拉取，按 serves scope
  * 交集筛选后合成为 Codex 目录条目。缓存键带 profile + 版本修订 + 账号身份，双指纹
  * （source_hash + content_hash）任一不符或超过 TTL 即重建；缓存文件不含任何凭据。
- * 缓存文件按产品命名（`codebuddy-catalog.json` / `workbuddy-catalog.json`）：单账号设计
- * 下地域不进文件名，切换账号（cache_key 变化）即重建并重写同一文件。
+ * 缓存文件按产品命名（`codebuddy-catalog.json` / `workbuddy-catalog.json`），文件内按
+ * profile 分别保存两地目录；切换账号（cache_key 变化）仅重建对应 profile。
  */
 
 export const CODEBUDDY_PREFIX = "codebuddy/";
@@ -66,7 +66,7 @@ export function codebuddyModelRegion(model: unknown): "cn" | "intl" | undefined 
   return codebuddyModelRoute(model)?.region;
 }
 
-/** 目录缓存文件按产品命名：`codebuddy-catalog.json`、`workbuddy-catalog.json`（单账号设计，地域不进文件名）。 */
+/** 目录缓存文件按产品命名：`codebuddy-catalog.json`、`workbuddy-catalog.json`，地域在文件内分条保存。 */
 export function codebuddyCatalogFileName(product: "cli" | "work"): string {
   return `${catalogProductStem(product)}-catalog.json`;
 }
@@ -381,10 +381,14 @@ interface CacheFile {
   models?: unknown;
 }
 
+interface ProductCacheFile {
+  profiles: Partial<Record<CodebuddyProfile, CacheFile>>;
+}
+
 export interface CodebuddyCatalogStoreOptions {
   /** 缓存目录；每个产品接口各写一个 `{codebuddy|workbuddy}-catalog.json`（旧 `{product}-{cn|intl}-catalog.json` 写入时清理）。 */
   cacheDirectory: string;
-  /** 每个可用产品接口的凭据清单（按前缀产品选出的接口凭据，含同地域回退）。 */
+  /** 每个可用产品×地域接口的凭据清单，含同地域产品回退。 */
   credentials: () => Promise<CodebuddyCredential[]>;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** Codex 自己的目录缓存；目录内容变化时过期它，让 Codex 重新拉取 /models。 */
@@ -409,7 +413,7 @@ interface CatalogFamily {
 
 /**
  * 目录存储：每个产品接口独立的双指纹磁盘缓存 + TTL + 单飞刷新；缓存文件按产品命名
- * （单账号设计下地域不进文件名，切换账号即重写同一文件，cache_key 不符按未命中重建）；
+ * （文件内按 profile 分条保存，cache_key 不符按未命中重建）；
  * 拉取失败回退该接口的 last-good 缓存，单个接口失败不拖垮其余接口的目录族。
  */
 export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOptions) {
@@ -438,7 +442,10 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
 
   function readDisk(profile: CodebuddyProfile, key: string): CachedCatalog | undefined {
     try {
-      const parsed = JSON.parse(fs.readFileSync(cacheFile(profile), "utf8")) as CacheFile;
+      const file = JSON.parse(fs.readFileSync(cacheFile(profile), "utf8")) as ProductCacheFile & CacheFile;
+      // 旧单目录缓存只在身份 key 匹配时读取，下一次写入统一迁移为 profile 分条格式。
+      const parsed = file.profiles === undefined ? file : file.profiles[profile];
+      if (!parsed) return;
       if (parsed.cache_key !== key || typeof parsed.fetched_at !== "number" || !Array.isArray(parsed.models)) return;
       const models = parsed.models as ModelEntry[];
       if (parsed.content_hash !== digest(models)) return;
@@ -446,15 +453,28 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
     } catch { /* 缺失或损坏的缓存按未命中处理。 */ }
   }
 
-  function writeDisk(profile: CodebuddyProfile, value: CachedCatalog, sourceHash: string, previous: ModelEntry[] | undefined): void {
+  function writeDisk(profile: CodebuddyProfile, value: CachedCatalog, previous: ModelEntry[] | undefined): void {
     try {
-      atomicWrite(cacheFile(profile), `${JSON.stringify({
-        cache_key: value.key,
-        fetched_at: value.fetchedAt,
-        source_hash: sourceHash,
-        content_hash: digest(value.models),
-        models: value.models,
-      }, null, 2)}\n`);
+      const profiles: ProductCacheFile["profiles"] = {};
+      try {
+        const file = JSON.parse(fs.readFileSync(cacheFile(profile), "utf8")) as ProductCacheFile;
+        for (const region of ["cn", "intl"] as const) {
+          const sibling = `${region}-${profileProduct(profile)}` as CodebuddyProfile;
+          if (file.profiles?.[sibling]) profiles[sibling] = file.profiles[sibling];
+        }
+      } catch { /* 缺失或损坏的产品文件由内存中的有效缓存重建。 */ }
+      // 迁移旧单目录文件时，另一地域的 last-good 可能已读入内存，也必须一起保留。
+      for (const [sibling, entry] of cached) {
+        if (profileProduct(sibling) !== profileProduct(profile)) continue;
+        profiles[sibling] = {
+          cache_key: entry.key,
+          fetched_at: entry.fetchedAt,
+          source_hash: digest({ key: entry.key, revision: catalogRevision(sibling) }),
+          content_hash: digest(entry.models),
+          models: entry.models,
+        };
+      }
+      atomicWrite(cacheFile(profile), `${JSON.stringify({ profiles }, null, 2)}\n`);
       // 旧产品×地域命名文件已不再读写：新文件落盘后清理残留，运行目录只保留产品文件。
       for (const legacy of legacyCodebuddyCatalogFileNames(profileProduct(profile))) {
         try {
@@ -506,7 +526,7 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
         const previous = cached.get(profile)?.key === key ? cached.get(profile)!.models : undefined;
         cached.set(profile, { key, fetchedAt: now(), models });
         retryAt.delete(profile);
-        writeDisk(profile, cached.get(profile)!, digest({ key, revision: catalogRevision(profile) }), previous);
+        writeDisk(profile, cached.get(profile)!, previous);
       } catch {
         // 拉取失败回退该接口的 last-good（允许陈旧）；完全无缓存的接口跳过其目录族。
         retryAt.set(profile, now() + CATALOG_FAILURE_COOLDOWN_MS);

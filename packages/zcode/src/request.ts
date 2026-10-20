@@ -1,4 +1,4 @@
-import { BridgeConversionError, convertRequest } from "@agent-proxy/llm-bridge";
+import { BridgeConversionError, convertRequest, normalizeResponsesToolDeclarations } from "@agent-proxy/llm-bridge";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
@@ -240,6 +240,13 @@ function segmentZcodeRequestLegs(to: ClientProtocol, body: Record<string, unknow
 /** to 为路由端点（客户端入口）协议：请求方向 to → anthropic，响应方向 anthropic → to。 */
 export async function translateZcodeRequest(body: Record<string, unknown>, upstreamModel: string, to: ClientProtocol = "responses"): Promise<ZcodeTranslatedRequest> {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
+  try {
+    // 工具规划与历史切段都要使用提升后的声明，确保增补的搜索与 namespace 工具可见。
+    if (to === "responses") body = normalizeResponsesToolDeclarations(body);
+  } catch (error) {
+    if (error instanceof BridgeConversionError) throw new ZcodeRequestError(error.message);
+    throw error;
+  }
   if (body.previous_response_id !== undefined && body.previous_response_id !== null && body.previous_response_id !== "") {
     fail("ZCode 不支持 previous_response_id；请提供完整 input 历史");
   }

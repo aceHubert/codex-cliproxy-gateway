@@ -28,17 +28,18 @@ import type { ModelCatalog } from "../apps/gateway/src/types.ts";
 const freeMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0, output: 0 }, ...extra });
 const paidMeta = (extra: Record<string, unknown> = {}) => ({ cost: { input: 0.5, output: 1.5 }, ...extra });
 
-test("Zen 手动目录查询不发网，显式刷新及磁盘重载同步协议、端点和档位", { timeout: 60_000 }, async () => {
+test("Zen 手动目录查询不发网，显式刷新及磁盘重载同步协议、端点、档位和输入模态", { timeout: 60_000 }, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-manual-"));
   try {
     let time = 1_000;
     let calls = 0;
     let npm = "@ai-sdk/openai-compatible";
     let levels = ["low"];
+    let input = ["text"];
     const options = { cacheDirectory: directory, now: () => time,
       fetchCatalog: async () => { calls++; return { data: [{ id: "one-free" }] }; },
       fetchMetadata: async () => { calls++; return { opencode: { api: "https://zen.invalid/v1", models: { "one-free": freeMeta({
-        provider: { npm }, reasoning_options: [{ type: "effort", values: levels }],
+        provider: { npm }, reasoning_options: [{ type: "effort", values: levels }], modalities: { input },
       }) } } }; } };
     const store = createOpencodeZenCatalogStore({ ...options, catalogMode: "manual" });
     assert.deepEqual(await store.catalog(), []);
@@ -46,14 +47,19 @@ test("Zen 手动目录查询不发网，显式刷新及磁盘重载同步协议�
     await store.refresh();
     time += 700_000;
     assert.equal((await store.catalog())[0]!.slug, "opencode-zen/one-free");
+    assert.deepEqual((await store.catalog())[0]!.input_modalities, ["text"]);
     assert.equal(calls, 2);
     npm = "@ai-sdk/anthropic";
     levels = ["high", "max"];
+    input = ["text", "image", "video"];
     await createOpencodeZenCatalogStore(options).refresh(true);
     await store.reload();
     assert.equal(store.protocol("one-free"), "anthropic");
     assert.equal(store.endpoint("one-free"), "https://zen.invalid/v1");
     assert.deepEqual(store.effortLevels("one-free"), ["high", "max"]);
+    assert.deepEqual((await store.catalog())[0]!.input_modalities, ["text", "image"]);
+    const catalog = JSON.parse(fs.readFileSync(path.join(directory, "opencode-zen-catalog.json"), "utf8"));
+    assert.deepEqual(catalog.models[0].input_modalities, ["text", "image"], "成品目录落盘保留图片能力");
     assert.equal(calls, 4);
     const missing = createOpencodeZenCatalogStore({ cacheDirectory: path.join(directory, "missing"), catalogMode: "manual",
       fetchCatalog: async () => { throw new Error("离线"); } });
@@ -107,6 +113,37 @@ test("目录条目：slug 带 opencode-zen/ 前缀，display_name 带 OP-ZEN/ �
   assert.deepEqual(entry.input_modalities, ["text"]);
   assert.equal(entry.supports_parallel_tool_calls, true);
   assert.match(String(entry.description), /按模型端点协议自动转换/);
+});
+
+test("官方 modalities.input 按模型映射目录图片能力，仅保留客户端支持的输入模态", () => {
+  const metadata = parseOpencodeZenMetadataResponse({ opencode: { models: {
+    "glm-5.3-flash-free": freeMeta({ modalities: { input: ["text", "image", "video", "pdf"] } }),
+    "nemotron-3.5-super-vl-free": freeMeta({ modalities: { input: ["text", "image", "image"] } }),
+    "mimo-v2.6-flash-free": freeMeta({ modalities: { input: ["text", "image", "audio", "video"] } }),
+    "cat-jam-free": freeMeta({ modalities: { input: ["text"] }, attachment: true }),
+  } } });
+  assert.deepEqual(metadata!["glm-5.3-flash-free"]!.inputModalities, ["text", "image"]);
+  assert.deepEqual(metadata!["nemotron-3.5-super-vl-free"]!.inputModalities, ["text", "image"]);
+  const models = buildOpencodeZenCatalog(Object.keys(metadata!), metadata).models;
+  assert.deepEqual(models.map((entry) => [entry.slug, entry.input_modalities]), [
+    ["opencode-zen/glm-5.3-flash-free", ["text", "image"]],
+    ["opencode-zen/nemotron-3.5-super-vl-free", ["text", "image"]],
+    ["opencode-zen/mimo-v2.6-flash-free", ["text", "image"]],
+    ["opencode-zen/cat-jam-free", ["text"]],
+  ]);
+});
+
+test("输入模态缺失、畸形或不受支持时保守回退文本，不按 attachment 或模型名称推断图片", () => {
+  const models = {
+    "vision-free": freeMeta({ attachment: true }),
+    "null-free": freeMeta({ modalities: null }),
+    "scalar-free": freeMeta({ modalities: { input: "image" } }),
+    "empty-free": freeMeta({ modalities: { input: [] } }),
+    "unsupported-free": freeMeta({ modalities: { input: ["audio", "video", "pdf", "IMAGE", null, {}] } }),
+  };
+  const metadata = parseOpencodeZenMetadataResponse({ opencode: { models } });
+  const catalog = buildOpencodeZenCatalog([...Object.keys(models), "unknown-free"], metadata);
+  for (const entry of catalog.models) assert.deepEqual(entry.input_modalities, ["text"], String(entry.slug));
 });
 
 test("reasoning effort 档位取实时元数据：effort 型暴露真实值域，toggle/budget 型不暴露", () => {

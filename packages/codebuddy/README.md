@@ -17,4 +17,9 @@ bun add @agent-proxy/codebuddy
 显式装配，并依赖宿主注入 `HostServices`；使用前需在对应客户端完成登录。
 模型预设已内联到发布产物，无需安装私有 `@agent-proxy/models` 包。
 
+账号选择为 `auto` 时，插件依据本地 `.info` 登录凭据分别拉取 CN 和国际版目录；
+两地都有可用登录时，`codebuddy-cn/*` 与 `codebuddy-intl/*` 同时展示和参与模型同步。
+锁定账号时只展示该账号当前地域。每个产品的缓存文件内部按 profile 独立保存目录，
+单侧拉取失败会回退该侧缓存，不影响另一侧；客户端模型推送同样保留两个地域的模型 ID。
+
 [项目源码与文档](https://github.com/aceHubert/codex-cliproxy-gateway)
