@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.16.0 (2026-10-20)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `opencode-zen`, `zcode`
+  * [#26](https://github.com/aceHubert/codex-cliproxy-gateway/pull/26) feat(catalog): codebuddy 双地域目录、additional_tools 适配与模型推送档位修复 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.15.1 (2026-10-19)
 
 #### :bug: Bug Fix
