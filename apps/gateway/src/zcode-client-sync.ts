@@ -116,7 +116,9 @@ function readJsonFile(file: string): Record<string, unknown> {
  * 把网关本地 agent 插件模型清单按 ID 全量替换进 ZCode 的受管 provider `agent-proxy`
  * （AgentProxy 同构 / anthropic-messages / 网关本地根地址；缺失时自动创建）：
  * - `provider_config.json`：受管 rule 的 modelOrder/personalModelIds 换为新清单，其
- *   providerModelRules 与清单一一对齐，同步 inputFormat.supportsImage，providerOrder 补齐；
+ *   providerModelRules 与清单一一对齐，同步 inputFormat.supportsImage 与
+ *   reasoningLevel 档位（档位选择器只读规则字段，config.json 的 reasoning 不驱动
+ *   选择器），providerOrder 补齐；
  * - `config.json`：受管 provider 的 `models` 映射及模型定义均按当前目录重建；
  *   `zcode.deletedModels` 视为用户删除意图，跳过且数组不动；
  * - 受管 provider 的手动模型规则清除，避免旧能力覆盖当前目录；其他 provider 保留；
@@ -219,7 +221,10 @@ export function pushZcodeModels(models: readonly ModelEntry[], options: ZcodePus
   const syncedRules = newSlugs.map((slug) => {
     const model = bySlug.get(slug.toLowerCase())!;
     const context = modelContextWindow(model);
+    const efforts = modelReasoningEfforts(model);
     // 新版 ZCode 的视觉标签读取规则字段，按本次目录重建并清除过时属性。
+    // 档位同理：选择器读 optionSpecs.reasoningLevel.values（schema 仅接受 values/map，
+    // 默认档位取末位），目录无档位的模型不写，保持 ZCode 的 enabled/disabled 开关兜底。
     return {
       modelId: slug,
       providerId,
@@ -228,6 +233,7 @@ export function pushZcodeModels(models: readonly ModelEntry[], options: ZcodePus
           ...(context === undefined ? {} : { contextWindow: context }),
           inputFormat: { supportsImage: modelInputModalities(model).includes("image") },
         },
+        ...(efforts.length > 0 ? { optionSpecs: { reasoningLevel: { values: [...efforts] } } } : {}),
       },
     };
   });
