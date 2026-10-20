@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.15.1 (2026-10-19)
+
+#### :bug: Bug Fix
+* `agy`
+  * [#25](https://github.com/aceHubert/codex-cliproxy-gateway/pull/25) fix(agy): 支持 macOS 钥匙串优先读取授权凭据 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.15.0 (2026-10-19)
 
 #### :rocket: New Feature

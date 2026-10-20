@@ -100,8 +100,8 @@ export interface WebUiContext {
     qoderCnDesktopDir?: string | null;
     /** Antigravity 凭据文件注入；缺省按平台默认位置探测。 */
     agyCredentialFile?: string;
-    /** Antigravity 钥匙串条目探测注入（测试隔离本机真实 gemini/antigravity 条目）。 */
-    agyProbeKeychain?: () => boolean;
+    /** Antigravity 存在性探测注入；测试可隔离本机钥匙串。 */
+    agyCredentialProbe?: Parameters<typeof agyCredentialsPresent>[1];
   };
   /**
    * 模型选择功能的测试注入点：上游 key 读取与「停止 Codex app-server」。
@@ -484,7 +484,7 @@ function configResponse(
       qoderSources,
       agy: agyCredentialsPresent(
         providerDeps?.agyCredentialFile ?? defaultAgyCredentialFile(paths.home),
-        providerDeps?.agyProbeKeychain ? { probeKeychain: providerDeps.agyProbeKeychain } : {},
+        providerDeps?.agyCredentialProbe,
       ),
     },
     readonly: {

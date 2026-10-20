@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import test from "./host-test.ts";
 import {
   AgyCredentialError,
@@ -115,26 +114,26 @@ test("agy 钥匙串优先：合法令牌屏蔽文件，无合法令牌才回落�
     token: { access_token: "ya29.file-access", refresh_token: "1//0g.file-refresh", expiry: "" },
     auth_method: "consumer",
   });
-  const fileDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-priority-"));
-  const credentialFile = path.join(fileDir, "antigravity-oauth-token");
-  const noFile = path.join(fileDir, "missing");
+  const credentialFile = "/synthetic/antigravity-oauth-token";
+  const noFile = "/synthetic/missing";
 
   // ① 钥匙串有合法（未过期）令牌：直接采用，文件被完全屏蔽（哪怕内容合法且不同）。
-  fs.writeFileSync(credentialFile, fileJson);
+  let fileReads = 0;
   const masked = loadAgyCredentials({
-    credentialFile, os: "darwin", readFile: (f) => f === credentialFile ? fileJson : (() => { throw new Error("ENOENT"); })(),
+    credentialFile, os: "darwin", readFile: () => { fileReads++; return fileJson; },
     readKeychain: () => keychainValue("2099-01-01T00:00:00Z"),
   });
   assert.equal(masked.accessToken, "ya29.keychain-access");
+  assert.equal(fileReads, 0);
   // 钥匙串合法时文件损坏也不影响（根本不读文件）。
-  fs.writeFileSync(credentialFile, "{broken");
   const maskedBrokenFile = loadAgyCredentials({
-    credentialFile, os: "darwin", readFile: (f) => f === credentialFile ? "{broken" : (() => { throw new Error("ENOENT"); })(),
+    credentialFile, os: "darwin", readFile: () => { fileReads++; return "{broken"; },
     readKeychain: () => keychainValue("2099-01-01T00:00:00Z"),
   });
   assert.equal(maskedBrokenFile.accessToken, "ya29.keychain-access");
+  assert.equal(fileReads, 0);
 
-  // ② 钥匙串令牌已过期：回落文件（daemon 只刷新文件，过期后由文件兜底）。
+  // ② 钥匙串令牌已过期：回落文件。
   const fallback = loadAgyCredentials({
     credentialFile, os: "darwin", readFile: (f) => f === credentialFile ? fileJson : (() => { throw new Error("ENOENT"); })(),
     readKeychain: () => keychainValue("2000-01-01T00:00:00Z"),
@@ -156,13 +155,11 @@ test("agy 钥匙串优先：合法令牌屏蔽文件，无合法令牌才回落�
   }), /未检测到 Antigravity CLI 登录.*gemini\/antigravity 无可用令牌.*missing/);
 
   // ⑤ 钥匙串格式异常：回落文件；文件也缺失时报未登录并带上钥匙串问题。
-  fs.writeFileSync(credentialFile, fileJson);
   const malformedFallsBack = loadAgyCredentials({
     credentialFile, os: "darwin", readFile: (f) => f === credentialFile ? fileJson : (() => { throw new Error("ENOENT"); })(),
     readKeychain: () => "not-the-prefix",
   });
   assert.equal(malformedFallsBack.accessToken, "ya29.file-access");
-  fs.rmSync(credentialFile);
   assert.throws(() => loadAgyCredentials({
     credentialFile, os: "darwin", readFile: () => { throw new Error("ENOENT"); },
     readKeychain: () => "not-the-prefix",
@@ -180,10 +177,100 @@ test("agy 钥匙串优先：合法令牌屏蔽文件，无合法令牌才回落�
   }), /当前平台无钥匙串回退/);
 
   // ⑦ 钥匙串无合法令牌且文件损坏：损坏显式报错（不静默当作缺失）。
-  fs.writeFileSync(credentialFile, "{broken");
   assert.throws(() => loadAgyCredentials({
     credentialFile, os: "darwin", readFile: (f) => f === credentialFile ? "{broken" : (() => { throw new Error("ENOENT"); })(),
     readKeychain: () => keychainValue("2000-01-01T00:00:00Z"),
   }), /不是有效 JSON/);
-  fs.rmSync(fileDir, { recursive: true, force: true });
+});
+
+function keychainToken(expiry?: string): string {
+  return `go-keyring-base64:${Buffer.from(JSON.stringify({
+    token: { access_token: "synthetic-keychain", refresh_token: "synthetic-identity", expiry },
+  })).toString("base64")}`;
+}
+
+test("agy 钥匙串过期时间未知时保持优先，且不触碰凭据文件", TIMEOUT, () => {
+  for (const expiry of [undefined, "", "invalid-expiry"]) {
+    let fileReads = 0;
+    const credential = loadAgyCredentials({
+      os: "darwin", credentialFile: "/synthetic/missing-token",
+      readKeychain: () => keychainToken(expiry),
+      readFile: () => { fileReads++; throw new Error("ENOENT"); },
+    });
+    assert.equal(credential.accessToken, "synthetic-keychain");
+    assert.equal(credential.expiryMs, 0);
+    assert.equal(fileReads, 0);
+  }
+});
+
+test("agy 钥匙串缺失、JSON 损坏或缺少令牌时按顺序回落文件", TIMEOUT, () => {
+  const invalidValues = [
+    undefined,
+    "go-keyring-base64:" + Buffer.from("{broken").toString("base64"),
+    "go-keyring-base64:" + Buffer.from(JSON.stringify({ token: {} })).toString("base64"),
+  ];
+  for (const value of invalidValues) {
+    const calls: string[] = [];
+    const credential = loadAgyCredentials({
+      os: "darwin", credentialFile: "/synthetic/token",
+      readKeychain: () => {
+        calls.push("keychain");
+        if (value === undefined) throw new Error("unavailable");
+        return value;
+      },
+      readFile: () => {
+        calls.push("file");
+        return JSON.stringify({ token: { access_token: "synthetic-file" } });
+      },
+    });
+    assert.equal(credential.accessToken, "synthetic-file");
+    assert.deepEqual(calls, ["keychain", "file"]);
+  }
+});
+
+test("agy 凭据每次重新读取钥匙串，账号变化不会沿用旧令牌", TIMEOUT, () => {
+  let current = keychainToken("2099-01-01T00:00:00Z");
+  const options = {
+    os: "darwin" as const,
+    readKeychain: () => current,
+    readFile: () => { assert.fail("有效钥匙串不应读取文件"); },
+  };
+  const first = loadAgyCredentials(options);
+  current = `go-keyring-base64:${Buffer.from(JSON.stringify({
+    token: { access_token: "synthetic-next-account", refresh_token: "next-identity", expiry: "2099-01-01T00:00:00Z" },
+  })).toString("base64")}`;
+  const second = loadAgyCredentials(options);
+  assert.equal(second.accessToken, "synthetic-next-account");
+  assert.notEqual(first.identity, second.identity);
+});
+
+test("agy 钥匙串读取失败不会把子进程错误内容带入登录错误", TIMEOUT, () => {
+  assert.throws(() => loadAgyCredentials({
+    os: "darwin", credentialFile: "/synthetic/missing-token",
+    readKeychain: () => { throw new Error("synthetic-sensitive-stdout"); },
+    readFile: () => { throw new Error("ENOENT"); },
+  }), (error: unknown) => {
+    assert.ok(error instanceof AgyCredentialError);
+    assert.match(error.message, /钥匙串不可读或读取超时/);
+    assert.ok(!error.message.includes("synthetic-sensitive-stdout"));
+    return true;
+  });
+});
+
+test("agy 非 macOS 平台只读文件并使用对应平台的默认路径", TIMEOUT, () => {
+  for (const platform of ["linux", "win32"] as const) {
+    let keychainReads = 0;
+    let requestedFile = "";
+    const credential = loadAgyCredentials({
+      home: "/synthetic/home", os: platform,
+      readKeychain: () => { keychainReads++; return keychainToken("2099-01-01T00:00:00Z"); },
+      readFile: (file) => {
+        requestedFile = file;
+        return JSON.stringify({ token: { access_token: "synthetic-file" } });
+      },
+    });
+    assert.equal(credential.accessToken, "synthetic-file");
+    assert.equal(keychainReads, 0);
+    assert.equal(requestedFile, defaultAgyCredentialFile("/synthetic/home", platform));
+  }
 });
