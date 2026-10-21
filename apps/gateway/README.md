@@ -262,6 +262,8 @@ agent-proxy config --log off
 
 | 命令 | 用途 |
 | --- | --- |
+| `agent-proxy -v` | 查看当前 CLI 版本（等价 `--version`）。 |
+| `agent-proxy -h` | 查看命令帮助（等价 `--help`）。 |
 | `agent-proxy status` | 查看网关状态、当前模式及安装信息。 |
 | `agent-proxy start` | 启动网关。 |
 | `agent-proxy stop` | 停止网关及后台 Web 界面。 |

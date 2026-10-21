@@ -143,6 +143,8 @@ function usage() {
   console.log(`agent-proxy - Bun gateway for Codex Desktop and CLI
 
 Usage:
+  agent-proxy -v | --version
+  agent-proxy -h | --help
   agent-proxy install [options] [--upstream-only] [--restart-codex]
   agent-proxy uninstall [--restart-codex]
   agent-proxy start|stop
@@ -280,12 +282,17 @@ function parseArgs(args: string[]): { positional: string[]; options: CliOptions 
   const options: CliOptions = {};
   for (let i = 0; i < args.length; i += 1) {
     const value = args[i];
+    // -v/-h 是 --version/--help 的唯一短别名；其余单杠写法仍按位置参数处理，由未知命令报错兜底。
+    if (value === "-v" || value === "-h") {
+      options[value === "-v" ? "version" : "help"] = true;
+      continue;
+    }
     if (!value.startsWith("--")) {
       positional.push(value);
       continue;
     }
     const key = value.slice(2);
-    if (["help", "sync", "restart-codex", "yes", "manual-codex-config", "start", "daemon", "status", "stop", "restart", "switch"].includes(key)
+    if (["help", "version", "sync", "restart-codex", "yes", "manual-codex-config", "start", "daemon", "status", "stop", "restart", "switch"].includes(key)
       || (["upstream-only", "cpa-only"].includes(key) && args[0] !== "config")) {
       options[key] = true;
       continue;
@@ -2425,7 +2432,13 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
 export async function runCli(args: string[]): Promise<void> {
   const { positional, options } = parseArgs(args);
   const command = positional[0];
-  if (!command || command === "help" || options.help) {
+  // --version/-v 与帮助同属全局入口：只在无命令时短路，带命令落入选项白名单按未知选项报错。
+  if (options.version === true && !command) {
+    console.log(GATEWAY_CONFIG_VERSION);
+    return;
+  }
+  // 帮助只服务全局调用：带命令时 -h/--help 不短路，落入选项白名单按未知选项报错。
+  if (!command || command === "help") {
     usage();
     return;
   }
