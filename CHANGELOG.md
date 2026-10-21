@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.17.0 (2026-10-21)
+
+#### :rocket: New Feature
+* [#27](https://github.com/aceHubert/codex-cliproxy-gateway/pull/27) feat(cli): 支持 -v 与 -h 短旗标 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.16.0 (2026-10-20)
 
 #### :rocket: New Feature
