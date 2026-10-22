@@ -125,6 +125,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     { plan: "individual-coding-plan" },
     { plan: "team-coding-plan" },
   ];
+  const identity = dependencies.identity ?? readZcodeIdentity();
   let synchronizeAPIKeyRoutes: (strict?: boolean) => void = () => {};
   const republishFromPlans = (force = false) => {
     const current = planRoutes.map((route) => route.snapshot);
@@ -154,6 +155,8 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       ?? (injected ? undefined : createZcodeConfigCache(home, {
         plan: route.plan,
         refreshOnStart: false,
+        // 个人套餐项目令牌签发按官方客户端上报版本。
+        clientVersion: identity.appVersion,
         // 选择变化只撤下本套餐的快照并重发并集；另一个套餐的条目不受影响。
         onSelectionChange: () => {
           if (manual) return;
@@ -226,7 +229,6 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
   }
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
   const activeRequests = new Set<AbortController>();
-  const identity = dependencies.identity ?? readZcodeIdentity();
   const endpointRouting = dependencies.endpointRouting !== null
     ? dependencies.endpointRouting ?? new ZcodeEndpointRouting({
       identity,
