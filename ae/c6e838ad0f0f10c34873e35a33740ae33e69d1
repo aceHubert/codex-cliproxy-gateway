@@ -1,0 +1,19 @@
+docs/histories/2026-10/20261023-0117-zcode-individual-project-token.md
+  s_d562f670623a19::t_bafd2284b39b57 1-52
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aec6e838ad0f0f10c34873e35a33740ae33e69d1",
+  "prompts": {},
+  "sessions": {
+    "s_d562f670623a19": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_667674c5a87c8c24aca19bda78ba4998",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
