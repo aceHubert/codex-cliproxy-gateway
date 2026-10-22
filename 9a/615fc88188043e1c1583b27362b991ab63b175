@@ -1,0 +1,43 @@
+packages/zcode/src/individual-project-token.ts
+  s_d562f670623a19::t_110877952ac5ac 178-180,184-188
+  s_d562f670623a19::t_e79e5f8841c1aa 151-152
+  s_d562f670623a19::t_f915692adf3ce4 1-150,153-177,181-183,189-196,201-229
+  s_d562f670623a19::t_e9b8bca9bdc793 197-200
+test/zcode-cache.test.ts
+  s_d562f670623a19::t_a831dab92838a3 676,690,694-695,701-705
+  s_d562f670623a19::t_ad86073cf45ca8 739-827,830-867
+  s_d562f670623a19::t_b238434c099bd7 828-829
+  s_d562f670623a19::t_55834963a202db 559-596,598,600-611
+  s_d562f670623a19::t_836adce5166f80 656
+  s_d562f670623a19::t_fa7e0a886f12cc 597,599
+  s_d562f670623a19::t_ada048c3dd6f8e 10
+packages/zcode/src/config.ts
+  s_d562f670623a19::t_4c43c5b4aebd66 704-709
+  s_d562f670623a19::t_1c1168d1b13341 601-606
+  s_d562f670623a19::t_2115dd6af9f9a2 6-11
+  s_d562f670623a19::t_f9e78c8e6a69d6 69-70
+  s_d562f670623a19::t_cd183d748887e2 876-941
+  s_d562f670623a19::t_ad7779ac4241aa 141-150
+  s_d562f670623a19::t_e2a1ffc722077c 739-763,767-776
+  s_d562f670623a19::t_282aee4963f8b4 539-545
+  s_d562f670623a19::t_aad239ea7ccf31 5
+packages/zcode/src/index.ts
+  s_d562f670623a19::t_0d9ebe842c38f0 128
+  s_d562f670623a19::t_fc9efbcec8b428 158-159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9a615fc88188043e1c1583b27362b991ab63b175",
+  "prompts": {},
+  "sessions": {
+    "s_d562f670623a19": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_667674c5a87c8c24aca19bda78ba4998",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
