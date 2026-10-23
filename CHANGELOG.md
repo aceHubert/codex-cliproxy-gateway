@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.18.0 (2026-10-23)
+
+#### :rocket: New Feature
+* `zcode`
+  * [#28](https://github.com/aceHubert/codex-cliproxy-gateway/pull/28) feat(zcode): 个人套餐适配 3.16 项目令牌在线签发 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.17.0 (2026-10-21)
 
 #### :rocket: New Feature
