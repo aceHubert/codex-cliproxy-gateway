@@ -1,0 +1,112 @@
+packages/zcode/src/request.ts
+  s_4ee29afbe177fb::t_7a25baa7d2fb32 262-263
+  s_4ee29afbe177fb::t_5a10d3654c8f4d 1,5
+  s_4ee29afbe177fb::t_075c7f089c47b4 281-283
+  s_4ee29afbe177fb::t_2d6970d859fa8e 264
+packages/agy/src/catalog.ts
+  s_4ee29afbe177fb::t_48cbc009986442 276
+  s_4ee29afbe177fb::t_fe1d6011cf3dc6 5,8
+packages/qoder/src/index.ts
+  s_4ee29afbe177fb::t_175d0ecf230480 179
+packages/codebuddy/src/request.ts
+  s_4ee29afbe177fb::t_e38fa1fc7905a6 258
+  s_4ee29afbe177fb::t_a93789c3de9659 256-257
+  s_4ee29afbe177fb::t_428981cdc94dd2 255
+  s_4ee29afbe177fb::t_615c424a548beb 289-291,296
+  s_4ee29afbe177fb::t_e43622b6ec0054 1,4
+packages/zcode/src/index.ts
+  s_4ee29afbe177fb::t_039d02ef3abc36 9
+  s_4ee29afbe177fb::t_49e58189ad1bd5 25
+  s_4ee29afbe177fb::t_26c45f3ffa4d66 101-104
+packages/agy/src/request.ts
+  s_4ee29afbe177fb::t_3bd48f005adc5b 658-660
+  s_4ee29afbe177fb::t_c253e487c6f783 3
+  s_4ee29afbe177fb::t_3ef07de8a0e57b 545-546
+packages/codebuddy/src/index.ts
+  s_4ee29afbe177fb::t_6cab3aba310080 175-176
+test/qoder-request.test.ts
+  s_4ee29afbe177fb::t_1577f645ed3e53 4,13-15,21,26-42
+packages/qoder/src/catalog.ts
+  s_4ee29afbe177fb::t_e76189ca23fc0c 5
+  s_4ee29afbe177fb::t_33fbd6293846e0 200
+  s_4ee29afbe177fb::t_f7ce10866acf11 146
+packages/llm-bridge/src/system-prompt.ts
+  s_4ee29afbe177fb::t_519073bd8666ae 20-30,33-37,41-43,45,48-49,51-52
+  s_4ee29afbe177fb::t_9a1b23807a58af 1-19,31-32,38-40,44,46-47,50,53
+test/agy-protocol.test.ts
+  s_4ee29afbe177fb::t_00aa54b8badaed 110,112
+  s_4ee29afbe177fb::t_b496357de82919 4
+  s_4ee29afbe177fb::t_ac7ba119fb27cb 76,78
+test/agent-protocol-matrix.test.ts
+  s_4ee29afbe177fb::t_facdd965e35b10 334
+  s_4ee29afbe177fb::t_42a9e9289e6e2f 79
+  s_4ee29afbe177fb::t_3f68f43bb2b24a 4,7,10
+  s_4ee29afbe177fb::t_d6802907b6cc45 56
+  s_4ee29afbe177fb::t_91178bd7c486d3 121
+  s_4ee29afbe177fb::t_4e196e45a69258 180
+packages/agy/src/index.ts
+  s_4ee29afbe177fb::t_52640db43d373c 175
+test/zcode-request.test.ts
+  s_4ee29afbe177fb::t_23d45a5300ccb6 28-29
+  s_4ee29afbe177fb::t_01ed975690046f 40,46-49,54-61
+  s_4ee29afbe177fb::t_00537cfebcbd0c 4
+  s_4ee29afbe177fb::t_33425e15ad4ae1 62-63
+test/llm-bridge-system-prompt.test.ts
+  s_4ee29afbe177fb::t_8f44bffceeb217 19,21-24,30-32,45-52,57-60,63,69-70,73,77-81
+  s_4ee29afbe177fb::t_657ec934a8c8b3 1-18,20,25-29,33-44,53-56,61-62,64-68,71-72,74-76,82
+test/agy-gateway.test.ts
+  s_4ee29afbe177fb::t_4fef4df722082b 272-274,276
+test/agy-request.test.ts
+  s_4ee29afbe177fb::t_fa5073b4f279b4 4
+  s_4ee29afbe177fb::t_66c6b4086c37ff 135-136
+  s_4ee29afbe177fb::t_926976bf6f8253 288-289
+  s_4ee29afbe177fb::t_8bcea5541a610f 22,31-32,36-46
+  s_4ee29afbe177fb::t_5abea87b3d10dd 47-48
+packages/codebuddy/src/catalog.ts
+  s_4ee29afbe177fb::t_b770603d75a78f 248-250
+  s_4ee29afbe177fb::t_8a8472f5c516c2 6,10
+test/codebuddy-gateway.test.ts
+  s_4ee29afbe177fb::t_2519a407fe6aa6 1049,1055-1059,1062,1066-1068
+packages/qoder/src/request.ts
+  s_4ee29afbe177fb::t_fcf06bef10dae3 67-68
+  s_4ee29afbe177fb::t_69d6f099c86837 86-88,91
+  s_4ee29afbe177fb::t_0308ca10239b88 69
+  s_4ee29afbe177fb::t_9818bcc1baca31 1,4
+  s_4ee29afbe177fb::t_1e3d67e38d8b37 64-66
+packages/llm-bridge/src/index.ts
+  s_4ee29afbe177fb::t_802af7793eea49 28
+test/codebuddy-request.test.ts
+  s_4ee29afbe177fb::t_9ac3b738abe3ad 4,9,25-26
+  s_4ee29afbe177fb::t_a39aa8432fe379 240,245-247,260-261,265-266,275-289
+  s_4ee29afbe177fb::t_1bc40dd44a6051 89,92
+test/qoder-gateway.test.ts
+  s_4ee29afbe177fb::t_974b0618031771 305-308,310
+docs/exec-plans/tech-debt-tracker.md
+  s_4ee29afbe177fb::t_6ab0bd61c9ba90 17
+docs/fingerprint-data.md
+  s_4ee29afbe177fb::t_59a1e21f20919f 9-12
+  s_4ee29afbe177fb::t_a19b2168fffba7 95-96
+  s_4ee29afbe177fb::t_4d2ad39fcca702 17-54
+  s_4ee29afbe177fb::t_d26e67b8e6f04e 217
+  s_4ee29afbe177fb::t_62b35c88602ead 254
+packages/llm-bridge/README.md
+  s_4ee29afbe177fb::t_97e0cc576a014d 21-24
+test/zcode-gateway.test.ts
+  s_4ee29afbe177fb::t_f2ff876300e074 389-391,395-396
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3b9ee864e40b942730c5ee2d4dbedf6ed1387978",
+  "prompts": {},
+  "sessions": {
+    "s_4ee29afbe177fb": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_eac9d67e26b335115e58df220be075f8",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
