@@ -1,0 +1,19 @@
+docs/histories/2026-10/20261023-1058-agent-system-prompt-conversion-layer.md
+  s_4ee29afbe177fb::t_5ea37cca10f47b 1-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "5eb75451c0f3ec12e44e78c81ab1fd7846fdb023",
+  "prompts": {},
+  "sessions": {
+    "s_4ee29afbe177fb": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_eac9d67e26b335115e58df220be075f8",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
