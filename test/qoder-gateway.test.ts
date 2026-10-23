@@ -302,11 +302,12 @@ test("Qoder 国内版使用独立授权与端点生成 Qoder-CN 目录并完成�
     assert.ok(cnFlash, "国内版模型进入目录");
     assert.equal(cnFlash.display_name, "Qoder-CN/Qwen3.8-Flash (free)");
     assert.ok(intlFlash, "国际版目录保持并存");
-    assert.equal(cnFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
-    assert.equal(intlFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT);
-    // 客户端优先按 model_messages.instructions_template 渲染系统提示词：模板必须一并替换。
+    // 目录不再注入官方提示词：条目保持 Codex 基线基底，Qoder CLI 提示词由请求
+    // 转换层整体注入（见 qoder-request 测试），客户端渲染的基底内容在上游被替换。
+    assert.notEqual(cnFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT, "目录不再携带 Qoder 官方提示词");
+    assert.notEqual(intlFlash.base_instructions, QODER_AGENT_SYSTEM_PROMPT);
     const messages = cnFlash.model_messages as { instructions_template?: string } | undefined;
-    assert.equal(messages?.instructions_template, QODER_AGENT_SYSTEM_PROMPT, "instructions_template 必须替换，否则客户端仍发官方提示词");
+    assert.notEqual(messages?.instructions_template, QODER_AGENT_SYSTEM_PROMPT, "instructions_template 保持基底不改写");
     const response = await handler(request("qoder-cn/qfmodel", { stream: false }));
     assert.equal(response.status, 200);
     const payload = await response.json() as Json;

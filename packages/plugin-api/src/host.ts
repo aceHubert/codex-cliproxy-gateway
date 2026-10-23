@@ -35,7 +35,6 @@ export const compileModelOverrides = (value: unknown, source?: string): ModelOve
 export const mergeCatalog = (native: ModelCatalog, proxy: ModelCatalog, prefix?: string, overrides?: ModelOverrideRule[]): ModelCatalog => getHostServices().catalog.mergeCatalog(native, proxy, prefix, overrides);
 export const synthesizeModelEntry = (id: string, priority: number, snapshot: ModelCatalog, vendors?: ModelOverrideRule[], overrides?: ModelOverrideRule[], baseSlug?: string): ModelEntry => getHostServices().catalog.synthesizeModelEntry(id, priority, snapshot, vendors, overrides, baseSlug);
 export const parseCodexCatalog = (value: unknown): ModelCatalog => getHostServices().catalog.parseCodexCatalog(value);
-export const withAgentSystemPrompt = (entry: ModelEntry, prompt: string): ModelEntry => getHostServices().catalog.withAgentSystemPrompt(entry, prompt);
 export const invalidateModelsCache = (file: string) => getHostServices().catalog.invalidateModelsCache(file);
 export const clearModelsCacheEntries = (file: string, matches: (slug: string) => boolean): boolean => getHostServices().catalog.clearModelsCacheEntries(file, matches);
 export const localTime = (at?: Date) => getHostServices().requestLog.localTime(at);

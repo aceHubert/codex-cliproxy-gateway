@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { translateAgyRequest, AgyRequestError } from "@agent-proxy/agy/request";
+import { AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
 import { createAgyClientResponse } from "@agent-proxy/agy/response";
 
 const TIMEOUT = { timeout: 30_000 };
@@ -72,9 +73,9 @@ test("agy chat-completions 源：messages 归一为 contents，工具声明进�
   }, "gemini-3.8-flash", "chat-completions");
   const request = wrapper.request as Json;
   const contents = request.contents as Array<Json>;
-  // system → systemInstruction；user → user；assistant.tool_calls → model functionCall；tool → user functionResponse
+  // system 消息被官方 AGY 提示词整体替换；user → user；assistant.tool_calls → model functionCall；tool → user functionResponse
   const systemInstruction = request.systemInstruction as Json;
-  assert.equal((systemInstruction.parts as Array<Json>)[0]!.text, "系统规则");
+  assert.equal((systemInstruction.parts as Array<Json>)[0]!.text, AGY_AGENT_SYSTEM_PROMPT);
   assert.deepEqual(contents[0]!.role, "user");
   assert.equal(parts(contents[1]!)[0]!.functionCall && (parts(contents[1]!)[0]!.functionCall as Json).name, "shell");
   assert.deepEqual((parts(contents[1]!)[0]!.functionCall as Json).args, { command: "ls" });
@@ -106,8 +107,9 @@ test("agy anthropic 源：tool_use/tool_result 归一为 functionCall/functionRe
   }, "gemini-3.8-flash", "anthropic");
   const request = wrapper.request as Json;
   const contents = request.contents as Array<Json>;
+  // 顶层 system（块数组）同样被官方 AGY 提示词整体替换。
   const systemInstruction = request.systemInstruction as Json;
-  assert.equal((systemInstruction.parts as Array<Json>)[0]!.text, "系统规则");
+  assert.equal((systemInstruction.parts as Array<Json>)[0]!.text, AGY_AGENT_SYSTEM_PROMPT);
   const userParts = parts(contents[0]!);
   assert.equal(userParts[0]!.text, "看图");
   assert.deepEqual(userParts[1]!.inlineData, { mimeType: "image/png", data: "QUJD" });

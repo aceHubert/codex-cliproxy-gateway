@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { QoderRequestError, translateQoderRequest } from "@agent-proxy/qoder/request";
+import { QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
 
 type Json = Record<string, unknown>;
 
@@ -9,20 +10,36 @@ test("Qoder 系统提示在顶层及首条消息保持一致，参数进入 para
     input: "你好", instructions: "请使用中文", max_output_tokens: 128,
     temperature: 0.2, reasoning: { effort: "low" }, parallel_tool_calls: false,
   }, "qfmodel");
-  assert.equal(body.system, "请使用中文");
-  assert.deepEqual((body.messages as Json[])[0], { role: "system", content: "请使用中文" });
+  assert.equal(body.system, QODER_AGENT_SYSTEM_PROMPT, "官方 Qoder 提示词为 system 基底");
+  assert.deepEqual((body.messages as Json[])[0], { role: "system", content: QODER_AGENT_SYSTEM_PROMPT });
+  assert.ok(!JSON.stringify(body).includes("请使用中文"), "客户端 instructions 不进入上游");
   assert.deepEqual(body.parameters, { max_tokens: 128, temperature: 0.2, reasoning_effort: "low", parallel_tool_calls: false });
   assert.deepEqual(body.tools, []);
   assert.equal(body.model, undefined);
 });
 
-test("Qoder 保留 developer 文本与 instructions，并为无提示请求补空 system", async () => {
+test("Qoder 客户端 developer 与 instructions 被官方提示词整体替换", async () => {
   const { body } = await translateQoderRequest({ input: [
     { role: "developer", content: [{ type: "input_text", text: "开发者规则" }] },
     { role: "user", content: "继续" },
   ], instructions: "系统规则" }, "qfmodel");
-  assert.equal(body.system, "系统规则\n\n开发者规则");
-  assert.deepEqual(((await translateQoderRequest({ input: "你好" }, "qfmodel")).body.messages as Json[])[0], { role: "system", content: "" });
+  assert.equal(body.system, QODER_AGENT_SYSTEM_PROMPT);
+  assert.ok(!JSON.stringify(body).includes("系统规则") && !JSON.stringify(body).includes("开发者规则"));
+  assert.deepEqual(((await translateQoderRequest({ input: "你好" }, "qfmodel")).body.messages as Json[])[0],
+    { role: "system", content: QODER_AGENT_SYSTEM_PROMPT }, "无提示请求同样以官方提示词为基底");
+});
+
+test("Qoder 客户端 chat 源的 system 消息被官方提示词整体替换", async () => {
+  const { body } = await translateQoderRequest({
+    messages: [
+      { role: "system", content: "You are Claude Code" },
+      { role: "user", content: "你好" },
+    ],
+  }, "qfmodel", undefined, "chat-completions");
+  assert.equal(body.system, QODER_AGENT_SYSTEM_PROMPT);
+  const messages = body.messages as Json[];
+  assert.deepEqual(messages[0], { role: "system", content: QODER_AGENT_SYSTEM_PROMPT });
+  assert.ok(!JSON.stringify(body).includes("Claude Code"), "客户端 system 消息不进入上游");
 });
 
 test("Qoder 函数和 custom 工具声明及结果往返保持调用关联", async () => {

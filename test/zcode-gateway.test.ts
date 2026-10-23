@@ -386,16 +386,14 @@ test("ZCode 基础模型列表按 API provider 前缀并标记 owned_by zcode", 
       const models = list.data.filter((item: Json) => item.id.startsWith(`zcode-${family}-test/`));
       assert.equal(models.length, 2);
       assert.ok(models.every((item: Json) => item.owned_by === "zcode"));
-      // Codex 形态目录原样透出 base_instructions：Codex 按此字段发送系统提示词。
+      // Codex 形态目录原样透出 base_instructions：目录不再注入提示词，条目保持
+      // vendor 预设基底（空串）；官方 ZCode 提示词由请求转换层整体注入（见
+      // zcode-request 测试），catalog 只描述模型能力。
       const codex = await (await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=0.145.0"))).json() as Json;
       const codexModels = (codex.models as Json[]).filter((item) => String(item.slug).startsWith(`zcode-${family}-test/`));
       assert.equal(codexModels.length, 2);
-      assert.ok(codexModels.every((item) => item.base_instructions === ZCODE_AGENT_SYSTEM_PROMPT));
-      // zcode 合成条目本就不带 model_messages；若带模板必须一并替换（客户端优先按模板渲染）。
-      assert.ok(codexModels.every((item) => {
-        const template = (item.model_messages as { instructions_template?: string } | undefined)?.instructions_template;
-        return template === undefined || template === ZCODE_AGENT_SYSTEM_PROMPT;
-      }));
+      assert.ok(codexModels.every((item) => item.base_instructions === ""));
+      assert.ok(codexModels.every((item) => item.base_instructions !== ZCODE_AGENT_SYSTEM_PROMPT));
     }
   });
 });

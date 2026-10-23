@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "@agent-proxy/zcode/request";
+import { ZCODE_AGENT_SYSTEM_PROMPT } from "@agent-proxy/zcode/request-context";
 import { createZcodeResponse } from "@agent-proxy/zcode/response";
 import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
 
@@ -24,7 +25,8 @@ test("完整保留 function 与 freeform 历史，并按 Anthropic 结构合并�
   });
   const body = result.body;
   assert.equal(body.stream, true);
-  assert.equal(body.system, "遵守项目约束");
+  assert.equal(body.system, ZCODE_AGENT_SYSTEM_PROMPT, "官方 ZCode 提示词为系统槽基底");
+  assert.ok(!JSON.stringify(body).includes("遵守项目约束"), "客户端 instructions 不进入上游");
   const messages = body.messages as Array<{ content: Array<Record<string, unknown>> }>;
   assert.equal(messages.length, 3);
   assert.deepEqual(messages[1].content.map((block) => block.type), ["tool_use", "tool_use"]);
@@ -35,15 +37,28 @@ test("完整保留 function 与 freeform 历史，并按 Anthropic 结构合并�
   assert.deepEqual(result.tools.get(tools[0].name as string), { name: "fs.read", custom: false });
 });
 
-test("保留图片、system 与 developer 内容", async () => {
+test("客户端 system 与 developer 内容被官方提示词整体替换", async () => {
   const result = await translate({ input: [
     { type: "message", role: "system", content: "系统规则" },
     { type: "message", role: "developer", content: "开发规则" },
     { type: "message", role: "user", content: [{ type: "input_text", text: "看图片" }, { type: "input_image", image_url: "data:image/png;base64,aGVsbG8=" }] },
   ] });
-  assert.match(result.body.system as string, /^系统规则\n\n开发规则\n\n/);
+  const system = result.body.system as string;
+  assert.ok(system.startsWith(ZCODE_AGENT_SYSTEM_PROMPT), "官方 ZCode 提示词为系统槽基底");
+  assert.match(system, /图片识别适配/, "网关旁白接续其后");
+  assert.ok(!system.includes("系统规则") && !system.includes("开发规则"), "客户端系统内容不进入上游");
   const image = ((result.body.messages as Array<Record<string, unknown>>)[0].content as Array<Record<string, unknown>>)[1];
   assert.deepEqual(image, { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } });
+});
+
+test("anthropic 客户端的顶层 system 被官方提示词整体替换", async () => {
+  const result = await translateZcodeRequest({
+    system: "You are Claude Code",
+    messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+  }, "glm-5.3", "anthropic");
+  assert.equal(result.body.system, ZCODE_AGENT_SYSTEM_PROMPT);
+  assert.ok(!JSON.stringify(result.body).includes("Claude Code"), "客户端 system 不进入上游");
+  assert.deepEqual(result.body.messages, [{ role: "user", content: [{ type: "text", text: "你好" }] }]);
 });
 
 test("含图片请求声明网关代执行的 analyze_image 并注入适配说明", async () => {

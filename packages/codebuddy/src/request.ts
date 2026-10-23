@@ -1,6 +1,7 @@
-import { BridgeConversionError, convertRequest } from "@agent-proxy/llm-bridge";
+import { BridgeConversionError, convertRequest, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import { decodeCodebuddyReasoning } from "./wire.ts";
 
 /**
@@ -251,6 +252,10 @@ function replayReasoningEnvelope(sourceBody: Json, converted: Json, clientModel:
 
 export async function translateCodebuddyRequest(body: Json, upstreamModel: string, to: ClientProtocol = "responses"): Promise<CodebuddyTranslatedRequest> {
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
+  if (body.instructions !== undefined && typeof body.instructions !== "string") fail("instructions 必须是字符串");
+  // 官方 CLI 主提示词整体替换客户端系统内容（catalog 不再注入，任何客户端协议
+  // 进入都在转换层统一注入）：入口先剥离 instructions/system 等系统级内容。
+  body = stripClientSystemPrompt(to, body);
   let prepared = body;
   let dropped: string[] = [];
   if (to === "responses") {
@@ -281,20 +286,14 @@ export async function translateCodebuddyRequest(body: Json, upstreamModel: strin
   replayReasoningEnvelope(body, converted.body, clientModel, replay && to === "responses");
 
   const messages = converted.body.messages as Json[];
-  const systemParts: string[] = [];
+  // 官方 CLI 主提示词为系统基底（实测上游要求首条消息必须是 system prompt）；
+  // 客户端系统内容已入口剥离，网关旁白接续其后。
+  const systemParts: string[] = [CODEBUDDY_AGENT_SYSTEM_PROMPT];
   if (dropped.length > 0) {
     // 剥离后必须告知模型，否则模型会声称拥有已被移除的能力。
     systemParts.push(`本通道无法执行以下服务器内置工具，已从本请求移除：${dropped.join("、")}。请勿声称已使用这些工具。`);
   }
-  let patchedMessages = messages;
-  if (messages.length > 0 && messages[0]?.role === "system" && systemParts.length > 0) {
-    patchedMessages = [{ ...messages[0]!, content: `${messages[0]!.content ?? ""}\n\n${systemParts.join("\n\n")}`.replace(/^\n\n/, "") }, ...messages.slice(1)];
-  } else if (systemParts.length > 0) {
-    patchedMessages = [{ role: "system", content: systemParts.join("\n\n") }, ...messages];
-  } else if (messages.length === 0 || messages[0]?.role !== "system") {
-    // 实测上游要求首条消息必须是 system prompt（空字符串即可）。
-    patchedMessages = [{ role: "system", content: "" }, ...messages];
-  }
+  const patchedMessages = [{ role: "system", content: systemParts.join("\n\n") }, ...messages];
 
   const translated: Json = {
     ...converted.body,

@@ -269,9 +269,11 @@ test("agy 动态目录合并进 OpenAI 与 Codex 模型列表", TIMEOUT, async (
     assert.equal(flash.display_name, "AGY/Gemini 3.8 Flash");
     assert.equal(flash.prefer_websockets, false);
     assert.equal(flash.context_window, 1_000_000);
-    assert.equal(flash.base_instructions, AGY_AGENT_SYSTEM_PROMPT, "Codex 按 base_instructions 发送系统提示词");
+    // 目录不再注入官方提示词：条目保持 Codex 基线基底，AGY 提示词由请求转换层
+    // 整体注入（见 agy-request 测试），客户端渲染的基底内容在上游被替换。
+    assert.notEqual(flash.base_instructions, AGY_AGENT_SYSTEM_PROMPT, "目录不再携带 AGY 官方提示词");
     const messages = flash.model_messages as { instructions_template?: string } | undefined;
-    assert.equal(messages?.instructions_template, AGY_AGENT_SYSTEM_PROMPT, "instructions_template 必须替换，否则客户端仍发官方提示词");
+    assert.notEqual(messages?.instructions_template, AGY_AGENT_SYSTEM_PROMPT, "instructions_template 保持基底不改写");
   });
 });
 
