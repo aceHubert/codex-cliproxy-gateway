@@ -3,6 +3,13 @@ import path from "node:path";
 import { decryptZcodeCredential } from "./credential-cipher.ts";
 import { readZcodeIndividualCredential } from "./individual-credentials.ts";
 import {
+  readZcodeIndividualProjectLocation,
+  resolveZcodeIndividualApiKey,
+  zcodeIndividualTokenFingerprint,
+  ZcodeProjectTokenError,
+} from "./individual-project-token.ts";
+import type { ZcodeIndividualProjectLocation } from "./individual-project-token.ts";
+import {
   readZcodeTeamCredentialInputs,
   resolveZcodeTeamApiKey,
 } from "./team-credentials.ts";
@@ -59,6 +66,8 @@ export interface ZcodeCacheDependencies {
   onSelectionChange?: () => void;
   /** 内存快照（渠道/套餐/模型集合/凭据）变化后触发，用于重建对外目录。 */
   onSnapshotChange?: (snapshot: ZcodeProviderSnapshot) => void;
+  /** 个人套餐项目令牌签发上报的客户端版本；缺省按 unknown 上报。 */
+  clientVersion?: string;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -127,6 +136,16 @@ function startPlanApiKey(credentials: Record<string, unknown>, _family: ZcodeFam
     return decryptZcodeCredential(value, env).trim();
   } catch {
     invalid("Start Plan 凭据解密失败");
+  }
+}
+/** 个人套餐项目令牌签发的登录态来源；解密失败必须明确报错，不能静默降级。 */
+function oauthAccessToken(credentials: Record<string, unknown>, family: ZcodeFamily, env: NodeJS.ProcessEnv = process.env): string {
+  const value = credentials[`oauth:${family}:access_token`];
+  if (typeof value !== "string" || !value.trim()) return "";
+  try {
+    return decryptZcodeCredential(value, env).trim();
+  } catch {
+    invalid("ZCode 个人套餐 OAuth 凭据解密失败；请在 ZCode 中重新登录当前账号");
   }
 }
 /**
@@ -517,6 +536,13 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let teamCredential: { identity: string; fingerprint: string; apiKey: string } | undefined;
   let teamCredentialFingerprint: string;
   let teamForceRefresh = false;
+  /** 个人套餐项目令牌（ZCode 3.16+）：落盘 Key 缺失时按 OAuth 在线签发并缓存。 */
+  let individualMint: { identity: string; fingerprint: string; apiKey: string; expiresAt?: number } | undefined;
+  let individualMintFingerprint = "";
+  let individualMintMode = false;
+  let individualIdentity = "";
+  let individualOauth = "";
+  let individualLocation: ZcodeIndividualProjectLocation | undefined;
   let credentialGeneration = 0;
   let resolving: { generation: number; promise: Promise<void> } | undefined;
   let firstEventAt: number | undefined;
@@ -572,6 +598,12 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           teamCredential = undefined;
           teamCredentialFingerprint = "";
           teamForceRefresh = false;
+          individualMint = undefined;
+          individualMintFingerprint = "";
+          individualMintMode = false;
+          individualIdentity = "";
+          individualOauth = "";
+          individualLocation = undefined;
           credential = undefined;
           snapshot = undefined;
           expiryCheckedKey = undefined;
@@ -669,6 +701,12 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           teamCredential = undefined;
           teamCredentialFingerprint = "";
           teamForceRefresh = false;
+          individualMint = undefined;
+          individualMintFingerprint = "";
+          individualMintMode = false;
+          individualIdentity = "";
+          individualOauth = "";
+          individualLocation = undefined;
           credential = undefined;
           snapshot = undefined;
           expiryCheckedKey = undefined;
@@ -698,28 +736,45 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
             const individual = selection.kind === "individual-coding-plan"
               ? readZcodeIndividualCredential(credentials, selection.family, dependencies.env)
               : undefined;
-            const key = individual?.state === "available"
-              ? individual.apiKey
-              : individual?.state === "unavailable"
-                ? ""
+            if (individual?.state === "unavailable") {
+              // ZCode 3.16 起个人套餐 Key 不再落盘 credentials.json：账号身份与
+              // OAuth 登录态仍可解析时改为在线签发项目令牌；镜像回退禁令不变，
+              // config.json 里的旧 Key 可能属于上一账号。
+              const identity = individual.identity ?? "";
+              const oauth = identity ? oauthAccessToken(credentials, selection.family, dependencies.env) : "";
+              if (identity && oauth) {
+                individualMintMode = true;
+                individualIdentity = identity;
+                individualOauth = oauth;
+                individualLocation = readZcodeIndividualProjectLocation(credentials, selection.family, identity, dependencies.env);
+                const nextFingerprint = zcodeIndividualTokenFingerprint(oauth, identity, individualLocation);
+                const mintChanged = individualMintFingerprint !== nextFingerprint;
+                individualMintFingerprint = nextFingerprint;
+                const projection = JSON.stringify(["project-token", nextFingerprint]);
+                oauthChanged = mintChanged || projection !== oauthProjection;
+                oauthProjection = projection;
+              } else {
+                individualMintMode = false;
+                throw new ZcodeConfigError("ZCode 个人套餐凭据不可用；请在 ZCode 中重新连接当前账号");
+              }
+            } else {
+              individualMintMode = false;
+              const key = individual?.state === "available"
+                ? individual.apiKey
                 : selection.kind === "start-plan"
                   ? startPlanApiKey(credentials, selection.family, dependencies.env)
                   : "";
-            // 账号身份存在却拿不到该账号的 Key 时禁止镜像回退：切换账号后
-            // config.json 里的旧 Key 可能属于上一账号。
-            if (individual?.state === "unavailable") {
-              throw new ZcodeConfigError("ZCode 个人套餐凭据不可用；请在 ZCode 中重新连接当前账号");
+              personalApiKey = key || undefined;
+              const projection = JSON.stringify([
+                credentials[`oauth:${selection.family}:access_token`],
+                credentials[`oauth:${selection.family}:refresh_token`],
+                credentials.zcodejwttoken,
+                individual?.state === "available" ? individual.identity : individual?.state ?? null,
+                key,
+              ]);
+              oauthChanged = projection !== oauthProjection;
+              oauthProjection = projection;
             }
-            personalApiKey = key || undefined;
-            const projection = JSON.stringify([
-              credentials[`oauth:${selection.family}:access_token`],
-              credentials[`oauth:${selection.family}:refresh_token`],
-              credentials.zcodejwttoken,
-              individual?.state === "available" ? individual.identity : individual?.state ?? null,
-              key,
-            ]);
-            oauthChanged = projection !== oauthProjection;
-            oauthProjection = projection;
           }
         } catch (error) {
           if (selection.kind === "team-coding-plan") {
@@ -814,6 +869,72 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           invalid("ZCode 当前业务 Key 已过期");
         }
         snapshot = Object.freeze({ ...next, apiKey, ...(expires === undefined ? {} : { expiresAt: expires }) });
+        failure = undefined;
+        armExpiry();
+        return;
+      }
+      if (selection.kind === "individual-coding-plan" && individualMintMode) {
+        // ZCode 3.16 个人套餐项目令牌：OAuth/账号/指针指纹变化或到期时重签；
+        // 机制与团队套餐一致（resolving 代际隔离 + 到期定时器）。
+        const fingerprint = individualMintFingerprint;
+        const expired = credential?.expiresAt !== undefined && credential.expiresAt <= now();
+        const mustResolve = !individualMint
+          || individualMint.identity !== individualIdentity
+          || individualMint.fingerprint !== fingerprint
+          || expired;
+        if (resolving) {
+          snapshot = undefined;
+          return;
+        }
+        if (mustResolve) {
+          const generation = ++credentialGeneration;
+          const oauth = individualOauth;
+          const mintIdentity = individualIdentity;
+          const location = individualLocation;
+          snapshot = undefined;
+          credential = undefined;
+          expiryCheckedKey = undefined;
+          clearTimeout(expiryTimer);
+          const promise = (async () => {
+            try {
+              const minted = await resolveZcodeIndividualApiKey(selection.family,
+                { accessToken: oauth, identity: mintIdentity, fingerprint }, location,
+                { fetch: dependencies.fetch, env: dependencies.env, clientVersion: dependencies.clientVersion, now });
+              if (credentialGeneration !== generation || selection.kind !== "individual-coding-plan") return;
+              dependencies.onCredentialBuild?.();
+              credential = { apiKey: minted.apiKey, expiresAt: minted.expiresAt };
+              individualMint = { identity: mintIdentity, fingerprint, apiKey: minted.apiKey, expiresAt: minted.expiresAt };
+              const currentRoute = route;
+              if (!currentRoute) invalid("ZCode 当前路由不可用");
+              snapshot = Object.freeze({ ...currentRoute, apiKey: minted.apiKey, expiresAt: minted.expiresAt });
+              failure = undefined;
+              armExpiry();
+            } catch (error) {
+              if (credentialGeneration !== generation) return;
+              snapshot = undefined;
+              credential = undefined;
+              individualMint = undefined;
+              failure = error instanceof ZcodeProjectTokenError || error instanceof ZcodeConfigError
+                ? new ZcodeConfigError(error.message)
+                : new ZcodeConfigError("无法签发 ZCode 个人套餐项目令牌；请在 ZCode 中重新登录当前账号后重试");
+              clearTimeout(expiryTimer);
+            } finally {
+              if (credentialGeneration === generation) resolving = undefined;
+              finish();
+            }
+          })();
+          resolving = { generation, promise };
+          return;
+        }
+        const cachedMint = individualMint;
+        if (!cachedMint) invalid("ZCode 个人套餐项目令牌不可用");
+        credential = { apiKey: cachedMint.apiKey, ...(cachedMint.expiresAt === undefined ? {} : { expiresAt: cachedMint.expiresAt }) };
+        if (cachedMint.expiresAt !== undefined && cachedMint.expiresAt <= now()) {
+          expiryCheckedKey = cachedMint.apiKey;
+          invalid("ZCode 当前业务 Key 已过期");
+        }
+        snapshot = Object.freeze({ ...next, apiKey: cachedMint.apiKey,
+          ...(cachedMint.expiresAt === undefined ? {} : { expiresAt: cachedMint.expiresAt }) });
         failure = undefined;
         armExpiry();
         return;

@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "./host-test.ts";
 import assert from "node:assert/strict";
 import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError } from "@agent-proxy/zcode/config";
+import { readZcodeIndividualProjectLocation } from "@agent-proxy/zcode/individual-project-token";
 
 const URL_A = "https://api.z.ai/api/anthropic";
 const URL_B = "https://open.bigmodel.cn/api/anthropic/v1";
@@ -555,6 +556,59 @@ function teamFetch(keys: Record<string, string>, calls: { method?: string; url: 
   }) as typeof fetch;
 }
 
+/** ZCode 3.16 个人套餐：OAuth 登录态 + 账号身份，但没有落盘业务 Key。 */
+function individualMintCredentials(identity: string, oauth: string, extra: Record<string, unknown> = {}) {
+  return {
+    "oauth:zai:access_token": oauth,
+    "oauth:zai:user_info": encryptedCredential(JSON.stringify({ user_id: identity })),
+    ...extra,
+  };
+}
+function projectLocationEntry(
+  identity: string,
+  ids: { organizationId: string; projectId: string; apiKeyId: string } = { organizationId: "organization-a", projectId: "project-a", apiKeyId: "api-key-id-a" },
+  meta: unknown[] = ["https://api.z.ai", "zai", identity, null, 1, "non-team"],
+) {
+  return { [`project-key-location:v1:${encodeURIComponent(JSON.stringify(meta))}`]: encryptedCredential(JSON.stringify(ids)) };
+}
+/** 模拟个人套餐项目令牌接口：签发、指针失效 404 与发现流程。 */
+function individualMintFetch(options: {
+  bearerTokens?: Record<string, string>;
+  expiresIn?: number;
+  firstCode?: number;
+  calls?: { method?: string; url: string; headers: Headers; body?: unknown }[];
+} = {}): typeof fetch {
+  const tokens = options.bearerTokens ?? {};
+  const expiresIn = options.expiresIn ?? 3600;
+  let stalePointer = options.firstCode;
+  let fallbackIndex = 0;
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    options.calls?.push({ method: init?.method, url, headers, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+    if (url.endsWith("/access_tokens")) {
+      if (stalePointer !== undefined) {
+        const code = stalePointer;
+        stalePointer = undefined;
+        return Response.json({ code, msg: "project API key is not available", data: null });
+      }
+      const bearer = (headers.get("authorization") ?? "").replace(/^Bearer\s+/i, "");
+      const token = tokens[bearer] ?? `minted-${bearer}-${++fallbackIndex}`;
+      // 真实签发响应不带 enable 字段（缺省即启用），也不带绝对 expiresAt。
+      return Response.json({ code: 200, msg: "Operation successful", data: {
+        accessToken: token, tokenType: "Bearer", expiresIn,
+      } });
+    }
+    if (url.endsWith("/api/biz/customer/getCustomerInfo")) {
+      return Response.json({ code: 200, data: { organizations: [{ organizationId: "organization-d", organizationName: "默认机构", projects: [{ projectId: "project-d", projectName: "默认项目", projectType: 1 }] }] } });
+    }
+    if (/\/api_keys$/.test(url)) {
+      return Response.json({ code: 200, data: [{ apiKey: "discovered-key-id", name: "default", keyType: 2 }] });
+    }
+    throw new Error(`测试未模拟个人套餐令牌接口: ${url}`);
+  }) as typeof fetch;
+}
+
 test("ZCode 3.12.3 connectionSelections 把已知 kind 归一化为 legacy providerID", { timeout: 60_000 }, async () => {
   await fixture(async (home) => {
     const mock = mockWatch();
@@ -599,6 +653,7 @@ test("ZCode 个人套餐优先读取当前账号的加密缓存 Key", { timeout:
     const cache = createZcodeConfigCache(home, {
       watch: mock.watch,
       env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      fetch: (async () => { throw new Error("落盘 Key 可用时禁止网络签发"); }) as unknown as typeof fetch,
     });
     try {
       assert.equal((await cache.get()).apiKey, "encrypted-personal-key");
@@ -618,6 +673,7 @@ test("ZCode 同渠道换账号后不沿用上一账号的个人 Key", { timeout:
     const provider = "account:zai-individual-coding-plan";
     const accountA = `account-provider:coding-plan:${provider}:account:user-a:api-key`;
     const accountB = `account-provider:coding-plan:${provider}:account:user-b:api-key`;
+    const calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = [];
     json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
     json(path.join(home, "config.json"), { provider: {
       "builtin:zai-coding-plan": { options: { apiKey: "stale-mirror-key", baseURL: URL_A }, models: { "glm-5": {} } },
@@ -631,20 +687,22 @@ test("ZCode 同渠道换账号后不沿用上一账号的个人 Key", { timeout:
       watch: mock.watch,
       env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
       plan: "individual-coding-plan",
+      fetch: individualMintFetch({ bearerTokens: { "oauth-b": "minted-key-b" }, calls }),
     });
     try {
       assert.equal((await cache.get()).apiKey, "key-a");
-      // 同一渠道切到账号 B，但 B 的 account-provider Key 尚未落盘：
-      // 必须失效，不能回退 config.json 里属于账号 A 的镜像 Key。
+      // 同一渠道切到账号 B，B 的落盘 Key 缺失：按 B 的 OAuth 在线签发项目令牌，
+      // 不能回退 config.json 里属于账号 A 的镜像 Key。
       json(path.join(home, "credentials.json"), {
         "oauth:zai:access_token": "oauth-b",
         "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-b" })),
       });
       mock.change(home, "credentials.json");
-      await eventually(async () => {
-        await assert.rejects(() => cache.get(), /个人套餐凭据不可用/);
-      });
-      // 账号 B 的 Key 落盘后恢复。
+      await eventually(async () => assert.equal((await cache.get()).apiKey, "minted-key-b"));
+      const mint = calls.find((call) => call.url.endsWith("/access_tokens"));
+      assert.ok(mint, "账号 B 应发起项目令牌签发");
+      assert.equal(mint.headers.get("authorization"), "Bearer oauth-b");
+      // 账号 B 的 Key 落盘后恢复使用落盘值。
       json(path.join(home, "credentials.json"), {
         "oauth:zai:access_token": "oauth-b",
         "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-b" })),
@@ -674,6 +732,135 @@ test("ZCode 个人套餐识别 user_info.user_id 并读取对应账号 Key", { t
     });
     try {
       assert.equal((await cache.get()).apiKey, "key-by-user-id");
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 3.16 个人套餐缺少落盘 Key 时按指针在线签发项目令牌", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = [];
+    let builds = 0;
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), { provider: {
+      "builtin:zai-coding-plan": { options: { apiKey: "stale-mirror-key", baseURL: URL_A }, models: { "glm-5": {} } },
+    } });
+    json(path.join(home, "credentials.json"), individualMintCredentials("user-a", "oauth-a", projectLocationEntry("user-a")));
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      plan: "individual-coding-plan",
+      clientVersion: "3.16.2",
+      fetch: individualMintFetch({ bearerTokens: { "oauth-a": "minted-key-1" }, calls }),
+      onCredentialBuild() { builds++; },
+    });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.plan, "individual-coding-plan");
+      assert.equal(snapshot.apiKey, "minted-key-1");
+      assert.notEqual(snapshot.apiKey, "stale-mirror-key");
+      assert.ok(snapshot.expiresAt !== undefined && snapshot.expiresAt > Date.now());
+      assert.equal(builds, 1);
+      const mint = calls.find((call) => call.url.endsWith("/access_tokens"));
+      assert.ok(mint, "应通过指针发起签发");
+      assert.ok(mint.url.includes("organization-a") && mint.url.includes("project-a") && mint.url.includes("api-key-id-a"));
+      assert.equal(mint.headers.get("authorization"), "Bearer oauth-a");
+      assert.deepEqual(mint.body, { clientType: "zcode", clientVersion: "3.16.2" });
+      assert.ok(calls.every((call) => !call.url.includes("getCustomerInfo")), "指针有效时不走发现流程");
+      const again = await cache.get();
+      assert.equal(again.apiKey, "minted-key-1");
+      assert.equal(builds, 1, "未到期不重复签发");
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人套餐项目令牌到期后自动重签", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = [];
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), individualMintCredentials("user-a", "oauth-a", projectLocationEntry("user-a")));
+    const mints: string[] = ["minted-key-1", "minted-key-2"];
+    const fetch: typeof globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ method: init?.method, url, headers: new Headers(init?.headers) });
+      if (!url.endsWith("/access_tokens")) throw new Error(`测试未模拟: ${url}`);
+      const token = mints.shift() ?? "minted-key-final";
+      // 第一次签发 1 秒到期触发重签；重签后恢复长有效期避免循环。
+      const expiresIn = token === "minted-key-1" ? 1 : 3600;
+      return Response.json({ code: 200, data: { accessToken: token, tokenType: "Bearer", expiresIn } });
+    }) as typeof fetch;
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      plan: "individual-coding-plan",
+      fetch,
+    });
+    try {
+      assert.equal((await cache.get()).apiKey, "minted-key-1");
+      await sleep(1400);
+      assert.equal((await cache.get()).apiKey, "minted-key-2");
+      assert.equal(calls.filter((call) => call.url.endsWith("/access_tokens")).length, 2);
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人套餐指针失效时经客户信息与项目 Key 列表发现重签", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    const calls: { method?: string; url: string; headers: Headers; body?: unknown }[] = [];
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), individualMintCredentials("user-a", "oauth-a", projectLocationEntry("user-a")));
+    const cache = createZcodeConfigCache(home, {
+      watch: mock.watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      plan: "individual-coding-plan",
+      fetch: individualMintFetch({ firstCode: 404, bearerTokens: { "oauth-a": "minted-discovered" }, calls }),
+    });
+    try {
+      const snapshot = await cache.get();
+      assert.equal(snapshot.apiKey, "minted-discovered");
+      assert.ok(calls.some((call) => call.url.endsWith("/api/biz/customer/getCustomerInfo")
+        && call.headers.get("authorization") === "oauth-a"), "发现流程携带原始 OAuth 头");
+      assert.ok(calls.some((call) => /organization-d\/projects\/project-d\/api_keys$/.test(call.url)), "列出默认项目 API Key");
+      const mint = calls.filter((call) => call.url.endsWith("/access_tokens")).at(-1);
+      assert.ok(mint!.url.includes("organization-d") && mint!.url.includes("project-d") && mint!.url.includes("discovered-key-id"));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 个人套餐项目指针只匹配当前账号的非团队 Coding Plan 条目", { timeout: 60_000 }, () => {
+  const env = { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" };
+  const ids = { organizationId: "organization-a", projectId: "project-a", apiKeyId: "api-key-id-a" };
+  const credentials = {
+    ...projectLocationEntry("user-a", ids),
+    ...projectLocationEntry("user-b", ids),
+    ...projectLocationEntry("user-a", ids, ["https://api.z.ai", "zai", "user-a", { organizationId: "o" }, 1, "non-team"]),
+    ...projectLocationEntry("user-a", ids, ["https://api.z.ai", "zai", "user-a", null, 2, "non-team"]),
+    "project-key-location:v1:%E4%B8%8D%E6%98%AFJSON": "whatever",
+  };
+  assert.deepEqual(readZcodeIndividualProjectLocation(credentials, "zai", "user-a", env), ids);
+  assert.equal(readZcodeIndividualProjectLocation(credentials, "zai", "user-c", env), undefined);
+  assert.equal(readZcodeIndividualProjectLocation(credentials, "bigmodel", "user-a", env), undefined);
+  assert.equal(readZcodeIndividualProjectLocation({}, "zai", "user-a", env), undefined);
+});
+
+test("ZCode 个人套餐身份存在但 OAuth 登录态缺失时仍报凭据不可用", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), {
+      "oauth:zai:user_info": encryptedCredential(JSON.stringify({ id: "user-a" })),
+    });
+    const cache = createZcodeConfigCache(home, {
+      watch: mockWatch().watch,
+      env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" },
+      fetch: (async () => { throw new Error("缺少 OAuth 时禁止网络签发"); }) as unknown as typeof fetch,
+    });
+    try {
+      await assert.rejects(() => cache.get(), /个人套餐凭据不可用/);
     } finally { cache.close(); }
   });
 });
