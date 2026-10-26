@@ -53,17 +53,20 @@ test("相同 seed 生成确定性 session id，不同 seed 互不相同", () => 
   assert.match(first, OPENCODE_SESSION_PATTERN);
 });
 
-test("确定性派生：同一外部会话跨实例稳定，id 具备官方 counter=1 形状", () => {
-  // Zen 解码校验时间段结构：哈希前缀一律 403，counter=1 官方形状的派生 id 过闸
-  // （2026-10-15 实测 3/3）；确定性派生让会话粘性不依赖任何进程内状态。
+test("派生：时间段取铸造时刻（新鲜度硬校验）、后缀由外部会话确定", () => {
+  // 2026-10-26 实测：服务端校验时间段新鲜度——哈希位当时间段的派生 id 一律 429，
+  // 现铸 id 过闸；确定性只保留在后缀，跨请求粘性由 resolver 的进程内缓存提供。
   const external = "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45";
-  const derived = deriveOpenCodeSessionId(external);
-  assert.equal(derived, deriveOpenCodeSessionId(external), "同一外部会话派生结果恒定");
-  assert.notEqual(derived, deriveOpenCodeSessionId("another-conv"), "不同外部会话互不相同");
+  const at = 1_000_000_000;
+  const derived = deriveOpenCodeSessionId(external, at);
+  assert.equal(derived, deriveOpenCodeSessionId(external, at), "同一外部会话同刻派生恒定");
+  assert.equal(decodeOpenCodeSessionTimestamp(derived), at, "时间段取铸造时刻而非外部 id 哈希");
+  const later = deriveOpenCodeSessionId(external, at + 60_000);
+  assert.notEqual(derived, later, "不同时刻铸的 id 时间段不同（不承诺跨进程恒定）");
+  assert.equal(derived.slice(16), later.slice(16), "后缀由外部会话派生（确定性）");
+  assert.notEqual(derived.slice(16), deriveOpenCodeSessionId("another-conv", at).slice(16), "不同外部会话后缀互不相同");
   assert.match(derived, OPENCODE_SESSION_PATTERN);
   assert.ok(derived.slice(4, 16).endsWith("ffe"), "counter 位固定为官方形状（hex 以 ffe 结尾）");
-  assert.ok(decodeOpenCodeSessionTimestamp(derived) !== undefined, "时间段可反解（服务端同款校验）");
-  assert.notEqual(derived, createOpenCodeSessionId(1_000, external), "与铸币路径（时间戳在前）独立");
 });
 
 test("resolveOpenCodeSession：入站已带合法 x-opencode-session 时原样透传", () => {
@@ -76,38 +79,41 @@ test("resolveOpenCodeSession：入站已带合法 x-opencode-session 时原样�
   assert.equal(resolver.resolve(headers), inbound);
 });
 
-test("resolveOpenCodeSession：非法 x-opencode-session 不透传，回落到外部会话派生", () => {
-  const resolver = createOpenCodeSessionResolver();
-  const headers = new Headers({
+test("resolveOpenCodeSession：非法 x-opencode-session 不透传，回落外部会话派生并进程内粘住", () => {
+  let now = 2_000_000_000;
+  const resolver = createOpenCodeSessionResolver({ now: () => now });
+  const resolved = resolver.resolve(new Headers({
     "x-opencode-session": "not-a-valid-session",
     "Session-Id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45",
-  });
-  const resolved = resolver.resolve(headers);
+  }));
   assert.match(resolved, OPENCODE_SESSION_PATTERN);
-  // 与同外部会话的确定性派生一致（Codex 实发 session-id 头，不再依赖绑定表）。
-  assert.equal(resolved, deriveOpenCodeSessionId("01a13e5e-fd6e-7b31-88cb-faaefcd6cb45"));
-  // 同一外部会话再次解析结果稳定。
+  // 铸造时刻取 resolver 的当前时间（Codex 实发 session-id 头）。
+  assert.equal(resolved, deriveOpenCodeSessionId("01a13e5e-fd6e-7b31-88cb-faaefcd6cb45", now));
+  // 时间流逝后同一外部会话仍复用进程内已铸 id：prompt cache 亲和不随时间漂移。
+  now += 60_000;
   assert.equal(resolver.resolve(new Headers({ "session-id": "01a13e5e-fd6e-7b31-88cb-faaefcd6cb45" })), resolved);
 });
 
 test("resolveOpenCodeSession：外部会话标头按 x-session-id → session-id → thread-id 优先级取值", () => {
-  const resolver = createOpenCodeSessionResolver();
+  const now = 3_000_000_000;
+  const resolver = createOpenCodeSessionResolver({ now: () => now });
   assert.equal(
     resolver.resolve(new Headers({ "x-session-id": "first", "session-id": "second", "thread-id": "third" })),
-    deriveOpenCodeSessionId("first"),
+    deriveOpenCodeSessionId("first", now),
   );
   assert.equal(
     resolver.resolve(new Headers({ "session-id": "second", "thread-id": "third" })),
-    deriveOpenCodeSessionId("second"),
+    deriveOpenCodeSessionId("second", now),
   );
-  // 仅 thread-id 在场（如 fork 线程）时仍可稳定派生。
-  assert.equal(resolver.resolve(new Headers({ "thread-id": "third" })), deriveOpenCodeSessionId("third"));
+  // 仅 thread-id 在场（如 fork 线程）时仍可派生。
+  assert.equal(resolver.resolve(new Headers({ "thread-id": "third" })), deriveOpenCodeSessionId("third", now));
 });
 
 test("resolveOpenCodeSession：plain object 标头大小写不敏感", () => {
-  const resolver = createOpenCodeSessionResolver();
+  const now = 4_000_000_000;
+  const resolver = createOpenCodeSessionResolver({ now: () => now });
   const resolved = resolver.resolve({ "session-id": "conv-plain" });
-  assert.equal(resolved, deriveOpenCodeSessionId("conv-plain"));
+  assert.equal(resolved, deriveOpenCodeSessionId("conv-plain", now));
   assert.equal(
     resolver.resolve({ "X-Opencode-Session": "ses_3a4ee6335ffedFB8f76BPU1Eb3" }),
     "ses_3a4ee6335ffedFB8f76BPU1Eb3",

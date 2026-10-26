@@ -10,7 +10,7 @@
 | codebuddy | `src/codebuddy/fingerprint-data.json` | `request-context.ts`（版本常量）+ `request.ts` 转换层（`agentSystemPrompt` 整体替换上游 system 基底） |
 | qoder | `src/qoder/fingerprint-data.json` | `transport.ts`（协议版本、client profiles）+ `request.ts` 转换层（`agentSystemPrompt` 整体替换信封 system） |
 | agy | `src/agy/fingerprint-data.json` | `transport.ts`（UA 版本与 changelist）+ `request.ts` 转换层（`agentSystemPrompt` 整体替换 systemInstruction 基底） |
-| opencode-zen | `src/opencode/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`/`mergeOpencodeZenGateTools(Responses)`（门禁官方 read+shell 定义合并，chat/Responses 双形状；模板仅作回退材料） |
+| opencode-zen | `packages/opencode-zen/src/fingerprint-data.json` | `user-agent.ts`（UA 三段，运行时按 npm dist-tags 刷新）+ `catalog.ts` 的 `buildOpencodeZenCatalog()`（条目）+ 转发路 `injectOpencodeZenFingerprintBody`（`mergeOpencodeZenGateSystem` 官方模板包裹 system + `mergeOpencodeZenGateTools(Responses)` read 保险合并，chat/Responses 双形状） |
 
 与本机安装强相关的值（ZCode.app 版本）仍在运行时动态读取，JSON 中的 `appVersion` 只是分析快照。
 
@@ -35,10 +35,13 @@ Claude Code anthropic、chat/gemini 客户端）进入都得到同一份官方�
 （tech-debt 17-①），故 2026-10-23 下移到转换层统一注入；旧目录缓存中已注入的提示词与转换层注入
 为同一文本，整体替换幂等，过渡期上游形状不变，无需强制失效缓存。
 
-**OpenCode Zen 例外（2026-10-14 起）**：zen 不注入提示词（条目保留 gpt-5.5 基底的官方 Codex
-提示词，客户端由此恢复 apply_patch freeform 协议与 shell 约定等操作性指令），客户端系统内容
-原样透传——门禁复测确认 system 内容不再被检查，过闸只靠工具名单占位垫补（见下文 opencode-zen
-notes 与 [执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)）。
+**OpenCode Zen（2026-10-26 起，门禁换代后收回例外）**：zen 的门禁恢复 system 内容校验——
+system 消息必须**包含官方当前代 agent 模板全文**，转发路经 `mergeOpencodeZenGateSystem` 把客户端
+system 包裹为「官方模板在前 + `# Client Instructions` 分隔 + 客户端指令在后」（包含关系校验，
+实测模板在前/在后均过闸；截断或无模板即 429）。客户端操作性指令仍保留（追加在模板之后），但上游
+模型会同时看到 OpenCode 官方 harness 提示词。目录条目保持 gpt-5.5 基底 Codex 提示词不变（渲染给
+客户端的基底，运行时整体包裹）。2026-10-14 的「不注入」决策及
+[执行计划](exec-plans/completed/zen-gate-fingerprint-reduction.md)已被本日门禁换代事实推翻。
 codebuddy 适配器的 `workbuddy/*` 路由**沿用同一份 CodeBuddy 主提示词**在转换层注入（本机无
 WorkBuddy IDE 与其产品配置；未做 `CODEBUDDY_BRAND_NAME` 品牌名替换——真实 WorkBuddy 客户端是把
 同一模板的 CodeBuddy 字样全局替换成 WorkBuddy，盲目替换会连同文档 URL 一起改错，需拿到
@@ -146,10 +149,10 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 
 ## opencode-zen
 
-- **source**：官方 GA 客户端 `@opencode/cli` 2.0.26（`latest` 标签，bin 为 opencode2）。
-  UA 三段取自该包 darwin-arm64 平台二进制内嵌字面量 `--user-agent=opencode/latest/2.0.26/cli`；
-  agent/标题模板取自 `@opencode/core` 2.0.26 的 `dist/chunks`（`src/session/runner/prompt/system.txt`
-  与 `PROMPT_TITLE` 常量）；工具定义沿用 2026-10-08 抓包值。
+- **source**：官方 GA 客户端 `@opencode/cli` 2.1.4（`latest` 标签，bin 为 opencode2）。
+  UA 三段沿用 `opencode/latest/<version>/cli` 形状（运行时按 dist-tags 刷新）；agent 模板
+  （21,010 字符渲染产物）与标题模板（1,806 字符）取自 2026-10-26 真实请求截获（目录缓存指向
+  本地转发代理，见更新记录）；工具定义 12 个与 2.0.29 快照逐字节一致。
 - **notes**：
   - **GA 换过发布线**：beta 线 `@opencode-ai/cli` 停在 0.0.0-beta-19271，GA 线 `@opencode/cli` 的
     `latest` 是 2.0.26——只按旧包查"新版本"永远查不到。UA 形状未变
@@ -211,6 +214,26 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
     已据此收敛为仅 `read`（`GATE_REQUIRED_TOOL_ORDER = ["read"]`），探针重写为 13 项
     （minimal-read / minimal-read-schema / read-empty-schema / shell-without-read /
     no-affinity-header 等对照），实跑 13/13 OK。
+  - **2026-10-26 门禁换代（换 IP 后逐项隔离实测；10-15「read 实名 + 标头最小集」画像整体失效）**：
+    ① **会话层新增时间段新鲜度校验**——哈希/随机位当时间段的派生 id 一律 429（2/2），现铸
+    （当前时间）id 连续 200，窗口未精测（≥45 分钟仍有效）；`deriveOpenCodeSessionId` 改为
+    「铸造时刻时间段 + 外部 id 派生后缀」，跨请求粘性改由 resolver 进程内缓存提供（不再承诺
+    跨进程恒定）；② **system 恢复内容校验且为包含关系**——须包含官方当前代 GA 模板全文
+    （截断 500/2000 字、无模板普通长文本均 429；模板在前/在后均过闸；改模板中部一词仍过，
+    非逐字哈希）；转发路恢复注入：`mergeOpencodeZenGateSystem` 包裹客户端 system；③ **tools 带 tools 时 read 为硬性在场要求**（127 客户端工具无 read 一律 429（3/3），
+    垫补后同负载 200；工具数量与其它名字无关）；④ **UA 版本/渠道、多余
+    标头（x-opencode-session-id）均不校验**；⑤ **端点换代**——chat 在
+    `https://opencode.ai/inference/openai/v1`（元数据 provider.api 同源自报），`/models` 列表
+    仍在 `/inference/v1`（新增 `OPENCODE_ZEN_MODELS_ENDPOINT`，openai 基座 404）；⑥ **匿名
+    `Bearer public` 有按 IP 滚动共享池**，耗尽与形态拒绝同文案 429 FreeUsageLimitError（换出口
+    即恢复、UTC 午夜重置）——批量 429 时先换 IP 复测再定性漂移（本日 SG 出口耗尽、TW 出口正常）；
+    官方标题模板不在白名单（官方 CLI 自身标题生成也 429，不致命）；⑦ **tools 数组硬上限 128**
+    （超出即 400 `maximum number of items is 128`，重载 MCP 客户端触发）——合并层按上限截断
+    （前 127 客户端 + 垫补 read 存活），`OPENCODE_ZEN_TOOLS_MAX`。快照更新：clientVersion
+    2.1.4、GA 模板 21,010 字符（2.0.29 时代的 1,474 字短模板已过期）。探针重写为 9 项新画像。
+    取值捷径（新增）：改本机 opencode 目录缓存（`~/.local/share/opencode/opencode.db` kv 表
+    `models-dev:catalog*` 的 `api` 字段）指向本地转发代理，跑一次 `opencode2 run` 即可截获
+    当前代模板与工具（测后须还原缓存）。
   - **目录与端点（双文件缓存）**：store 维护两个磁盘文件——`opencode-zen-metadata.json` 存原始
     数据（动态 ids + 官方元数据 + 探针裁决；ids 按 10 分钟 TTL 刷新，元数据按 6 小时 TTL
     刷新，裁决 24 小时），`opencode-zen-catalog.json` 存由上述数据生成的**成品目录**
@@ -251,4 +274,5 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 | 2026-10-15 | opencode-zen | 门禁再收紧（官方 2.0.29 抓包+隔离实测）：端点迁 `/zen/v1` → `/inference/v1`；标头硬性新增 `x-opencode-session-id`；工具闸升级实名制（空 schema 占位被拒，须官方 read+shell 真实定义，`/responses` 同门禁）；恢复工具合并（chat 包裹/Responses 扁平双形状，最小面 read+shell）；快照 2.0.26 → 2.0.29、工具定义换 2.0.29 抓包值；同协议 responses 改强制流式+非流式聚合；探针按新画像重写（10 项实测 OK） |
 | 2026-10-15 | opencode-zen | 会话钉住改无状态确定性派生：入站外部会话头扩为 `x-session-id`/`session-id`/`thread-id`（Codex 实发 `session-id`，旧绑定表只认 `x-session-id` 致 Codex 落随机分支）；服务端解码 id 时间段结构（哈希前缀 403），派生 id counter 位固定官方形状（实测过闸）；`deriveOpenCodeSessionId` 替换 `SessionBindingCache`（跨重启稳定、零状态），探针补 derived-session-id 对照（11 项 OK） |
 | 2026-10-15 | opencode-zen | 终版画像修正：`read` 唯一必须（schema 非空即过，官方完整定义与 `{path:{}}` 最小形均可；bash/shell 及数量无关），合并面由 read+shell 收敛为仅 read；标头最小集 Authorization+UA+session-id+affinity（完整集下单缺 affinity 互备放行）；帖子 zen/v1 curl 为迁移间隙过时信息（复测死透）；探针重写 13 项实测 OK（linux.do 2912664 同结论） |
+| 2026-10-26 | opencode-zen | 门禁换代适配：会话派生改「当前时间段 + 确定性后缀」（服务端校验新鲜度，哈希时间段被拒），粘性转进程内缓存；system 恢复包含校验（须含 GA 2.1.4 模板全文 21,010 字符），转发路新增 `mergeOpencodeZenGateSystem` 包裹客户端 system；端点迁 `/inference/openai/v1`（/models 列表留 `/inference/v1`，新增 `OPENCODE_ZEN_MODELS_ENDPOINT`）；快照 2.0.29 → 2.1.4；探针重写 9 项；实测匿名池按 IP 滚动限额（与形态拒绝同文案，换出口复测再定性）；e2e 真机 200 |
 | 2026-10-23 | zcode/codebuddy/qoder/agy | 提示词注入从 catalog 合成期下移到请求转换层：llm-bridge 新增 `stripClientSystemPrompt`（四协议剥离客户端系统级内容，非变更式），各适配器 `request.ts` 把 `agentSystemPrompt` 种入上游系统槽唯一基底（整体替换语义，任何客户端协议进入均生效）；目录条目停发改写提示词（zcode 保持 vendor 空串、其余保持 gpt 基线基底），plugin-api 契约移除 `withAgentSystemPrompt`；旧缓存注入值与转换层注入同一文本，替换幂等无需失效（解决 tech-debt 17-① 双路径不一致） |

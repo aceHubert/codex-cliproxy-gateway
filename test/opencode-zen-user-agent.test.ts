@@ -11,8 +11,8 @@ import { OPENCODE_ZEN_CLIENT_USER_AGENT, buildOpencodeZenUpstreamHeaders } from 
 import { createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
 
 const SESSION = createOpenCodeSessionId(1_000_000, "test-session");
-/** 快照值（fingerprint-data.json）：官方 GA opencode2 2.0.29，渠道 latest。 */
-const SNAPSHOT_UA = "opencode/latest/2.0.29/cli";
+/** 快照值（fingerprint-data.json）：官方 GA 2.1.4，渠道 latest（2026-10-26 更新）。 */
+const SNAPSHOT_UA = "opencode/latest/2.1.4/cli";
 /** 同发布线的更新版本（动态拉取命中后的期望值）。 */
 const DYNAMIC_UA = "opencode/latest/2.1.3/cli";
 
@@ -33,7 +33,7 @@ test("UA 版本解析：GA 正式版取标签名作渠道，预发布版取版�
 });
 
 test("UA 组装：四段式，渠道段与版本段分离", () => {
-  assert.equal(opencodeZenUserAgent("2.0.29", "latest"), SNAPSHOT_UA);
+  assert.equal(opencodeZenUserAgent("2.1.4", "latest"), SNAPSHOT_UA);
   assert.equal(opencodeZenUserAgent("2.1.3", "latest"), DYNAMIC_UA);
   assert.equal(opencodeZenUserAgent("0.0.0-beta-19271", "beta"), "opencode/beta/0.0.0-beta-19271/cli");
 });

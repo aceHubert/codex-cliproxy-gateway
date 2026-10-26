@@ -3,18 +3,22 @@ import { createHash, randomBytes } from "node:crypto";
 /**
  * OpenCode Zen 会话标识引擎。
  *
- * Zen 免费层服务端强校验 `x-opencode-session` / `x-opencode-session-id`（2026-10-15 起
- * 硬性）：必须是 `ses_` + 12 位降序十六进制时间戳段 + 14 位 Base62 随机串（共 30 字符，
- * 见调研文档 §3.2 的 Identifier.descending 逆向）。**时间戳段会被解码校验**：摘要哈希
- * 直接当前缀的 id 一律 403（dsh 同类插件同结论），counter 位（低 12 位）必须为官方
- * 形状（counter=1 → hex 以 `ffe` 结尾）。本模块负责三件事：
- * 1. `createOpenCodeSessionId`：铸无外部会话时的单次合规 session id；
- * 2. `deriveOpenCodeSessionId`：从外部会话 id（agent/IDE 的 conversation id）**确定性
- *    派生**合规 session id——同一会话跨请求、跨进程重启永远得到同一个 id（Zen 按会话
- *    计量免费额度并按它路由 prompt cache，会话稳定即缓存亲和稳定）；
+ * Zen 免费层服务端强校验 `x-opencode-session` 等标头（2026-10-15 起硬性）：必须是
+ * `ses_` + 12 位降序十六进制时间戳段 + 14 位 Base62 随机串（共 30 字符，见调研文档
+ * §3.2 的 Identifier.descending 逆向）。**时间戳段会被解码并校验新鲜度**
+ * （2026-10-26 实测）：当前时间铸的 id 过闸，哈希位串当时间段的派生 id 一律
+ * 429 FreeUsageLimitError（2/2 被拒；同日现铸 id 连续 200）；窗口宽度未精测，
+ * 至少接受约 45 分钟前的 id（当日重放实证）。counter 位（低 12 位）保持官方形状
+ * （counter=1 → hex 以 `ffe` 结尾）。本模块负责三件事：
+ * 1. `createOpenCodeSessionId`：铸合规 session id（时间段取当前时间）；
+ * 2. `deriveOpenCodeSessionId`：从外部会话 id 派生合规 session id——时间段取铸造
+ *    时刻的当前时间（新鲜度硬校验，不能由外部 id 哈希决定），后缀由外部 id 派生
+ *    （同一外部会话重派得到同一后缀）；跨进程重启不再保证同一 id（时间段已变），
+ *    会话粘性由 resolver 的进程内缓存维持；
  * 3. `resolveOpenCodeSession`：标头判定优先级——入站已带合法 `x-opencode-session`
  *    则原样透传；否则取外部会话标头（`x-session-id` / `session-id` / `thread-id`，
- *    Codex 实发 `session-id`）确定性派生；都没有时生成单次临时 session。
+ *    Codex 实发 `session-id`）派生（进程内同 id 复用，prompt cache 亲和稳定）；
+ *    都没有时生成单次临时 session。
  */
 
 const BASE62_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -64,18 +68,14 @@ export function decodeOpenCodeSessionTimestamp(sessionId: string): number | unde
 }
 
 /**
- * 从外部会话 id（agent/IDE 的 conversation id）确定性派生合规 session id：
- * 时间段取 SHA-256(外部 id) 的高 36 位，counter 位固定 1（官方形状，hex 以 `ffe`
- * 结尾——服务端解码校验时间段结构，2026-10-15 实测 counter 位随机的哈希前缀一律
- * 403、固定官方形状的派生 id 3/3 过闸）；后缀由同一摘要派生。同一外部会话跨请求、
- * 跨进程重启永远得到同一 id——Zen 按会话计量免费额度并按它路由 prompt cache，
- * 确定性派生使会话粘性不依赖任何进程内状态或磁盘持久化。
+ * 从外部会话 id（agent/IDE 的 conversation id）派生合规 session id：
+ * 时间段取铸造时刻（服务端校验新鲜度，2026-10-26 实测哈希时间段的派生 id 被拒），
+ * 后缀由 SHA-256(外部 id) 派生（确定性：同一外部会话同刻重派得到同一 id）。
+ * 跨请求、跨进程重启的稳定粘性由 `createOpenCodeSessionResolver` 的进程内缓存提供
+ * （Zen 按会话路由 prompt cache，缓存命中时 id 稳定即亲和稳定）。
  */
-export function deriveOpenCodeSessionId(external: string): string {
-  const digest = createHash("sha256").update(`codex-cliproxy-gateway:session:${external}`).digest();
-  const msBits = (BigInt(`0x${digest.subarray(0, 6).toString("hex")}`) >> 12n) & ((1n << 36n) - 1n);
-  const hexPart = (MASK_48 - ((msBits << 12n) | 1n)).toString(16).padStart(12, "0");
-  return `ses_${hexPart}${base62FromBytes(digest.subarray(6, 6 + RANDOM_SUFFIX_LENGTH))}`;
+export function deriveOpenCodeSessionId(external: string, timestampMs = Date.now()): string {
+  return createOpenCodeSessionId(timestampMs, `codex-cliproxy-gateway:session:${external}`);
 }
 
 /** 入站标头的两种来源：fetch Headers 或已小写化的 plain object。 */
@@ -99,8 +99,8 @@ function headerValue(source: HeaderSource, name: string): string | undefined {
 export interface OpenCodeSessionResolver {
   /**
    * 标头判定优先级：合法 `x-opencode-session` 原样透传（不转换）→ 外部会话标头
-   * （`x-session-id` / `session-id` / `thread-id`，Codex 实发 `session-id`）确定性
-   * 派生 → 都没有时生成单次临时合规 session。
+   * （`x-session-id` / `session-id` / `thread-id`，Codex 实发）派生（进程内同
+   * 外部 id 复用同一 zen id）→ 都没有时生成单次临时合规 session。
    */
   resolve(headers: HeaderSource): string;
 }
@@ -119,12 +119,23 @@ export function createOpenCodeSessionResolver(
   options: { now?: () => number } = {},
 ): OpenCodeSessionResolver {
   const now = options.now ?? Date.now;
+  /** 外部会话 id → 已铸 zen session id 的进程内缓存：同一会话粘住同一 id（prompt cache 亲和）。 */
+  let minted = new Map<string, string>();
+  const MINTED_CACHE_MAX = 4096;
   return {
     resolve(headers: HeaderSource): string {
       const inbound = headerValue(headers, "x-opencode-session");
       if (inbound && OPENCODE_SESSION_PATTERN.test(inbound)) return inbound;
       const external = externalSessionId(headers);
-      if (external) return deriveOpenCodeSessionId(external);
+      if (external) {
+        // 时间段由铸造时刻决定（新鲜度硬校验），确定性只在后缀；粘性靠本缓存。
+        const cached = minted.get(external);
+        if (cached) return cached;
+        if (minted.size >= MINTED_CACHE_MAX) minted = new Map();
+        const id = deriveOpenCodeSessionId(external, now());
+        minted.set(external, id);
+        return id;
+      }
       return createOpenCodeSessionId(now());
     },
   };

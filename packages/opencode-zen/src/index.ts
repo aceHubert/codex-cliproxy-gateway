@@ -39,18 +39,21 @@ import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
 import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
 
 /**
- * OpenCode Zen（https://opencode.ai/inference/v1）免费模型入口门面。
+ * OpenCode Zen（https://opencode.ai/inference/openai/v1）免费模型入口门面。
  *
  * 不需要本地凭据：鉴权是公共 `Bearer public`（可选 OPENCODE_API_KEY），合规性由
- * 指纹层（fingerprint.ts）与合规会话（session.ts）保证。目录按官方元数据暴露每个
- * 模型的端点协议（chat / responses / anthropic / google），转发层按协议自动转换
- * （convert.ts）：`catalog()` 供 /v1/models 合并，`forward()` 处理
+ * 指纹层（fingerprint.ts）与合规会话（session.ts）保证——匿名共享池按 IP 滚动限额，
+ * 耗尽时上游以 429 FreeUsageLimitError 拒绝（与形态拒绝同文案）。目录按官方元数据
+ * 暴露每个模型的端点协议（chat / responses / anthropic / google），转发层按协议
+ * 自动转换（convert.ts）：`catalog()` 供 /v1/models 合并，`forward()` 处理
  * /v1/chat/completions 拦截，`forwardResponses()` 处理 /v1/responses 拦截。
  */
 
 
-/** 上游缺省端点：2026-10-15 起官方由 `/zen/v1` 迁至 `/inference/v1`（旧端点一律 403）。 */
-export const OPENCODE_ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/inference/v1";
+/** 上游缺省端点（元数据 provider.api 缺失时的回退）；实际以元数据 api 字段为准。 */
+export const OPENCODE_ZEN_DEFAULT_ENDPOINT = "https://opencode.ai/inference/openai/v1";
+/** 模型列表端点（/models 仅存在于 /inference/v1 基座；2026-10-26 实测 openai 基座 404）。 */
+export const OPENCODE_ZEN_MODELS_ENDPOINT = "https://opencode.ai/inference/v1";
 export const OPENCODE_ZEN_PUBLIC_API_KEY = "public";
 /** OpenCode 官方模型元数据（客户端同源数据）：含每模型端点协议（provider.npm）与 deprecated 标记。 */
 export const OPENCODE_ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
@@ -59,7 +62,7 @@ export const OPENCODE_ZEN_METADATA_URL = "https://models.opencode.ai/api.json";
 const DEFAULT_CATALOG_REFRESH_INTERVAL_MS = 600_000;
 
 export interface OpencodeZenDependencies {
-  /** 上游端点覆盖；缺省 https://opencode.ai/inference/v1。 */
+  /** 上游端点覆盖；缺省 https://opencode.ai/inference/openai/v1（正常由元数据 api 字段覆盖）。 */
   endpoint?: string;
   /** 自定义鉴权 key；缺省读环境变量 OPENCODE_API_KEY，再缺省 "public"。 */
   apiKey?: string;
@@ -125,11 +128,14 @@ const ZEN_ERROR_FALLBACK: Record<string, string> = {
 };
 
 /**
+/**
  * 分类优先看上游 `error.type`（结构化、最可靠），再退到报文关键词与状态码。
  *
- * 关键约束：不再「任何 403 都算门禁失效」。403 里至少混着三种成因——门禁拒绝
- * （`FreeTierError`）、地区限制（`RegionError`）、上游自身故障（`server_error`，
- * 如模型端点已下线）；前两者是客户端形态问题，第三者与网关无关。
+ * 关键约束：不把「任何 403/429 都当门禁失效」。拒绝里至少混着这些成因——匿名池
+ * 按 IP 滚动耗尽与形态拒绝（同为 429 `FreeUsageLimitError`，文案不可区分，换出口
+ * 复测才是判据）、地区限制（`RegionError`）、上游自身故障（`server_error`，如模型
+ * 端点已下线）；排查方向由 `scripts/zen-gate-probe.ts` 承接（对照组失败才是指纹
+ * 本体过期）。
  */
 function classifyOpencodeZenUpstreamError(status: number, body: string): string {
   const upstreamType = extractUpstreamErrorType(body).toLowerCase();
@@ -433,7 +439,7 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
     const session = sessionResolver.resolve(new Headers());
     const headers = opencodeZenHeaders(session);
     headers.accept = "application/json";
-    const response = await fetchImpl(`${baseUrl}/models`, { method: "GET", headers, signal: AbortSignal.timeout(30_000) });
+    const response = await fetchImpl(`${OPENCODE_ZEN_MODELS_ENDPOINT}/models`, { method: "GET", headers, signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`zen /models returned HTTP ${response.status}`);
     return await response.json();
   };
@@ -448,8 +454,9 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
   });
   /**
    * 多端点探针阶梯：chat → responses → anthropic → google。首个"被服务"信号确定
-   * 协议；401/404（模型不存在或需账号）直接 drop；第一阶梯出现 FreeTierError 视为
-   * 指纹全局异常、保守保留为 chat；全阶梯无信号才 drop（如 systemone 的 jev）。
+   * 协议；401/404（模型不存在或需账号）直接 drop；429 FreeUsageLimitError 视为
+   * "被服务"（形态拒绝与匿名池耗尽同文案，无法区分时保守保留）；全阶梯无信号才
+   * drop（如 systemone 的 jev）。
    */
   const probeModel = dependencies.probeModel ?? (async (id: string): Promise<OpencodeZenProbeResult> => {
     const probePlain = async (
@@ -539,8 +546,6 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
       if (closed) return { models: [] };
       await startup?.catch(() => {});
       try {
-        // 系统提示词已在 buildOpencodeZenCatalog 合成时替换（含 model_messages 模板），缓存即成品；
-        // 转发路仍保留门禁模板注入，已含模板时不重复注入。
         return { models: await store.catalog() };
       } catch {
         return { models: [] };
@@ -699,7 +704,8 @@ function buildOpencodeZenAdapter(config: AgentConfig, dependencies: OpencodeZenD
 
     /**
      * /v1/responses 拦截入口：responses 协议模型直通上游（无需转换）；chat / anthropic /
-     * google 协议模型先转换请求（chat 目标注入官方模板），上游流反向转回 responses
+     * google 协议模型先转换请求（chat 目标垫补官方门禁工具，system 内容原样透传），
+     * 上游流反向转回 responses
      * 事件；非流式客户端由网关聚合为完整 response JSON。
      */
     async forwardResponses(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses"): Promise<Response> {

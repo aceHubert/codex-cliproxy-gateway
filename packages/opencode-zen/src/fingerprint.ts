@@ -4,26 +4,30 @@ import fingerprintData from "./fingerprint-data.json";
 /**
  * OpenCode Zen 免费层门禁指纹。
  *
- * 门禁画像（2026-10-15 抓包+逐项隔离实测；10-14 的「空 schema 名单占位」画像已被
- * 收紧否决，漂移轨迹见 docs/fingerprint-data.md 与 scripts/zen-gate-probe.ts）：
- * 1. **标头层**（最小集四件：Authorization + User-Agent + `x-opencode-session-id` +
- *    `x-session-affinity`，缺一即 403）：UA 版本不校验（快照/动态值均可）、合规
- *    `x-opencode-session`（见 session.ts）与同值回填、稳定 `x-opencode-project`；
- *    b3/traceparent 追踪头保留（非必需）。
- * 2. **请求体层（实名制，read 唯一必须）**：tools 必须含 `read` 且 schema 非空
- *    （空 properties 403；官方完整定义与 `{path:{}}` 最小形均过闸）；其它工具
- *    （bash/shell 及数量）无关，客户端工具可并存、同名定义优先。system 消息内容
- *    不检查（官方模板无需在场）；无 tools 的请求只有携带官方标题生成器模板才
- *    放行，网关一律保证 tools 在场，不走该例外。
- * 3. **传输层**：仅接受 `stream: true`；非流式一律 403 FreeTierError，适配器对非流式
- *    客户端必须上游强制流式并在网关侧聚合 SSE 为完整 JSON。
- * 4. **端点层**：上游 base 已从 `https://opencode.ai/zen/v1` 迁至
- *    `https://opencode.ai/inference/v1`（旧端点一律 403），缺省值与元数据
- *    provider.api 同步（见 index.ts 的 OPENCODE_ZEN_DEFAULT_ENDPOINT）。
+ * 门禁画像（2026-10-26 换 IP 后逐项隔离实测；此前 10-15 的「read 实名闸 + 标头
+ * 最小集」画像已被换代推翻，漂移轨迹见 docs/fingerprint-data.md 与
+ * scripts/zen-gate-probe.ts）：
+ * 1. **会话层（时间段新鲜度硬校验）**：`x-opencode-session` / `x-session-affinity` /
+ *    `x-session-id` 三标头与请求体 `prompt_cache_key` 四值同配，格式 `ses_` + 12 位
+ *    降序 hex 时间戳 + 14 位 Base62；时间段解码必须是当前时间附近——哈希位当时间段
+ *    的派生 id 一律 429（2/2），现铸 id 连续 200；窗口未精测，≥45 分钟仍有效。
+ *    多余标头（`x-opencode-session-id`）无害；UA 版本/渠道不校验（beta/旧 GA 均过）。
+ * 2. **请求体层（system 包含官方当前代模板）**：system 消息内容必须**包含**官方
+ *    agent 模板全文（模板在前、客户端指令追加在后的形态实测过闸；截断 500/2000 字、
+ *    无模板的普通长文本均 429）；模板随官方发版换代，快照过期即整体 429。tools
+ *    不再要求官方实名（仅客户端工具 + 最小 read 亦过；无 tools 未单测，网关恒带
+ *    工具）；官方标题模板不在白名单（官方 CLI 自己的标题生成也 429）。
+ * 3. **传输层**：仅接受 `stream: true`；非流式一律被拒，适配器对非流式客户端必须
+ *    上游强制流式并在网关侧聚合 SSE 为完整 JSON。
+ * 4. **端点层**：`https://opencode.ai/inference/openai/v1`（元数据 provider.api 同源）；
+ *    网关缺省端点 `/inference/v1` 与旧 `/zen/v1` 均不可用。
+ * 5. **配额层**：匿名 `Bearer public` 有按 IP 的滚动共享池，耗尽时一切请求 429
+ *    `FreeUsageLimitError`（与形态拒绝同文案；换 IP 即恢复，UTC 午夜重置）——
+ *    排查时先换出口再下结论。
  *
- * 官方模板与完整工具定义保留在 `fingerprint-data.json`（模板作回退材料，门禁再收紧
- * 时按 docs/fingerprint-data.md「更新方法」重取并以探针脚本验证）。
- * UA 的版本段不写死：运行时按 npm dist-tag 取当前版本（见 user-agent.ts），失败回退快照。
+ * 官方模板与完整工具定义保留在 `fingerprint-data.json`（GA 2.1.4 快照）；模板换代
+ * 失效时按 docs/fingerprint-data.md「更新方法」重取并以探针脚本验证。UA 的版本段
+ * 不写死：运行时按 npm dist-tag 取当前版本（见 user-agent.ts），失败回退快照。
  */
 
 const CLIENT = fingerprintData as {
@@ -44,14 +48,14 @@ export const OPENCODE_ZEN_CLIENT_VERSION = CLIENT.clientVersion;
 /** 客户端名段（`opencode2` 上报的 `cli`）。 */
 export const OPENCODE_ZEN_CLIENT_NAME = CLIENT.clientName;
 
-/** 官方 agent 模板（回退材料：当前门禁不检查 system 内容，生产路径不注入）。 */
+/** 官方 agent 模板（GA 2.1.4 快照）：门禁要求 system 消息包含其全文，注入见 mergeOpencodeZenGateSystem。 */
 export const OPENCODE_ZEN_AGENT_SYSTEM_PROMPT = CLIENT.agentSystemPrompt;
-/** 官方标题生成器模板（回退材料，同上）。 */
+/** 官方标题生成器模板（2026-10-26 实测不在门禁白名单，仅留档）。 */
 export const OPENCODE_ZEN_TITLE_SYSTEM_PROMPT = CLIENT.titleSystemPrompt;
-/** 官方工具定义（2026-10-15 终版画像：仅 read 的真实定义在场合闸，最小非空 schema 亦可）。 */
+/** 官方工具定义（2026-10-26 画像：门禁不再要求在场，保留 read 合并作最小保险）。 */
 export const OPENCODE_ZEN_CLIENT_TOOLS = CLIENT.tools;
 
-/** 门禁要求在场的官方工具名（2026-10-15 实测 + linux.do 2912664 同结论：仅 read 必须）。 */
+/** 保险合并的官方工具名（2026-10-26 实测仅客户端工具亦可过闸；所有已验证过闸形态都含 read，保留）。 */
 const GATE_REQUIRED_TOOL_NAMES = new Set(["read"]);
 
 /** 顺序化名单（合并顺序稳定）。 */
@@ -70,8 +74,10 @@ function traceHeaders(): { b3: string; traceparent: string } {
 
 /**
  * 构造发往 Zen 的完整标头集。除 content-type/accept 外全部替换为官方指纹，
- * 客户端原始标头（含任何鉴权）一律不透传。`x-opencode-session-id` 与
- * `x-opencode-session` 同值（官方 2.0.29 起上行，缺失实测 403）。
+ * 客户端原始标头（含任何鉴权）一律不透传。会话三标头（`x-opencode-session` /
+ * `x-session-affinity` / `x-session-id`）与 `x-opencode-session-id` 同值回填——
+ * 门禁要求会话标识四值同配（2026-10-26 实测），多余的 `x-opencode-session-id`
+ * 留作官方 2.0.29+ 形状兼容（实测在场无害）。
  */
 export function buildOpencodeZenUpstreamHeaders(
   session: string,
@@ -114,13 +120,24 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+/** 上游 tools 数组硬上限（2026-10-26 实测：超出即 400 "maximum number of items is 128"）。 */
+export const OPENCODE_ZEN_TOOLS_MAX = 128;
+
 /**
- * 名单闸官方定义合并：确保 `read` 的**官方真实定义**（含 schema）在场——客户端已有
- * 同名定义优先、原样保留；缺失时并入官方定义（fingerprint-data.json）。空工具列表
- * 同样合并（无 tools 的请求只有官方标题生成器模板才放行，不走该例外）。
- * 2026-10-15 终版画像（探针 + linux.do 2912664 同结论）：read 是唯一必须的工具名，
- * 其 schema 须非空（空 properties 403；官方完整定义与 `{path:{}}` 最小形均过闸），
- * 其它工具（bash/shell 及数量）无关。
+ * 按上游上限截断 tools：超出时保留前 `max - 1` 个原序条目 + 名单闸官方定义垫底
+ * （read 必须存活——它可能在截断线之后被追加）。未超限时原样返回。
+ */
+function capOpencodeZenGateTools(tools: unknown[], official: () => unknown): unknown[] {
+  if (tools.length <= OPENCODE_ZEN_TOOLS_MAX) return tools;
+  return [...tools.slice(0, OPENCODE_ZEN_TOOLS_MAX - 1), official()];
+}
+
+/**
+ * 名单闸官方定义合并：确保官方 `read` 定义在场（2026-10-26 复测修正：**带 tools
+ * 时 read 为硬性要求**——127 个客户端工具无 read 一律 429（3/3），垫补 read 后
+ * 同负载 200；客户端已有同名定义优先、原样保留；空工具列表同样合并）。合并结果
+ * 按上游上限截断（重载客户端（如带大量 MCP 的 agent IDE）tools 可达 128+，超出
+ * 即上游 400）。
  */
 export function mergeOpencodeZenGateTools(clientTools: unknown): unknown[] {
   const tools = Array.isArray(clientTools) ? clientTools : [];
@@ -130,11 +147,19 @@ export function mergeOpencodeZenGateTools(clientTools: unknown): unknown[] {
     if (name) names.add(name);
   }
   const merged = [...tools];
+  let appended: unknown;
   for (const tool of OPENCODE_ZEN_CLIENT_TOOLS) {
     const name = toolName(tool);
-    if (name !== undefined && GATE_REQUIRED_TOOL_NAMES.has(name) && !names.has(name)) merged.push(tool);
+    if (name !== undefined && GATE_REQUIRED_TOOL_NAMES.has(name) && !names.has(name)) {
+      merged.push(tool);
+      appended = tool;
+    }
   }
-  return merged;
+  if (appended === undefined || names.has("read")) {
+    // read 已由客户端提供或无需垫补：截断不破坏闸材料（read 在客户端前段或本就未超限）。
+    return merged.length > OPENCODE_ZEN_TOOLS_MAX ? merged.slice(0, OPENCODE_ZEN_TOOLS_MAX) : merged;
+  }
+  return capOpencodeZenGateTools(merged, () => appended as unknown);
 }
 
 /** Responses 协议工具的扁平名（{type:"function", name, …}，无 function 包裹）。 */
@@ -143,9 +168,10 @@ function flatToolName(tool: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Responses 端点的名单闸合并（与 mergeOpencodeZenGateTools 同规则、扁平形状）：
- * `/responses` 端点执行同一门禁（2026-10-15 实测：缺 read 403、在场 200），官方
- * 定义转为 Responses 扁平形状（type/name/description/parameters/strict）。
+ * Responses 端点的名单闸合并（与 mergeOpencodeZenGateTools 同规则、扁平形状）。
+ * `/responses` 端点与 chat 同源门禁（2026-10-26 画像：tools 非必要、read 保留作保险），
+ * 官方定义转为 Responses 扁平形状（type/name/description/parameters/strict）；
+ * 合并结果同样按上游 128 上限截断（垫补的 read 保证存活）。
  */
 export function mergeOpencodeZenGateToolsResponses(clientTools: unknown): unknown[] {
   const tools = Array.isArray(clientTools) ? clientTools : [];
@@ -156,16 +182,21 @@ export function mergeOpencodeZenGateToolsResponses(clientTools: unknown): unknow
     if (name) names.add(name);
   }
   const merged = [...tools];
+  let appended: unknown;
   for (const gateName of GATE_REQUIRED_TOOL_ORDER) {
     if (names.has(gateName)) continue;
     const official = (OPENCODE_ZEN_CLIENT_TOOLS as Array<Record<string, unknown>>)
       .map((tool) => isPlainObject(tool.function) ? tool.function as Record<string, unknown> : undefined)
       .find((fn) => fn !== undefined && fn.name === gateName);
     if (official && typeof official.description === "string" && isPlainObject(official.parameters)) {
-      merged.push({ type: "function", name: gateName, description: official.description, parameters: official.parameters, strict: false });
+      appended = { type: "function", name: gateName, description: official.description, parameters: official.parameters, strict: false };
+      merged.push(appended);
     }
   }
-  return merged;
+  if (appended === undefined || names.has("read")) {
+    return merged.length > OPENCODE_ZEN_TOOLS_MAX ? merged.slice(0, OPENCODE_ZEN_TOOLS_MAX) : merged;
+  }
+  return capOpencodeZenGateTools(merged, () => appended);
 }
 
 export interface OpencodeZenBodyInjection {
@@ -175,13 +206,37 @@ export interface OpencodeZenBodyInjection {
   aggregateForClient: boolean;
 }
 
+/** 官方模板在前、客户端指令在后的分隔标记（2026-10-26 实测该包裹形态过闸）。 */
+const GATE_CLIENT_INSTRUCTIONS_HEADER = "\n\n# Client Instructions\n";
+
+/**
+ * 门禁 system 包裹：确保 system 消息**包含官方当前代 agent 模板全文**（2026-10-26
+ * 画像：包含关系校验——模板在前、客户端内容追加在后过闸；截断模板、无模板的普通
+ * 长文本一律 429）。客户端已有 system（字符串内容）时替换为「官方模板 + 分隔标记 +
+ * 原内容」；无 system 或内容为非字符串（多部件数组等）时在消息首插入纯模板 system，
+ * 原消息原样保留在后。messages 非数组时原样返回。
+ */
+export function mergeOpencodeZenGateSystem(messages: unknown): unknown[] {
+  if (!Array.isArray(messages)) return [];
+  const index = messages.findIndex((message) =>
+    isPlainObject(message) && message.role === "system" && typeof message.content === "string");
+  if (index === -1) {
+    return [{ role: "system", content: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT }, ...messages];
+  }
+  const original = messages[index] as { role: string; content: string };
+  const wrapped: unknown = {
+    ...original,
+    content: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT + GATE_CLIENT_INSTRUCTIONS_HEADER + original.content,
+  };
+  return messages.map((message, i) => (i === index ? wrapped : message));
+}
+
 /**
  * 请求体门禁注入：
+ * - system 经 `mergeOpencodeZenGateSystem` 包裹官方模板（门禁包含关系校验）；
  * - 强制 `stream: true` + `stream_options.include_usage`（非流式上游必拒）；
- * - `prompt_cache_key` 固定为会话 id（对齐官方行为，最大化上游 KV 缓存亲和）；
- * - tools 经 `mergeOpencodeZenGateTools` 保证官方 `read`/`shell` 真实定义在场
- *   （2026-10-15 实测：空 schema 占位失效）；system 消息与工具定义原样透传
- *   （门禁不检查 system 内容）；
+ * - `prompt_cache_key` 固定为会话 id（门禁要求与会话标头四值同配，对齐官方行为）；
+ * - tools 经 `mergeOpencodeZenGateTools` 保留官方 `read` 定义在场（保险项）；
  * - reasoning effort 归一化为上游 `reasoning_effort`（见 normalizeOpencodeZenEffort），
  *   `effortLevels` 为调用方从实时元数据取的该模型档位值域（空数组=不校验）。
  */
@@ -197,11 +252,12 @@ export function injectOpencodeZenFingerprintBody(
   // reasoning（Responses 形状）与原始 reasoning_effort 都不进 chat 请求体：
   // 前者 chat 端点不识别，后者可能带越界值（上游对陌生 effort 直接 400），
   // 统一由 normalizeOpencodeZenEffort 裁决后按需写回。
-  const { reasoning: _reasoning, reasoning_effort: _rawEffort, tools: _tools, ...rest } = input;
+  const { reasoning: _reasoning, reasoning_effort: _rawEffort, tools: _tools, messages: _messages, ...rest } = input;
   const effort = normalizeOpencodeZenEffort(effortLevels, input.reasoning_effort, input.reasoning);
   return {
     body: {
       ...rest,
+      messages: mergeOpencodeZenGateSystem(input.messages),
       tools: mergeOpencodeZenGateTools(input.tools),
       ...(effort ? { reasoning_effort: effort } : {}),
       stream: true,
