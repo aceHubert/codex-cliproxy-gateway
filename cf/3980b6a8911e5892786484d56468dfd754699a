@@ -1,0 +1,19 @@
+apps/gateway/src/gateway.ts
+  s_5f61b871107c39::t_b0233012140e7e 1666
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "cf3980b6a8911e5892786484d56468dfd754699a",
+  "prompts": {},
+  "sessions": {
+    "s_5f61b871107c39": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_ad3430a5b5dd052f28240d7412671ab9",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
