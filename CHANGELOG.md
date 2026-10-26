@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.19.0 (2026-10-26)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `opencode-zen`, `plugin-api`, `qoder`, `zcode`
+  * [#29](https://github.com/aceHubert/codex-cliproxy-gateway/pull/29) feat(plugins): 提示词注入下移至请求转换层并适配 zen 门禁换代 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.18.0 (2026-10-23)
 
 #### :rocket: New Feature

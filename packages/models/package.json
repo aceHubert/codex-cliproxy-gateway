@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/models",
-  "version": "0.18.0",
+  "version": "0.19.0",
   "private": true,
   "description": "Agent Proxy 内部模型快照与厂商预设，仅供构建使用。",
   "type": "module",
