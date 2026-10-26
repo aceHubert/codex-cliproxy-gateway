@@ -1,0 +1,87 @@
+packages/opencode-zen/src/fingerprint.ts
+  s_836ef0b51f90c7::t_7f182e3c659afa 171
+  s_836ef0b51f90c7::t_02145eba7a5173 172-174,185,192-193,196-198
+  s_836ef0b51f90c7::t_bdec88e1921987 77-80
+  s_836ef0b51f90c7::t_57582e8c847e3f 7-26,28-30
+  s_836ef0b51f90c7::t_e9bcd5f8064a67 51,53,55,58
+  s_836ef0b51f90c7::t_f37d08153b09c5 123-134,138-140,150,153-156,158-161
+  s_836ef0b51f90c7::t_510ad59abc8361 136-137
+  s_836ef0b51f90c7::t_69e866829d9258 162,199,209-233,236,238
+  s_c511d2b0c2c67b::t_874e8e6a2874a5 239,255,260
+docs/histories/2026-10/20261026-1105-zen-prompt-comment-cleanup-and-passthrough-tests.md
+  s_5f61b871107c39::t_936a64077d23fb 10
+  s_5f61b871107c39::t_bde276e9eaa8df 1-9,11-38
+packages/opencode-zen/src/catalog.ts
+  s_836ef0b51f90c7::t_f5b7c09dfe7b7e 139-142
+  s_836ef0b51f90c7::t_e7c5b0b5487475 272-275
+test/opencode-zen-fingerprint.test.ts
+  s_836ef0b51f90c7::t_91d625ba06c1ba 126-151
+  s_836ef0b51f90c7::t_1f292c1ea91da4 40,48,50,52-56,58,64,74-76,84-104
+  s_836ef0b51f90c7::t_93e0039765760f 11,13,20-21
+  s_836ef0b51f90c7::t_1559b9e8cb4787 152,154,157
+  s_c511d2b0c2c67b::t_80feb5b9bd1597 105-106
+test/opencode-zen-session.test.ts
+  s_836ef0b51f90c7::t_27660359d99996 82-85,88,90-93,98-99,102,106,108-109,113-114,116
+  s_836ef0b51f90c7::t_b1d4fd4607f05d 56-58,60-67
+docs/histories/2026-10/20261026-1506-zen-gate-2026-10-26-refresh-adaptation.md
+  s_836ef0b51f90c7::t_b701ed41637841 1-73
+  s_836ef0b51f90c7::t_c8fdfe6a8dbe10 74-76
+packages/opencode-zen/src/session.ts
+  s_836ef0b51f90c7::t_546caeac40c29b 71-75,77-78
+  s_836ef0b51f90c7::t_73a85dd2023a2b 102-103
+  s_836ef0b51f90c7::t_00555ed6c3e936 122-124,130-138
+  s_836ef0b51f90c7::t_0d872818f4d160 6-17,20-21
+packages/opencode-zen/src/index.ts
+  s_836ef0b51f90c7::t_81d36699211c9a 65
+  s_5f61b871107c39::t_f90b934a780b22 707-708
+  s_836ef0b51f90c7::t_da973c3a263323 457-459
+  s_836ef0b51f90c7::t_fb65d7565eb426 55-56
+  s_836ef0b51f90c7::t_500026f3269d1f 42,45-48,53-54
+  s_836ef0b51f90c7::t_90883b69098210 442
+  s_836ef0b51f90c7::t_f3f943cb5f3020 134-138
+  s_64bf2c1f13fd2d::t_717343b071d55d 130
+scripts/zen-gate-probe.ts
+  s_836ef0b51f90c7::t_568f7c5a65353a 4-16,19,21,25-26,30,36,44,61,86,106,143-150,154-157,164-172,184,191,193
+docs/fingerprint-data.md
+  s_c511d2b0c2c67b::t_ff4f4d4b660451 13,38-44,152-155,217-236,277
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "71e7c154696df5b5eee696e74592d5ccf9ec18b8",
+  "prompts": {},
+  "sessions": {
+    "s_5f61b871107c39": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_ad3430a5b5dd052f28240d7412671ab9",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_64bf2c1f13fd2d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17643-1e43-7562-8d1e-3ef011653385",
+        "model": "cliproxy/gpt-6-astra"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_836ef0b51f90c7": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_df77eab80feb887264359bf74b46c6c7",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_c511d2b0c2c67b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a17610-d43b-7d30-8168-24eaf63ca149",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
