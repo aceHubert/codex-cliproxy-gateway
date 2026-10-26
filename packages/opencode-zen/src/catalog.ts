@@ -136,10 +136,10 @@ export function buildOpencodeZenCatalog(
       delete model.max_context_window;
       delete model.effective_context_window_percent;
     }
-    // 提示词回落（2026-10-14 决策）：门禁不检查 system 内容后不再替换 base_instructions /
-    // instructions_template，条目保留快照基底的官方 Codex 提示词——客户端由此
-    // 恢复自身的操作性指令（apply_patch freeform 协议、shell 约定）。OpenCode 官方
-    // 模板仍留在 fingerprint-data.json 作回退材料。
+    // 提示词策略（2026-10-26 修订）：门禁恢复 system 内容校验（须包含官方当前代模板），
+    // 转发层经 mergeOpencodeZenGateSystem 把客户端 system 包裹进官方模板（模板在前、
+    // 客户端指令追加在后）。目录条目保留快照基底的官方 Codex 提示词——客户端由此
+    // 恢复自身的操作性指令（apply_patch freeform 协议、shell 约定），运行时再整体包裹。
     return model;
   });
   return { models };
@@ -269,9 +269,10 @@ export type OpencodeZenProbeSignal = "served" | "unsupported" | "offline" | "gat
 
 /**
  * 探针响应分类：协议不符（400 ModelProtocolUnsupported）→ unsupported；模型不存在
- * 或需账号（401、404）→ offline；门禁拒绝（403 FreeTierError）→ gate；其余
- * （200、429、5xx、403 RegionError）→ served——地区限制与本地网络相关，视为模型
- * 在该端点被正常服务，不作为剔除依据。
+ * 或需账号（401、404）→ offline；历史形态的门禁拒绝（403 FreeTierError）→ gate；
+ * 其余（200、429、5xx、403 RegionError）→ served——现行门禁以 429
+ * FreeUsageLimitError 拒绝且与匿名池耗尽同文案，无法区分时按"被服务"保守保留；
+ * 地区限制与本地网络相关，同样不作为剔除依据。
  */
 export function classifyOpencodeZenProbeSignal(status: number, body: string): OpencodeZenProbeSignal {
   const text = body.toLowerCase();

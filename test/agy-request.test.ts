@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { translateAgyRequest, AgyRequestError } from "@agent-proxy/agy/request";
-import { AGY_DEFAULT_PROJECT } from "@agent-proxy/agy/transport";
+import { AGY_AGENT_SYSTEM_PROMPT, AGY_DEFAULT_PROJECT } from "@agent-proxy/agy/transport";
 
 const TIMEOUT = { timeout: 30_000 };
 type Json = Record<string, any>;
@@ -19,7 +19,7 @@ function translated(body: Json): { wrapper: Json; request: Json } {
   return { wrapper: result.wrapper as Json, request };
 }
 
-test("agy 请求转换：instructions 与 system/developer 并入 systemInstruction", TIMEOUT, () => {
+test("agy 请求转换：instructions 与 system/developer 被官方提示词整体替换", TIMEOUT, () => {
   const { request } = translated({
     instructions: "你是编码助手",
     input: [
@@ -28,8 +28,22 @@ test("agy 请求转换：instructions 与 system/developer 并入 systemInstruct
     ],
   });
   assert.equal(request.systemInstruction.role, "user");
-  assert.deepEqual(request.systemInstruction.parts.map((part: Json) => part.text), ["你是编码助手", "系统规则"]);
+  assert.deepEqual(request.systemInstruction.parts.map((part: Json) => part.text), [AGY_AGENT_SYSTEM_PROMPT]);
+  assert.ok(!JSON.stringify(request).includes("你是编码助手") && !JSON.stringify(request).includes("系统规则"), "客户端系统内容不进入上游");
   assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "解释 TIME_WAIT" }] }]);
+});
+
+test("agy 请求转换：chat 源的 system 消息被官方提示词整体替换", TIMEOUT, () => {
+  const result = translateAgyRequest({
+    messages: [
+      { role: "system", content: "You are a helper" },
+      { role: "user", content: "检查文件" },
+    ],
+  }, "gemini-3.8-flash", "chat-completions");
+  const request = result.wrapper.request as Json;
+  assert.deepEqual(request.systemInstruction.parts, [{ text: AGY_AGENT_SYSTEM_PROMPT }]);
+  assert.ok(!JSON.stringify(request).includes("You are a helper"), "客户端 system 消息不进入上游");
+  assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "检查文件" }] }]);
 });
 
 test("agy 请求转换：assistant 历史映射 model 角色", TIMEOUT, () => {
@@ -118,7 +132,8 @@ test("agy 请求转换：仅在增补信封声明的工具可被选择，服务�
   assert.deepEqual(request.toolConfig.functionCallingConfig, { mode: "ANY", allowedFunctionNames: ["shell"] });
   assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "检查文件" }] }]);
   assert.deepEqual(result.dropped, ["web_search"]);
-  assert.match(request.systemInstruction.parts[0].text, /web_search/);
+  assert.equal(request.systemInstruction.parts[0].text, AGY_AGENT_SYSTEM_PROMPT, "官方提示词为 systemInstruction 基底");
+  assert.match(request.systemInstruction.parts[1].text, /web_search/, "剥离旁白接续其后");
 });
 
 test("agy 请求转换：无效增补工具声明抛出 AgyRequestError", TIMEOUT, () => {
@@ -270,7 +285,8 @@ test("agy 请求转换：剥离的服务器工具写入系统旁白，reasoning 
   }, "gemini-3.8-flash");
   const innerRequest = wrapper.request as Json;
   assert.deepEqual(dropped, ["web_search"]);
-  assert.match(innerRequest.systemInstruction.parts[0].text, /web_search/);
+  assert.equal(innerRequest.systemInstruction.parts[0].text, AGY_AGENT_SYSTEM_PROMPT, "官方提示词为 systemInstruction 基底");
+  assert.match(innerRequest.systemInstruction.parts[1].text, /web_search/, "剥离旁白接续其后");
   const text = JSON.stringify(innerRequest.contents);
   // reasoning 历史不进入 contents；服务器调用历史降级为占位摘要（含查询词）。
   assert.ok(!text.includes("秘密思考"));

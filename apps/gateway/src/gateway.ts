@@ -1663,7 +1663,7 @@ const pluginAwareWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> = {
       }
       return socket.data.pluginSession.message(socket, typeof data === "string" ? data : new Uint8Array(data));
     }
-    return realtimeWebSocketHandler.message(socket, data);
+    return realtimeWebSocketHandler.message?.(socket, data);
   },
   drain(socket) {
     if (socket.data.pluginSession) return socket.data.pluginSession.drain?.(socket);

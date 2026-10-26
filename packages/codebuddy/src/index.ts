@@ -172,8 +172,8 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
       try {
         await startupRefresh?.catch(() => {});
         const catalog = await catalogStore.catalog();
-        // 系统提示词已在 cloneCodexBase 合成时替换（含 model_messages 模板），缓存即成品；
-        // workbuddy/* 沿用同一份（本机无 WorkBuddy IDE 与其产品配置，未做 CODEBUDDY_BRAND_NAME 品牌名替换，见技术债）。
+        // 目录缓存即成品（官方提示词由请求转换层整体注入，cli/work 共用同一转换，
+        // 任何客户端协议进入均生效）。
         return updateCatalogMeta(catalog);
       } catch { return { models: [] }; }
     },

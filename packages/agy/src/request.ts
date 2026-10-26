@@ -1,6 +1,6 @@
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
-import { AGY_DEFAULT_PROJECT } from "./transport.ts";
+import { AGY_AGENT_SYSTEM_PROMPT, AGY_DEFAULT_PROJECT } from "./transport.ts";
 
 /**
  * Codex Responses → Antigravity v1internal generateContent 请求转换。
@@ -105,21 +105,6 @@ function safeToolName(name: string): string {
 
 function textPart(value: Record<string, unknown>, field: string): GeminiPart {
   return { text: string(value.text, `${field}.text`) };
-}
-
-function systemText(value: unknown, field: string): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value)) fail(`${field} 必须是字符串或内容数组`);
-  const parts: string[] = [];
-  for (const raw of value) {
-    if (!record(raw)) fail(`${field} 包含无效内容块`);
-    if (raw.type === "input_text" || raw.type === "output_text" || raw.type === "text") {
-      parts.push(string(raw.text, `${field}.text`));
-    } else {
-      fail(`${field} 的 system 内容不支持图片等非文本块`);
-    }
-  }
-  return parts.join("\n\n");
 }
 
 function toolIdentity(rawName: unknown, rawNamespace?: unknown): { name: string; original: string; namespace?: string } {
@@ -557,8 +542,9 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
       }
       if (item.type === "message" || item.type === undefined) {
         if (item.role === "system" || item.role === "developer") {
+          // 客户端系统级内容整体替换为官方 AGY 提示词（catalog 不再注入，任何
+          // 客户端协议进入都在转换层统一注入），不再收集进 system。
           pendingAssistant = undefined;
-          system.push(systemText(item.content, `${item.role} 消息`));
           continue;
         }
         if (item.role !== "user" && item.role !== "assistant") fail(`不支持的消息 role ${String(item.role)}`);
@@ -669,9 +655,9 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
 
   const inner: Record<string, unknown> = {
     contents,
-    ...(system.length || body.instructions !== undefined ? {
-      systemInstruction: { role: "user", parts: [...(body.instructions !== undefined ? [{ text: body.instructions }] : []), ...system.map((text) => ({ text }))] },
-    } : {}),
+    // 官方 AGY 提示词为 systemInstruction 唯一基底；客户端 instructions 与
+    // system/developer 内容已剥离，网关旁白（dropped 工具通告）接在其后。
+    systemInstruction: { role: "user", parts: [{ text: AGY_AGENT_SYSTEM_PROMPT }, ...system.map((text) => ({ text }))] },
     ...(convertedTools.tools.length ? { tools: [{ functionDeclarations: convertedTools.tools }] } : {}),
     generationConfig,
   };

@@ -127,7 +127,6 @@ export interface CatalogServices {
   mergeCatalog(native: ModelCatalog, proxy: ModelCatalog, prefix?: string, overrides?: ModelOverrideRule[]): ModelCatalog;
   synthesizeModelEntry(id: string, priority: number, snapshot: ModelCatalog, vendors?: ModelOverrideRule[], overrides?: ModelOverrideRule[], baseSlug?: string): ModelEntry;
   parseCodexCatalog(value: unknown): ModelCatalog;
-  withAgentSystemPrompt(entry: ModelEntry, prompt: string): ModelEntry;
   invalidateModelsCache(file: string): void;
   clearModelsCacheEntries(file: string, matches: (slug: string) => boolean): boolean;
 }

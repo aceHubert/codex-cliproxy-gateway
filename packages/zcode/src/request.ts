@@ -1,7 +1,8 @@
-import { BridgeConversionError, convertRequest, normalizeResponsesToolDeclarations } from "@agent-proxy/llm-bridge";
+import { BridgeConversionError, convertRequest, normalizeResponsesToolDeclarations, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
+import { ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import { decodeZcodeThinking, isZcodeRecord } from "./wire.ts";
 import type { ZcodeTranslatedRequest, ZcodeToolMap } from "./wire.ts";
 import { ANALYZE_IMAGE_SYSTEM_NOTE, ANALYZE_IMAGE_TOOL_DECLARATION, ANALYZE_IMAGE_TOOL_NAME, collectZcodeImages } from "./vision.ts";
@@ -258,6 +259,9 @@ export async function translateZcodeRequest(body: Record<string, unknown>, upstr
     if (format !== undefined && (!record(format) || format.type !== "text")) fail("ZCode 不支持 Responses 的结构化输出格式");
   }
   if (body.instructions !== undefined && typeof body.instructions !== "string") fail("instructions 必须是字符串");
+  // 官方 ZCode 提示词整体替换客户端系统内容（catalog 不再注入，任何客户端协议
+  // 进入都在转换层统一注入）：入口先剥离 instructions 与 system/developer 内容。
+  body = stripClientSystemPrompt(to, body);
 
   // 上游 token 上限按来源取参：responses 用 max_output_tokens，chat-completions /
   // anthropic 用 max_tokens，gemini 用 generationConfig.maxOutputTokens；缺省走服务默认 16384。
@@ -274,8 +278,9 @@ export async function translateZcodeRequest(body: Record<string, unknown>, upstr
   const identities: ToolIdentityMap = new Map();
 
   const messages: Message[] = [];
-  const system: string[] = [];
-  if (typeof body.instructions === "string" && body.instructions) system.push(body.instructions);
+  // 官方 ZCode 提示词为上游系统槽唯一基底；客户端系统内容已入口剥离，
+  // 网关旁白（dropped 工具通告、视觉适配说明）随后拼装。
+  const system: string[] = [ZCODE_AGENT_SYSTEM_PROMPT];
   let passthroughChoice: unknown;
   let passthroughStopSequences: unknown;
   let passthroughTools: Block[] | undefined;
@@ -292,7 +297,6 @@ export async function translateZcodeRequest(body: Record<string, unknown>, upstr
       const converted = await convertRequest("anthropic", to, leg.body!, { model: upstreamModel, mapToolName: zcodeToolMapper });
       for (const [mapped, identity] of converted.tools) identities.set(mapped, identity);
       for (const message of anthropicMessagesOf(converted)) addMessage(messages, message.role, message.content);
-      if (typeof converted.body.system === "string" && converted.body.system) system.push(converted.body.system);
       passthroughTools = Array.isArray(converted.body.tools) ? converted.body.tools.filter(record) : undefined;
       passthroughChoice = converted.body.tool_choice;
       if (Array.isArray(converted.body.stop_sequences) && converted.body.stop_sequences.every((entry) => typeof entry === "string")) {

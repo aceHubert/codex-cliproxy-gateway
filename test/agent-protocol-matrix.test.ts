@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { translateCodebuddyRequest } from "@agent-proxy/codebuddy/request";
+import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/codebuddy/request-context";
 import { createCodebuddyResponse as codebuddyClientResponse } from "@agent-proxy/codebuddy/response";
 import { translateQoderRequest } from "@agent-proxy/qoder/request";
+import { QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
 import { translateQoderResponse } from "@agent-proxy/qoder/response";
 import { translateZcodeRequest } from "@agent-proxy/zcode/request";
+import { ZCODE_AGENT_SYSTEM_PROMPT } from "@agent-proxy/zcode/request-context";
 import { createZcodeClientResponse } from "@agent-proxy/zcode/response";
 import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
 import { translateAgyRequest } from "@agent-proxy/agy/request";
@@ -50,7 +53,7 @@ test("CodeBuddy chat 源：messages 转换与 reasoning_effort 透传", async ()
     reasoning_effort: "high",
   }, "m", "chat-completions");
   const messages = body.messages as Array<Json>;
-  assert.equal(messages[0]!.content, "服务提示");
+  assert.equal(messages[0]!.content, CODEBUDDY_AGENT_SYSTEM_PROMPT, "官方主提示词整体替换客户端 system");
   const assistant = messages[2]!;
   assert.equal((assistant.tool_calls as Array<Json>)[0]!.id, "c1");
   const tool = messages[3]!;
@@ -73,7 +76,7 @@ test("CodeBuddy anthropic 源：tool_use/tool_result 配对与 system 投影", a
     tools: [{ name: "f", description: "d", input_schema: { type: "object" } }],
   }, "m", "anthropic");
   const messages = body.messages as Array<Json>;
-  assert.equal(messages[0]!.content, "服务提示");
+  assert.equal(messages[0]!.content, CODEBUDDY_AGENT_SYSTEM_PROMPT, "官方主提示词整体替换顶层 system");
   const assistant = messages[2]!;
   assert.equal(((assistant.tool_calls as Array<Json>)[0]!.function as Json).name, "f");
   assert.equal(messages[3]!.tool_call_id, "t1");
@@ -115,7 +118,7 @@ test("Qoder chat 源：私有信封的 messages/tools/parameters 布局", async 
     tools: [{ type: "function", function: { name: "f", parameters: { type: "object" } } }],
     max_tokens: 128,
   }, "qfmodel", undefined, "chat-completions");
-  assert.equal(body.system, "系统");
+  assert.equal(body.system, QODER_AGENT_SYSTEM_PROMPT, "官方提示词整体替换客户端 system 消息");
   const messages = body.messages as Array<Json>;
   assert.equal(messages[0]!.role, "system");
   const assistant = messages[2]!;
@@ -174,7 +177,7 @@ test("ZCode chat 源：messages → anthropic 体，thinking 预算表生效", a
     max_tokens: 4096,
     reasoning_effort: "high",
   }, "glm-5.3", "chat-completions");
-  assert.equal(body.system, "服务提示");
+  assert.equal(body.system, ZCODE_AGENT_SYSTEM_PROMPT, "官方提示词整体替换客户端 system 消息");
   const messages = body.messages as Array<Json>;
   // anthropic 形状：user → assistant(tool_use) → user(tool_result)；tool 结果并入 user。
   const assistant = messages[1]!;
@@ -328,7 +331,7 @@ test("ZCode anthropic 源：同协议统一经桥接，消息/工具/选择消�
   const assistant = messages[1]!;
   const blocks = assistant.content as Array<Record<string, unknown>>;
   assert.equal(blocks.filter((block) => block.type === "tool_use").length, 1);
-  assert.equal(body.system, "SYS");
+  assert.equal(body.system, ZCODE_AGENT_SYSTEM_PROMPT, "官方提示词整体替换同协议客户端的顶层 system");
   assert.equal(body.max_tokens, 300);
   assert.deepEqual(body.stop_sequences, ["END"]);
   const choice = body.tool_choice as Record<string, unknown>;

@@ -88,7 +88,7 @@ async function fixture(
               { id: "claude-opus-5" },
             ] });
           }
-          if (target.endsWith("/inference/v1/chat/completions")) {
+          if (target.endsWith("/inference/openai/v1/chat/completions")) {
             upstream = {
               url: target,
               headers: headersToObject(new Headers(init?.headers)),
@@ -335,7 +335,7 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补
     assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
     assert.match(await response.text(), /TIME_WAIT/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
+    assert.equal(up.url, "https://opencode.ai/inference/openai/v1/chat/completions");
     assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
     assert.equal(up.headers.authorization, "Bearer public");
     assert.equal(up.headers["x-opencode-client"], "cli");
@@ -346,11 +346,12 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补
     assert.equal(up.headers["x-opencode-session-id"], session, "门禁硬性要求（缺失 403）");
     assert.equal(up.headers["x-session-affinity"], session);
     assert.equal(up.headers["x-session-id"], session);
-    // 请求体：剥前缀、强制流式、消息原样透传（无工具也合并官方定义）、缓存键对齐会话。
+    // 请求体：剥前缀、强制流式、无 system 时前插官方模板（门禁包含校验）、缓存键对齐会话。
     assert.equal(up.body.model, "nemotron-3.5-lightning-free");
     assert.equal(up.body.stream, true);
     assert.equal(up.body.prompt_cache_key, session);
-    assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "不注入模板，客户端消息原样在最前");
+    assert.equal(up.body.messages[0].content, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, "无 system 时前插官方模板 system");
+    assert.equal(String(up.body.messages[1].content), "解释 TCP TIME_WAIT 状态", "客户端消息紧随模板之后");
     assert.deepEqual(
       (up.body.tools as Json[]).map((tool) => tool.function.name),
       ["read"],
@@ -387,7 +388,7 @@ test("会话连续性：Codex 的 session-id 头确定性复用同一上游会�
     const handler = create(undefined, {      fetch: async (url, init) => {
         const target = String(url);
         if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           const headers = new Headers(init?.headers);
           captured.push(headers.get("x-opencode-session") ?? "");
           assert.equal(headers.get("x-opencode-session-id"), headers.get("x-opencode-session"), "四件套镜像同一会话");
@@ -420,7 +421,7 @@ test("非流式客户端：上游强制流式、网关聚合为完整 chat.compl
       fetch: async (url, init) => {
         const target = String(url);
         if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           return sse([
             chunkFrame({ role: "assistant", content: "TIME_WAIT " }),
             chunkFrame({ content: "是主动关闭方等待 2MSL 的状态" }),
@@ -450,7 +451,7 @@ test("工具调用：客户端工具与官方工具集合并转发，SSE 聚合�
       fetch: async (url, init) => {
         const target = String(url);
         if (target.endsWith("/inference/v1/models")) return Response.json({ data: [] });
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           fixture.upstream = {
             url: target,
             headers: headersToObject(new Headers(init?.headers)),
@@ -483,7 +484,8 @@ test("工具调用：客户端工具与官方工具集合并转发，SSE 聚合�
     assert.ok(names.includes("lookup_issue"));
     assert.ok(names.includes("read"), "门禁要求合并官方 read 定义");
     assert.equal(names.length, 2, "最小合并面：只补 read，不并入其余官方工具");
-    assert.equal(String(up.body.messages[0].content), "解释 TCP TIME_WAIT 状态", "system 内容不注入模板（首条就是客户端消息）");
+    assert.equal(up.body.messages[0].content, OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, "无 system 时前插官方模板 system");
+    assert.equal(String(up.body.messages[1].content), "解释 TCP TIME_WAIT 状态");
   });
 });
 
@@ -535,7 +537,7 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "echo-responses-free": { provider: { npm: "@ai-sdk/openai" } } } } });
         }
-        if (target.endsWith("/inference/v1/responses")) {
+        if (target.endsWith("/inference/openai/v1/responses")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
@@ -558,7 +560,7 @@ test("Responses 入口：responses 协议模型直通（模型替换 + 指纹标
     const text = await response.text();
     assert.equal(text, nativeStream, "原生 Responses 的 custom 调用应原样直通");
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/inference/v1/responses");
+    assert.equal(up.url, "https://opencode.ai/inference/openai/v1/responses");
     assert.equal(up.body.model, "echo-responses-free");
     assert.deepEqual((up.body.tools as Json[]).find((tool) => tool.name === "apply_patch"), { type: "custom", name: "apply_patch", format: { type: "text" } });
     assert.equal(up.headers["user-agent"], OPENCODE_ZEN_CLIENT_USER_AGENT);
@@ -578,7 +580,7 @@ test("Responses 入口：muse-spark 剥离 additional_tools 信封并原样提�
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "muse-spark-1.3-contributor-free": { provider: { npm: "@ai-sdk/openai" } } } } });
         }
-        if (target.endsWith("/inference/v1/responses")) {
+        if (target.endsWith("/inference/openai/v1/responses")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
@@ -637,7 +639,7 @@ test("Responses 入口：非 muse-spark 的 responses 协议模型不受净化�
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "gpt-echo-responses": { provider: { npm: "@ai-sdk/openai" } } } } });
         }
-        if (target.endsWith("/inference/v1/responses")) {
+        if (target.endsWith("/inference/openai/v1/responses")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return new Response(nativeStream, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
@@ -682,7 +684,7 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
         }
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return sse([
             chunkFrame({ role: "assistant", content: "issue 42 done" }),
@@ -713,9 +715,9 @@ test("Responses 入口：chat 协议模型经严格转换（模板注入 + tool 
     assert.match(text, /response\.output_text\.delta/);
     assert.match(text, /issue 42 done/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
+    assert.equal(up.url, "https://opencode.ai/inference/openai/v1/chat/completions");
     const messages = up.body.messages as Json[];
-    assert.ok(String(messages[0]!.content).startsWith("SYS-INSTR"), "客户端 instructions 原样成为首条 system（不注入模板）");
+    assert.equal(messages[0]!.content, `${OPENCODE_ZEN_AGENT_SYSTEM_PROMPT}\n\n# Client Instructions\nSYS-INSTR`, "客户端 instructions 包裹进官方模板 system（模板在前）");
     assert.ok(messages.some((message) => message.role === "assistant" && Array.isArray(message.tool_calls) && message.tool_calls[0].id === "call_1"));
     assert.ok(messages.some((message) => message.role === "tool" && message.tool_call_id === "call_1"));
     assert.deepEqual((up.body.tools as Json[]).map((tool) => tool.function.name), ["lookup_issue", "read"], "真实工具先保留，再增补门禁 read");
@@ -732,7 +734,7 @@ test("Responses 增补的 custom 工具经过 Zen 门禁后仍可调用并还原
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
         }
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           const body = JSON.parse(String(init?.body)) as Json;
           const tools = body.tools as Json[];
           const exec = tools.find((tool) => tool.function.name !== "read");
@@ -778,7 +780,7 @@ test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，a
         if (target === "https://models.opencode.ai/api.json") {
           return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": {} } } });
         }
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return sse([
             chunkFrame({ role: "assistant", content: "chat 源回答" }),
@@ -806,7 +808,7 @@ test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，a
     assert.match(body, /chat 源回答/);
     assert.match(body, /message_stop/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.equal(up.url, "https://opencode.ai/inference/v1/chat/completions");
+    assert.equal(up.url, "https://opencode.ai/inference/openai/v1/chat/completions");
     const messages = up.body.messages as Json[];
     assert.ok(messages.some((message) => message.role === "user" && JSON.stringify(message.content).includes("你好")));
   });
@@ -821,7 +823,7 @@ test("Messages 入口：chat 协议模型经转换渲染为 Anthropic 事件，a
           // 元数据存在的模型不进入探针，协议由 npm 映射而来。
           return Response.json({ opencode: { models: { "nemotron-3.5-lightning-free": { provider: { npm: "@ai-sdk/anthropic" } } } } });
         }
-        if (target.endsWith("/inference/v1/messages")) {
+        if (target.endsWith("/inference/openai/v1/messages")) {
           upstreamSeen = true;
           return new Response(anthropicSse, { status: 200, headers: { "content-type": "text/event-stream" } });
         }
@@ -1040,7 +1042,7 @@ for (const stream of [true, false]) {
       assert.deepEqual(call.input, {});
       const upstream = fixture.upstream as NonNullable<Fixture["upstream"]>;
       assert.deepEqual((upstream.body.tools as Json[]).map((tool) => tool.function.name), ["read"]);
-      assert.equal(upstream.body.messages[0].content, "客户端系统指令", "不注入 OpenCode 模板");
+      assert.equal(upstream.body.messages[0].content, `${OPENCODE_ZEN_AGENT_SYSTEM_PROMPT}\n\n# Client Instructions\n客户端系统指令`, "客户端 system 包裹进官方模板");
       assert.equal(upstream.body.stream, true);
     }, () => sse([
       chunkFrame({ tool_calls: [{ index: 0, id: "call_message_read", type: "function", function: { name: "read", arguments: "{}" } }] }),
@@ -1237,7 +1239,7 @@ test("gemini 客户端入口：URL 携带模型与流式，gemini 协议模型�
           // 元数据 provider.npm 映射 @ai-sdk/google → gemini 端点协议。
           return Response.json({ opencode: { models: { "exo-free": { provider: { npm: "@ai-sdk/google" } } } } });
         }
-        if (target.includes("/inference/v1/models/") && target.includes(":streamGenerateContent")) {
+        if (target.includes("/inference/openai/v1/models/") && target.includes(":streamGenerateContent")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return new Response([
             `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "gemini 直通回答" }], role: "model" } }] })}`,
@@ -1259,7 +1261,7 @@ test("gemini 客户端入口：URL 携带模型与流式，gemini 协议模型�
     const body = await response.text();
     assert.match(body, /gemini 直通回答/);
     const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
-    assert.match(up.url, /\/inference\/v1\/models\/exo-free:streamGenerateContent\?alt=sse$/);
+    assert.match(up.url, /\/inference\/openai\/v1\/models\/exo-free:streamGenerateContent\?alt=sse$/);
     assert.equal((up.body.contents as Json[])[0]?.role, "user");
   });
 });
@@ -1274,7 +1276,7 @@ test("gemini 客户端入口：chat 协议模型单跳转换并渲染回 Gemini 
           // 元数据缺失时探针裁决协议；直接给出 chat 探针结果。
           return Response.json({ opencode: { models: {} } });
         }
-        if (target.endsWith("/inference/v1/chat/completions")) {
+        if (target.endsWith("/inference/openai/v1/chat/completions")) {
           fixture.upstream = { url: target, headers: headersToObject(new Headers(init?.headers)), body: JSON.parse(String(init?.body)) };
           return sse([
             chunkFrame({ role: "assistant", content: "chat 转 gemini 回答" }),
@@ -1300,5 +1302,78 @@ test("gemini 客户端入口：chat 协议模型单跳转换并渲染回 Gemini 
     const messages = up.body.messages as Json[];
     assert.ok(messages.some((message) => message.role === "system" && String(message.content).includes("sys")));
     assert.ok(messages.some((message) => JSON.stringify(message.content).includes("你好")));
+  });
+});
+
+test("其他 agent 客户端系统提示词经官方模板包裹：四入口统一注入门禁模板", TIMEOUT, async () => {
+  await fixture(async (fixture) => {
+    const handler = fixture.create();
+    // 预热目录缓存（探针经 chat mock 成功后模型裁决为 chat 协议）。
+    await (await handler(new Request("http://127.0.0.1:8327/v1/models"))).text();
+    const headers = { "content-type": "application/json" };
+    // 每次真实转发覆盖 fixture.upstream，统一断言最近一次发往 chat 上游的请求体。
+    const upstreamBody = async (request: Request): Promise<Json> => {
+      const response = await handler(request);
+      const text = await response.text();
+      assert.equal(response.status, 200, `入口 ${new URL(request.url).pathname} 转发失败：${text.slice(0, 200)}`);
+      const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+      assert.equal(up.url, "https://opencode.ai/inference/openai/v1/chat/completions");
+      return up.body;
+    };
+    // 门禁包含校验（2026-10-26）：客户端提示词保留在 system 槽且被官方模板包裹在前。
+    const assertWrapped = (body: Json, sentinel: string, label: string): void => {
+      const messages = body.messages as Json[];
+      const system = messages.find((message) => message.role === "system" && String(message.content).includes(sentinel));
+      assert.ok(system, `${label}：客户端系统提示词应保留在上游 system 槽`);
+      assert.ok(
+        String(system.content).startsWith(OPENCODE_ZEN_AGENT_SYSTEM_PROMPT),
+        `${label}：官方模板应包裹在客户端提示词之前`,
+      );
+    };
+
+    // chat-completions 客户端：system 消息载体。
+    assertWrapped(await upstreamBody(new Request("http://127.0.0.1:8327/v1/chat/completions", {
+      method: "POST", headers,
+      body: JSON.stringify({ model: MODEL, messages: [
+        { role: "system", content: "CHAT-CLIENT-SENTINEL 系统提示词" },
+        { role: "user", content: "hi" },
+      ] }),
+    })), "CHAT-CLIENT-SENTINEL", "chat-completions 入口");
+
+    // responses 客户端：instructions 字段载体。
+    assertWrapped(await upstreamBody(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers,
+      body: JSON.stringify({
+        model: MODEL, instructions: "RESPONSES-SENTINEL 系统提示词", stream: true,
+        input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+      }),
+    })), "RESPONSES-SENTINEL", "responses instructions 入口");
+
+    // responses 客户端：首条 developer 消息载体（Codex 实发形状，body 无 instructions）。
+    assertWrapped(await upstreamBody(new Request("http://127.0.0.1:8327/v1/responses", {
+      method: "POST", headers,
+      body: JSON.stringify({
+        model: MODEL, stream: true,
+        input: [
+          { type: "message", role: "developer", content: [{ type: "input_text", text: "DEVELOPER-SENTINEL 系统提示词" }] },
+          { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+        ],
+      }),
+    })), "DEVELOPER-SENTINEL", "responses developer 入口");
+
+    // anthropic 客户端：顶层 system 载体。
+    assertWrapped(await upstreamBody(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST", headers,
+      body: JSON.stringify({
+        model: MODEL, system: "ANTHROPIC-SENTINEL 系统提示词", max_tokens: 64, stream: true,
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      }),
+    })), "ANTHROPIC-SENTINEL", "anthropic 入口");
+
+    // gemini 客户端：systemInstruction 载体。
+    assertWrapped(await upstreamBody(new Request(`http://127.0.0.1:8327/v1/models/${encodeURIComponent(MODEL)}:generateContent`, {
+      method: "POST", headers,
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }], systemInstruction: "GEMINI-SENTINEL 系统提示词" }),
+    })), "GEMINI-SENTINEL", "gemini 入口");
   });
 });

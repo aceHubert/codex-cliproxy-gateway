@@ -6,7 +6,7 @@ import { isIP } from "node:net";
 import { resolvePaths } from "@agent-proxy/plugin-api";
 import { createZcodeConfigCache, readZcodeAPIKeyProviders, zcodeConfigPresent, ZcodeConfigError } from "./config.ts";
 import type { ZcodeAPIKeyProvider, ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
-import { clearModelsCacheEntries, invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
+import { clearModelsCacheEntries, invalidateModelsCache } from "@agent-proxy/plugin-api";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -22,7 +22,7 @@ import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
 import { isZcodeRecord } from "./wire.ts";
-import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
+import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
 import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
@@ -98,10 +98,10 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     );
   };
   const publishServedCatalog = (catalog: ModelCatalog) => {
-    // 系统提示词在发布成品时替换（含 model_messages 模板）：zcode-catalog.json 落盘即终态，
-    // 与其它适配器的合成期替换对齐；Codex 客户端优先按模板渲染系统提示词，只改
-    // base_instructions 无效（2026-10-09 实测）。
-    servedCatalog = { models: catalog.models.map((entry) => withAgentSystemPrompt(entry, ZCODE_AGENT_SYSTEM_PROMPT)) };
+    // 目录条目保持 vendor 预设基底（base_instructions 为空串、无 model_messages 模板）；
+    // 官方 ZCode 提示词由请求转换层整体注入（request.ts，任何客户端协议进入均生效），
+    // catalog 不再改写提示词。
+    servedCatalog = { models: catalog.models };
     const changed = writeZcodeServedCatalog(servedCatalogFile, servedCatalog);
     if (!changed || !dependencies.codexModelsCacheFile) return;
     // 目录变化：既撤下已下线条目，也过期新鲜度让 Codex 主动重拉一次。

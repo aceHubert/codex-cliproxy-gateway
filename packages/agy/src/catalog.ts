@@ -2,10 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
-import { invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
+import { invalidateModelsCache } from "@agent-proxy/plugin-api";
 import { atomicWrite } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
-import { AGY_AGENT_SYSTEM_PROMPT, AGY_ENDPOINT } from "./transport.ts";
+import { AGY_ENDPOINT } from "./transport.ts";
 import { THINKING_LEVELS } from "./request.ts";
 import type { AgyCredentials } from "./credentials.ts";
 
@@ -273,7 +273,7 @@ export function buildAgyCatalog(data: AgyCatalogData): ModelCatalog {
       delete model.max_context_window;
       delete model.effective_context_window_percent;
     }
-    return withAgentSystemPrompt(model, AGY_AGENT_SYSTEM_PROMPT);
+    return model;
   };
   const emitted = new Set<AgyModelFamily>();
   const models: ModelEntry[] = [];

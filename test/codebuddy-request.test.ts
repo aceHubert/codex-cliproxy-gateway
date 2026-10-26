@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "./host-test.ts";
 import { CodebuddyRequestError, translateCodebuddyRequest } from "@agent-proxy/codebuddy/request";
+import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/codebuddy/request-context";
 import { encodeCodebuddyReasoning } from "@agent-proxy/codebuddy/wire";
 
 type Json = Record<string, unknown>;
 
-test("基础翻译：instructions/system 合并、max_tokens 与参数透传", async () => {
+test("基础翻译：客户端系统内容被官方提示词整体替换，参数透传", async () => {
   const { body, tools, dropped } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     instructions: "SYS-INSTR",
@@ -21,7 +22,8 @@ test("基础翻译：instructions/system 合并、max_tokens 与参数透传", a
   const messages = body.messages as Json[];
   assert.equal(messages.length, 2);
   assert.equal(messages[0]!.role, "system");
-  assert.equal(messages[0]!.content, "SYS-INSTR\n\nHIST-SYS");
+  assert.equal(messages[0]!.content, CODEBUDDY_AGENT_SYSTEM_PROMPT, "官方 CLI 主提示词为 system 基底");
+  assert.ok(!JSON.stringify(body).includes("SYS-INSTR") && !JSON.stringify(body).includes("HIST-SYS"), "客户端系统内容不进入上游");
   // 数组内容块保持 OpenAI 多模态 parts 形状。
   assert.deepEqual(messages[1], { role: "user", content: [{ type: "text", text: "你好" }] });
   assert.equal(body.model, "gpt-5.6-luna");
@@ -84,10 +86,10 @@ test("history：函数调用/输出配对、custom 调用、reasoning 与服务�
     ],
   }, "gpt-5.6-luna");
   const messages = body.messages as Json[];
-  // 无系统内容时注入空 system（上游要求首条为 system prompt）+ user → assistant(tool_calls)
+  // 官方主提示词 system（上游要求首条为 system prompt）+ user → assistant(tool_calls)
   // → tool → assistant(tool_calls) → tool → assistant(搜索旁白) → assistant(回答)
   assert.equal(messages.length, 8);
-  assert.deepEqual(messages[0], { role: "system", content: "" });
+  assert.deepEqual(messages[0], { role: "system", content: CODEBUDDY_AGENT_SYSTEM_PROMPT });
   const call = messages[2]!;
   assert.equal(call.role, "assistant");
   const toolCall = (call.tool_calls as Json[])[0]!;
@@ -235,13 +237,14 @@ test("不支持的字段显式报 400", async () => {
   // 未知 *_call 类型按服务器调用降级为文本摘要，不静默丢弃。
   const degraded = await translateCodebuddyRequest({ model: "m", input: [{ type: "file_search_call" }] }, "m");
   const degradedMessages = degraded.body.messages as Json[];
-  assert.deepEqual(degradedMessages[0], { role: "system", content: "" }, "无系统内容时注入空 system");
+  assert.deepEqual(degradedMessages[0], { role: "system", content: CODEBUDDY_AGENT_SYSTEM_PROMPT }, "官方主提示词为 system 基底");
   assert.match(String(degradedMessages[1]!.content), /file_search_call/);
   await assert.rejects(() => translateCodebuddyRequest({ model: "m", input: 42 }, "m"), /input 必须是/);
 });
 
-test("developer 消息的文本数组内容拼接进 system，不误报图片", async () => {
-  // Codex Desktop 把 developer 上下文发成多个 input_text 块的数组，仍是纯文本。
+test("developer 文本数组内容按整体替换剥离，不误报图片也不进入上游", async () => {
+  // Codex Desktop 把 developer 上下文发成多个 input_text 块的数组；整体替换语义下
+  // 客户端系统级内容统一剥离，不再参与 system 拼接与形状校验。
   const { body } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [
@@ -254,12 +257,13 @@ test("developer 消息的文本数组内容拼接进 system，不误报图片", 
   }, "gpt-5.6-luna");
   const messages = body.messages as Json[];
   assert.equal(messages[0]!.role, "system");
-  assert.equal(messages[0]!.content, "<app-context>\n\n<skills>");
+  assert.equal(messages[0]!.content, CODEBUDDY_AGENT_SYSTEM_PROMPT);
+  assert.ok(!JSON.stringify(body).includes("<app-context>") && !JSON.stringify(body).includes("<skills>"));
   assert.equal(messages[1]!.role, "user");
 });
 
-test("developer 消息含图片时仍显式拒绝", async () => {
-  await assert.rejects(() => translateCodebuddyRequest({
+test("developer 消息含图片时随整体替换剥离，不进入上游也不报错", async () => {
+  const { body } = await translateCodebuddyRequest({
     model: "codebuddy/gpt-5.6-luna",
     input: [{
       type: "message", role: "developer",
@@ -268,7 +272,21 @@ test("developer 消息含图片时仍显式拒绝", async () => {
         { type: "input_image", image_url: "data:image/png;base64,AAA" },
       ],
     }],
-  }, "gpt-5.6-luna"), /developer 消息不支持/);
+  }, "gpt-5.6-luna");
+  assert.ok(!JSON.stringify(body).includes("data:image/png"), "developer 内容（含图片）不进入上游");
+  assert.equal((body.messages as Json[])[0]!.role, "system");
+});
+
+test("anthropic 客户端的顶层 system 被官方提示词整体替换", async () => {
+  const { body } = await translateCodebuddyRequest({
+    model: "codebuddy/gpt-5.6-luna",
+    system: "You are Claude Code",
+    messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+  }, "gpt-5.6-luna", "anthropic");
+  const messages = body.messages as Json[];
+  assert.equal(messages[0]!.role, "system");
+  assert.equal(messages[0]!.content, CODEBUDDY_AGENT_SYSTEM_PROMPT);
+  assert.ok(!JSON.stringify(body).includes("Claude Code"), "客户端 system 不进入上游");
 });
 
 test("工具输出里的图片提升到 user 消息，tool 消息保持纯文本", async () => {

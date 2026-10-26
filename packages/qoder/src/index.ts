@@ -176,7 +176,7 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
           });
         }
       }
-      // 系统提示词已在 buildQoderCatalog 合成时替换（含 model_messages 模板），缓存即成品。
+      // 目录缓存即成品（官方提示词由请求转换层整体注入，任何客户端协议进入均生效）。
       return { models };
     },
     async refreshCatalog(): Promise<ModelCatalog> {

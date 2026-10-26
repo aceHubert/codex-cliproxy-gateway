@@ -1046,25 +1046,26 @@ test("CodeBuddy 版本常量取自本模块指纹数据文件，主提示词标�
   assert.ok(!data.titleSystemPrompt.includes("{{") && !data.titleSystemPrompt.includes("<response_language>"), "标题模板变量与空容器已剥离");
 });
 
-test("目录条目的 base_instructions 与 model_messages 模板均替换为官方 CLI 主提示词，workbuddy 沿用同一份", async () => {
+test("目录条目不再注入官方 CLI 主提示词，cli/work 共用 Codex 基线基底", async () => {
   await fixture(async ({ create }) => {
     const cli = create({ profile: "intl-cli" });
     const cliCatalog = await (await cli(new Request("http://127.0.0.1:8320/v1/models?client_version=1.0.0"))).json() as Json;
     const cliEntries = (cliCatalog.models as Json[]).filter((entry) => String(entry.slug).startsWith("codebuddy-"));
     assert.ok(cliEntries.length > 0, "cli profile 必须产出 codebuddy 目录");
-    assert.ok(cliEntries.every((entry) => entry.base_instructions === CODEBUDDY_AGENT_SYSTEM_PROMPT), "Codex 按 base_instructions 发送系统提示词");
-    assert.ok(cliEntries.every((entry) => (entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template === CODEBUDDY_AGENT_SYSTEM_PROMPT),
-      "instructions_template 必须一并替换，否则客户端按模板仍发官方提示词");
+    // 目录不再改写提示词：条目保持基线基底，官方 CLI 主提示词由请求转换层整体
+    // 注入（见 codebuddy-request 测试），客户端渲染的基底内容在上游被替换。
+    assert.ok(cliEntries.every((entry) => entry.base_instructions !== CODEBUDDY_AGENT_SYSTEM_PROMPT), "目录不再携带 CodeBuddy 官方提示词");
+    assert.ok(cliEntries.every((entry) => (entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template !== CODEBUDDY_AGENT_SYSTEM_PROMPT),
+      "instructions_template 保持基底不改写");
     const work = create({ profile: "intl-work" });
     const workCatalog = await (await work(new Request("http://127.0.0.1:8320/v1/models?client_version=1.0.0"))).json() as Json;
-    // workbuddy/* 无自有提示词，直接沿用 CodeBuddy 主提示词（未做品牌名替换，见技术债）；
-    // 同裸 ID 的 workbuddy 条目会在合并去重时被 cli 顶掉，能透出的条目同样必须带提示词。
+    // 同裸 ID 的 workbuddy 条目会在合并去重时被 cli 顶掉，能透出的条目同样保持基底。
     const family = (workCatalog.models as Json[]).filter((entry) => /^(codebuddy|workbuddy)-/.test(String(entry.slug)));
     assert.ok(family.length > 0, "work profile 必须产出 CodeBuddy 家族目录");
     for (const entry of family) {
-      assert.equal(entry.base_instructions, CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目必须带提示词：${entry.slug}`);
-      assert.equal((entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template,
-        CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目必须替换模板：${entry.slug}`);
+      assert.notEqual(entry.base_instructions, CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目保持基底：${entry.slug}`);
+      assert.notEqual((entry.model_messages as { instructions_template?: string } | undefined)?.instructions_template,
+        CODEBUDDY_AGENT_SYSTEM_PROMPT, `work 目录条目模板保持基底：${entry.slug}`);
     }
   });
 });

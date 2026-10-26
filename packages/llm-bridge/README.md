@@ -18,6 +18,10 @@ JSON。协议类型直接引用 `@agent-proxy/plugin-api` 的 `ClientProtocol`
 保留 function/custom 的声明、历史和选择身份。自定义转换器可从
 `@agent-proxy/llm-bridge/responses-tools` 导入同步的
 `normalizeResponsesToolDeclarations(body)`，在专用工具规划前复用相同规则。
+适配官方 agent 指纹的自定义转换器可导入同步的
+`stripClientSystemPrompt(protocol, body)`：按客户端入口协议返回剥离全部系统级
+内容（instructions/system 消息/顶层 system/systemInstruction）的新请求体，调用方
+原始对象保持不变，用于把官方提示词种入上游系统槽前清空客户端基底。
 
 ## 安装
 

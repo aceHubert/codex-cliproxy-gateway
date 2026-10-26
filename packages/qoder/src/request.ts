@@ -1,6 +1,7 @@
-import { BridgeConversionError, convertRequest } from "@agent-proxy/llm-bridge";
+import { BridgeConversionError, convertRequest, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
 import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import { QODER_AGENT_SYSTEM_PROMPT } from "./transport.ts";
 
 /**
  * Qoder 请求准备：标准转换统一走 @agent-proxy/llm-bridge（四种客户端来源 →
@@ -60,6 +61,12 @@ export async function translateQoderRequest(
   allowedEfforts?: string[],
   to: ClientProtocol = "responses",
 ): Promise<QoderTranslatedRequest> {
+  if (input.instructions !== undefined && typeof input.instructions !== "string") {
+    throw new QoderRequestError("instructions 必须是字符串");
+  }
+  // 官方 Qoder 提示词整体替换客户端系统内容（catalog 不再注入，任何客户端协议
+  // 进入都在转换层统一注入）：入口先剥离 instructions/system 等系统级内容。
+  input = stripClientSystemPrompt(to, input);
   const reasoning = input.reasoning;
   if (allowedEfforts && isRecord(reasoning)) {
     const effort = reasoning.effort;
@@ -76,12 +83,12 @@ export async function translateQoderRequest(
     throw error;
   }
 
-  // Qoder 服务要求首条消息为 system 且与顶层 system 一致；通用转换已把 instructions/
-  // developer 合并为首条 system（C1 修复），无系统内容时补空。messages 缺失或非数组
-  // 属于桥接合同破坏，给出可读错误而不是在 unshift 上抛 TypeError。
+  // Qoder 服务要求首条消息为 system 且与顶层 system 一致；官方 CLI 主提示词为
+  // system 基底（客户端系统内容已入口剥离），messages 缺失或非数组属于桥接合同
+  // 破坏，给出可读错误而不是在 unshift 上抛 TypeError。
   const messages = Array.isArray(converted.body.messages) ? converted.body.messages as Json[] : (() => { throw new QoderRequestError("chat 目标请求体缺少 messages 数组"); })();
   if (messages[0]?.role !== "system") {
-    messages.unshift({ role: "system", content: "" });
+    messages.unshift({ role: "system", content: QODER_AGENT_SYSTEM_PROMPT });
   }
   // 旧 codebuddy-reasoning-v1 信封按只读兼容回放到其后首条 assistant 消息。
   if (replay && to === "responses" && Array.isArray(input.input)) {

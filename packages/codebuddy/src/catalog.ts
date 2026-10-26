@@ -3,11 +3,11 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { atomicWrite } from "@agent-proxy/plugin-api";
 import { codexBaselineEntry, getCodexModelSnapshot } from "@agent-proxy/models";
-import { invalidateModelsCache, withAgentSystemPrompt } from "@agent-proxy/plugin-api";
+import { invalidateModelsCache } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
 import { profileProduct, profileRegion } from "./credentials.ts";
-import { buildCodebuddyCatalogHeaders, catalogRevision, CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
+import { buildCodebuddyCatalogHeaders, catalogRevision } from "./request-context.ts";
 
 /**
  * CodeBuddy/WorkBuddy 官方目录：`GET {endpoint}/v3/config` 拉取，按 serves scope
@@ -245,8 +245,9 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
   // 旧基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
   model.prefer_websockets = false;
   model.priority = priority;
-  // 系统提示词在合成时替换（含 model_messages 模板），随目录缓存落盘；workbuddy 条目沿用同一份主提示词。
-  return withAgentSystemPrompt(model, CODEBUDDY_AGENT_SYSTEM_PROMPT);
+  // 条目保持 Codex 基线基底（含官方模板提示词，cli/work 共用）；官方 CLI 主提示词
+  // 由请求转换层整体注入（request.ts），catalog 不再改写提示词。
+  return model;
 }
 
 /** ①~④ 字段映射（见执行计划决策记录）：改名直用 + 结构 reshape + Codex 行为基底 + CB 特有字段。 */
