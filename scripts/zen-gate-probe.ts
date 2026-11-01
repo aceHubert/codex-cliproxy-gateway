@@ -16,7 +16,7 @@
 // 出现批量 429 时先跑本脚本定位漂移层，再按 docs/fingerprint-data.md「更新方法」处理。
 //
 // 用法：
-//   bun scripts/zen-gate-probe.ts                     # 默认 8 个探针，3s 间隔
+//   bun scripts/zen-gate-probe.ts                     # 默认 11 个探针，3s 间隔
 //   bun scripts/zen-gate-probe.ts --model nemotron-3.5-lightning-free
 //   bun scripts/zen-gate-probe.ts --base https://opencode.ai/inference/openai/v1
 //
@@ -158,6 +158,10 @@ async function main(): Promise<number> {
     console.error("fingerprint-data.json 缺少 read 官方定义，先按 docs/fingerprint-data.md 更新数据文件。");
     return 2;
   }
+  // 黑名单对探针用的最小工具定义（名字是唯一变量，描述/schema 无关——2026-10-30 实测）。
+  const mkTool = (name: string) => ({ type: "function", function: {
+    name, description: "probe", parameters: { type: "object", properties: {} },
+  } });
 
   // expectPass = 当前已知画像下的预期；实测翻转即画像漂移。
   const probes: Probe[] = [
@@ -170,6 +174,8 @@ async function main(): Promise<number> {
     { id: "tools-without-read", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: CODEX_TOOLS, expectPass: false, rule: "带 tools 而 read 缺席应被拒：read 硬性在场要求（2026-10-26 复测 3/3）" },
     { id: "stale-ua-version", ua: "opencode/latest/2.0.29/cli", system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: [officialRead], expectPass: true, rule: "旧版本号 UA 应放行：UA 版本不校验" },
     { id: "extra-session-header", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: [officialRead], expectPass: true, rule: "多余 x-opencode-session-id 标头应放行：网关发全集不受影响" },
+    { id: "blocked-tool-pair", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: [mkTool("CreateWorkflow"), mkTool("GetWorkflowRun"), officialRead], expectPass: false, rule: "黑名单对 CreateWorkflow+GetWorkflowRun 同场应被拒（2026-10-30 实测；翻转=上游撤黑名单）" },
+    { id: "broken-tool-pair", ua: OPENCODE_ZEN_CLIENT_USER_AGENT, system: OPENCODE_ZEN_AGENT_SYSTEM_PROMPT, tools: [mkTool("CreateWorkflow"), mkTool("Get_Workflow_Run"), officialRead], expectPass: true, rule: "子串打断后的同场工具应放行：黑名单为子串包含匹配" },
   ];
 
   console.log(`model=${options.model}  base=${options.base}  snapshotUA=${OPENCODE_ZEN_CLIENT_USER_AGENT}\n`);

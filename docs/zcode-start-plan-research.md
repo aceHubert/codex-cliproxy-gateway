@@ -1,4 +1,4 @@
-# Magpie 对 ZCode Start Plan 支持的调研（2026-10-07，纯静态分析）
+# Magpie 对 ZCode Start Plan 支持的调研（2026-10-07，纯静态分析；2026-11-01 实测修订）
 
 调研目标：核实 magpie-community/plugins 的 ZCode 插件对 Start Plan（Weekend Build /
 Trust Build 等免费 gift bucket）的支持程度，评估「用 Magpie 稳定消耗 gift 额度」是否
@@ -167,3 +167,73 @@ Trust Build 等免费 gift bucket）的支持程度，评估「用 Magpie 稳定
 在上述信号出现前，维持本项目 start-plan 路由不暴露的决策不变；本次调研作为独立
 第三方佐证（Magpie 注释与测试独立记录了同一 3012 墙与「claim 需官方 renderer
 captcha」事实）并入该条目的证据链。
+
+---
+
+## 2026-11-01 修订：Magpie v0.1.40 与真实链路实测，start-plan 路由重新暴露
+
+10-07 调研后的关键变化与本次实测结论（对照实验全部在本机用真实凭据完成，
+材料用后即删；正式验证消耗 ZCODE WEEKEND BUILD gift 桶约数千 token）：
+
+### Magpie v0.1.40 的演进（相对 v0.1.12）
+
+- **3012 语义已变为账号级封禁**：README 引 plugins#348——zcode.z.ai 对被风控
+  封禁账号的**每个请求**回 405/3012，**官方 App 自己也中招**，只有 ZCode 支持
+  能解除；同时区分阿里云边缘封锁页（`errors.aliyun.com`/HTML）为 IP 维度。
+  即 3012 不再是（或不只是）「拦非官方流量」的专属墙。
+- **形态校验仍在前**：中继只服务「长得像 ZCode 客户端自己」的请求——官方头
+  集合、恰好三段 system 块（agent system 并入第三段，第四段被拒，#343）、
+  日期 `<system-reminder>` 首条 user turn、`metadata.user_id` 带设备 ID。
+- **UA 恢复 ai-sdk 后缀**：`ZCode/3.16.3 ai-sdk/anthropic/3.0.81`。3.17.1 拆包
+  确认 `pD`（AI SDK 客户端工厂）对所有 anthropic 请求统一追加该后缀——不是
+  start-plan 专属形态；本仓 09-29「无后缀」为 3.14.5 实流（版本演进，双端点均宽容）。
+- **gift 语义细化**：`remaining_units` 缺失=未知而非耗尽；`starts_at` 未到的
+  plan 不服务；配额错误 1113/1005（可藏在 HTTP 200 内）→ 429 + 60 秒
+  blocked；其余 gift 错误原样透传不烧 coding plan；billing 读缓存 10 分钟。
+- **freeFirst 选项**（plain 模型先花 gift、失败回退付费计划）与每日自动
+  claim（`billing/claim`，3007 时仍需官方 App）为可选增强，本仓未跟进。
+
+### 本机对照实验定位的三层根因（405/3012）
+
+用「同头同正文、只换一个变量」的方式逐步隔离：
+
+1. **billing 层畅通**：`GET /api/v1/zcode-plan/billing/balance` 以 JWT +
+   官方头子集（curl）返回 200，账号有活的 ZCODE WEEKEND BUILD 桶
+   （GLM-5.3-Flash，5 亿 token，used=0）——**账号未被封**，405 只发生在
+   模型中继。
+2. **system 前缀文本按当前客户端版本校验**：官方 3.17.1（zcode.cjs
+   `assembleSystemMessages`/`buildCliPrefixSection`）已把 cli_prefix 改为
+   **"You are ZCode, an interactive agent"**（3.14.3 是 "an interactive
+   coding agent"），并把段落重排为 identity+harness（stable）与 dynamic
+   behavior+context management（dynamic），Environment/Model/currentDate 移到
+   meta_user 首条 user turn。实测：3.17.1 文本三段形态 200；magpie 的
+   3.14.3 文本形态 405。**官方第一段 cli_prefix 不带 cache_control**（仅
+   二三段 ephemeral）。
+3. **HTTP 协议画像**：同头同正文（3.17.1 形态），curl（h1）与 node/undici
+   （恒 h1）均 200；**Bun fetch（h2）405**。官方客户端跑 Node 运行时（恒
+   h1），中继按 ALPN/协议画像拒绝 h2 流量——这解释了 09-29「换 curl 同样
+   被拦」（当时正文也不对）与 magpie 可用性的宿主依赖（OpenCode 插件进程
+   若为 Node 则天然 h1）。
+4. 细节修正：官方 environment 条目行首有一个空格（` - Platform: ...`），
+   逐字节保留。
+
+### 本仓库的落地（与 magpie 的结构差异）
+
+- 路由/凭据/目录沿用本仓套餐槽位前缀（`zcode-start-plan/`），等价 magpie 的
+  `-Trial` 且天然无回落；405/3012 透传并附中文归因（账号封禁 vs 边缘 IP）。
+- 请求形态按 3.17.1 重组（`start-plan-request.ts` + `start-plan-prompt.json`，
+  文本程序化提取自 zcode.cjs，SHA-256 校验进测试）；网关旁白并入第三段末尾。
+- 传输层 `createStartPlanFetch()`（node:https 恒 h1）绕开 Bun fetch 的 h2
+  画像；`ZcodeDependencies.startPlanFetch` 可注入，注入 `fetch`（测试）时
+  自动复用 mock 保持隔离。
+- 端到端实测：网关全链路（Responses→转换→三段形态→h1）200，回复正常，
+  `cached_tokens: 1024` 证明 system 前缀缓存与官方缓存键兼容。
+
+### 维护注意（tech-debt 关联）
+
+- 官方 prompt 文本随客户端版本滚动，**升级 ZCode.app 后 start-plan 若突然
+  405，第一 suspect 是文本换代**：重新提取 `start-plan-prompt.json`（提取
+  方法见本次历史记录与 zcode.cjs 的 `assembleSystemMessages`/`buildCliPrefix
+  Section` 等函数）。
+- `fingerprint-data.json` 的 UA 模板（`ZCode/{version}`）仅覆盖 coding plan
+  实测；start-plan 单独追加 ` ai-sdk/anthropic/3.0.81` 后缀（3.16+ 证据）。

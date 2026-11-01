@@ -352,8 +352,10 @@ test("chat → responses 未声明 custom 的同名工具仍然使用 function �
     .map((event) => event.delta).join(""), args);
 });
 
-test("chat → responses custom 参数损坏、缺失或非字符串 input 时明确失败", async () => {
-  for (const args of ["{\"input\":", "{}", "{\"input\":42}", "{\"input\":null}", "[\"patch\"]"]) {
+test("chat → responses custom 参数为非对象 JSON 时明确失败，对象形状归一继续", async () => {
+  // 对象形状但 input 缺失/非字符串/null 已改为归一为字符串（llm-bridge 统一语义，
+  // 见 llm-bridge-response 测试）；截断 JSON 与数组不是信封对象，无法无损归一，仍失败。
+  for (const args of ["{\"input\":", "[\"patch\"]"]) {
     const upstream = chatToolStream([{ id: "call_invalid", name: "apply_patch", fragments: [args] }]);
     const response = await renderResponses(upstream, "chat-completions", true, [{ type: "custom", name: "apply_patch" }]);
     const events = readSseEvents(await response.text());
@@ -367,6 +369,15 @@ test("chat → responses custom 参数损坏、缺失或非字符串 input 时�
     );
     assert.equal(jsonResponse.status, 502, args);
     assert.equal((await jsonResponse.json() as Record<string, unknown>).status, "failed", args);
+  }
+  for (const [args, expected] of [["{}", "{}"], ["{\"input\":42}", "42"], ["{\"input\":null}", "{\"input\":null}"]] as const) {
+    const upstream = chatToolStream([{ id: "call_coerced", name: "apply_patch", fragments: [args] }]);
+    const response = await renderResponses(upstream, "chat-completions", true, [{ type: "custom", name: "apply_patch" }]);
+    const events = readSseEvents(await response.text());
+    const item = events.find((event) => event.type === "response.output_item.done")!.item as Record<string, unknown>;
+    assert.equal(item.input, expected, args);
+    assert.equal(item.status, "completed", args);
+    assert.ok(events.some((event) => event.type === "response.completed"), args);
   }
 });
 

@@ -267,7 +267,11 @@ export async function createZcodeResponse(upstream: Response, options: ZcodeResp
   function cancelUpstream(): void {
     if (upstreamCanceled) return;
     upstreamCanceled = true;
-    safely(options.abort);
+    // 正常完成（completed/incomplete）只释放上游 reader：abort 回调会中止整个请求
+    // 上下文（forward 级 signal），把仍在消费输出流的 chat/anthropic/gemini 出口
+    // 误判为客户端取消（非流式聚合返回 502「响应已取消」）。异常与取消终态仍传播
+    // abort，尽快释放上游连接。
+    if (finalResponse?.status !== "completed" && finalResponse?.status !== "incomplete") safely(options.abort);
     void reader?.cancel().catch(() => undefined).finally(() => {
       try { reader?.releaseLock(); } catch { /* 取消期间可能仍有待收尾读取。 */ }
     });

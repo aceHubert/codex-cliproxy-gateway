@@ -784,7 +784,7 @@ for (const family of ["zai", "bigmodel"] as const) {
           assert.equal(call.url, `${selected.baseURL}/v1/messages`);
           assert.equal(call.headers.get("authorization"), `Bearer ${selected.apiKey}`);
           assert.equal(call.headers.get("x-api-key"), selected.apiKey);
-          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+$/);
+          assert.match(call.headers.get("user-agent")!, /^ZCode\/\S+ ai-sdk\/anthropic\/3\.0\.81$/);
           assert.equal(call.headers.get("http-referer"), "https://zcode.z.ai");
           assert.equal(call.headers.get("x-title"), "Z Code@cli");
           assert.equal(call.headers.get("x-zcode-agent"), "glm");
@@ -976,15 +976,17 @@ test("analyze_image 降级旁白遮蔽 JSON 转义形式的 key", async () => {
   });
 });
 
-test("多套餐目录并集按会话选择的套餐段路由与鉴权，未开放套餐一律 404", async () => {
+test("多套餐目录并集按会话选择的套餐段路由与鉴权，未声明套餐段一律 404", async () => {
   await fixture(async ({ create }) => {
     const individual = { ...snapshot("zai", "individual-coding-plan"), apiKey: "fake-individual-key" };
     const team = { ...snapshot("bigmodel", "team-coding-plan"), apiKey: "fake-team-key" };
+    const startPlan = { ...snapshot("zai", "start-plan"), apiKey: "fake-start-plan-jwt" };
     const calls: { url: string; headers: Headers; body: Json }[] = [];
     const handler = create({
       planCaches: {
         "individual-coding-plan": { get: async () => individual, close: () => {} },
         "team-coding-plan": { get: async () => team, close: () => {} },
+        "start-plan": { get: async () => startPlan, close: () => {} },
       },
       fetch: async (url, init) => {
         calls.push({ url, headers: new Headers(init.headers), body: JSON.parse(String(init.body)) });
@@ -998,6 +1000,8 @@ test("多套餐目录并集按会话选择的套餐段路由与鉴权，未开�
       "zcode-individual-coding-plan/glm-5.3-flash",
       "zcode-team-coding-plan/glm-5.3",
       "zcode-team-coding-plan/glm-5.3-flash",
+      "zcode-start-plan/glm-5.3",
+      "zcode-start-plan/glm-5.3-flash",
     ]);
     assert.ok(list.data.filter((item: Json) => /^zcode/.test(item.id)).every((item: Json) => item.owned_by === "zcode"));
     // 同一会话只走一个套餐：模型 slug 的套餐段决定鉴权与上游基址。
@@ -1009,11 +1013,61 @@ test("多套餐目录并集按会话选择的套餐段路由与鉴权，未开�
     assert.equal(calls[1]!.url, `${team.baseURL}/v1/messages`);
     assert.equal(calls[1]!.headers.get("x-api-key"), "fake-team-key");
     assert.deepEqual(calls.map((call) => call.body.model), ["GLM-5.3", "GLM-5.3"]);
-    // 裸 zcode/ 只属于 api-key 自定义 provider；未声明与未开放的套餐段一律 404，
-    // 其中 start-plan 因中继 captcha 门槛（code 3007）暂不暴露。
+    // 裸 zcode/ 只属于 api-key 自定义 provider；未声明的套餐段一律 404。
     assert.equal((await handler(request("zcode/glm-5.3"))).status, 404);
     assert.equal((await handler(request("zcode-unknown-plan/glm-5.3"))).status, 404);
-    assert.equal((await handler(request("zcode-start-plan/glm-5.3-flash"))).status, 404, "start-plan 暂不暴露，不得转发");
+    // start-plan 走 zcode-plan 中继：Bearer JWT、无 x-api-key、无 anthropic-beta、
+    // URL 裸 /v1/messages，正文为官方三段 system 块 + 首条日期 system-reminder turn。
+    assert.equal((await handler(request("zcode-start-plan/glm-5.3-flash", {}, "/v1/responses", { "anthropic-beta": "claude-code-20250219" }))).status, 200);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2]!.url, `${startPlan.baseURL}/v1/messages`);
+    assert.equal(calls[2]!.headers.get("x-api-key"), null);
+    assert.equal(calls[2]!.headers.get("anthropic-beta"), null);
+    assert.equal(calls[2]!.headers.get("authorization"), "Bearer fake-start-plan-jwt");
+    assert.equal(calls[2]!.headers.get("x-zcode-query-source"), "main_turn");
+    assert.equal(calls[2]!.body.model, "glm-5.3-flash");
+    assert.equal(calls[2]!.body.system.length, 3);
+    for (const block of calls[2]!.body.system) {
+      assert.equal(block.type, "text");
+    }
+    assert.equal(calls[2]!.body.system[0].text, "You are ZCode, an interactive agent");
+    assert.equal(calls[2]!.body.system[0].cache_control, undefined, "官方 cli_prefix 段不带 cache_control");
+    assert.equal(calls[2]!.body.system[1].cache_control.type, "ephemeral");
+    assert.equal(calls[2]!.body.system[2].cache_control.type, "ephemeral");
+    assert.ok(String(calls[2]!.body.messages[0].content[0].text).startsWith("# Environment\n"));
+    assert.ok(String(calls[2]!.body.messages[0].content[0].text).includes("Today's date is "));
+    assert.deepEqual(JSON.parse(calls[2]!.body.metadata.user_id), { account_uuid: "", session_id: calls[2]!.headers.get("x-session-id") });
+  });
+});
+
+test("start-plan 中继 405/3012 拒答原样透传并附中文归因，不回落付费套餐", async () => {
+  await fixture(async ({ create }) => {
+    const individual = { ...snapshot("zai", "individual-coding-plan"), apiKey: "fake-individual-key" };
+    const startPlan = { ...snapshot("zai", "start-plan"), apiKey: "fake-start-plan-jwt" };
+    const urls: string[] = [];
+    const handler = create({
+      planCaches: {
+        "individual-coding-plan": { get: async () => individual, close: () => {} },
+        "start-plan": { get: async () => startPlan, close: () => {} },
+      },
+      fetch: async (url) => {
+        urls.push(url);
+        if (url.startsWith(startPlan.baseURL)) {
+          return Response.json({ code: "3012", msg: "request has been blocked due to unusual activity" }, { status: 405 });
+        }
+        return upstream();
+      },
+    });
+    const response = await handler(request("zcode-start-plan/glm-5.3-flash"));
+    assert.equal(response.status, 405);
+    const payload = await response.json() as Json;
+    assert.ok(payload.error.message.includes("3012"));
+    assert.ok(payload.error.message.includes("unusual activity"));
+    assert.ok(payload.error.message.includes("ZCode 风控"));
+    // gift 拒绝只影响 start-plan 路由：请求不得改走个人 Coding Plan。
+    assert.deepEqual(urls, [`${startPlan.baseURL}/v1/messages`]);
+    assert.equal((await handler(request("zcode-individual-coding-plan/glm-5.3"))).status, 200);
+    assert.deepEqual(urls, [`${startPlan.baseURL}/v1/messages`, `${individual.baseURL}/v1/messages`]);
   });
 });
 
@@ -1111,5 +1165,67 @@ test("启用 ZCode 时过时 prefix 字段不再参与保留前缀校验", async
     assert.doesNotThrow(() => create());
     config.prefix = "cliproxy/";
     assert.doesNotThrow(() => create());
+  });
+});
+
+test("anthropic 出口非流式聚合在正常完成后返回完整 Message，不被误判取消", async () => {
+  await fixture(async ({ create }) => {
+    const handler = create({
+      current: async () => snapshot("zai", "individual-coding-plan"),
+      currentPlan: "individual-coding-plan",
+      fetch: async (url, init) => upstream("成功", JSON.parse(String(init.body)).tools ? "get_weather" : undefined),
+    });
+    // zcode 驱动器正常完成（completed）时的收尾不得传播 abort：否则仍在聚合的
+    // anthropic 出口把 forward 级 signal 的中止误判为客户端取消，返回 502「响应已取消」。
+    const response = await handler(request("zcode-individual-coding-plan/glm-5.3", {
+      max_tokens: 64,
+      messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+    }, "/v1/messages"));
+    const payload = await response.json().catch(() => null) as Json | null;
+    assert.ok(payload, `anthropic 非流式聚合必须成功：HTTP ${response.status}`);
+    assert.equal(response.status, 200);
+    assert.equal(payload.type, "message");
+    assert.equal(payload.role, "assistant");
+    assert.equal(payload.stop_reason, "end_turn");
+    assert.ok((payload.content as Json[]).some((block) => block.type === "text" && block.text === "成功"));
+    // Anthropic 合法的字符串 content 归一化为 text 块后同样可用。
+    const plain = await handler(request("zcode-individual-coding-plan/glm-5.3", {
+      max_tokens: 64,
+      messages: [{ role: "user", content: "你好" }],
+    }, "/v1/messages"));
+    const plainPayload = await plain.json().catch(() => null) as Json | null;
+    assert.ok(plainPayload, `字符串 content 请求必须成功：HTTP ${plain.status}`);
+    assert.equal(plain.status, 200);
+    assert.equal(plainPayload.type, "message");
+    assert.equal(plainPayload.stop_reason, "end_turn");
+    // 工具调用的 stop_reason 必须是 tool_use（Responses JSON 重放路径曾统一给 end_turn）。
+    const toolResponse = await handler(request("zcode-individual-coding-plan/glm-5.3", {
+      max_tokens: 128,
+      tools: [{ name: "get_weather", description: "查询城市天气", input_schema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } }],
+      messages: [{ role: "user", content: "查一下北京天气" }],
+    }, "/v1/messages"));
+    const toolPayload = await toolResponse.json().catch(() => null) as Json | null;
+    assert.ok(toolPayload, `工具请求必须成功：HTTP ${toolResponse.status}`);
+    assert.equal(toolPayload.stop_reason, "tool_use");
+    assert.ok((toolPayload.content as Json[]).some((block) => block.type === "tool_use" && block.name === "get_weather"));
+  });
+});
+
+test("anthropic 出口流式正常完成回归", async () => {
+  await fixture(async ({ create }) => {
+    const handler = create({
+      current: async () => snapshot("zai", "individual-coding-plan"),
+      currentPlan: "individual-coding-plan", fetch: async () => upstream("流式成功"),
+    });
+    const response = await handler(request("zcode-individual-coding-plan/glm-5.3", {
+      max_tokens: 64, stream: true,
+      messages: [{ role: "user", content: [{ type: "text", text: "你好" }] }],
+    }, "/v1/messages"));
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get("content-type")?.includes("text/event-stream"));
+    const text = await response.text();
+    assert.ok(text.includes("event: message_start"));
+    assert.ok(text.includes("流式成功"));
+    assert.ok(text.includes("event: message_stop"));
   });
 });

@@ -23,6 +23,7 @@ import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
 import { isZcodeRecord } from "./wire.ts";
 import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
+import { createStartPlanFetch, dressZcodeStartPlanBody, startPlanUpstreamUrl, zcodeStartPlanRefusalHint } from "./start-plan-request.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
 import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
@@ -47,6 +48,9 @@ export interface ZcodeDependencies {
   /** 对外目录文件 zcode-catalog.json 的存放目录；缺省为运行主目录。 */
   cacheDirectory?: string;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** start-plan 的出网传输；缺省 node:https 的 HTTP/1.1 适配器（中继拒绝 h2 画像）。
+   * 注入 fetch（测试隔离）时自动复用同一 mock，避免真实出网。 */
+  startPlanFetch?: (url: string, init: RequestInit) => Promise<Response>;
   /** 端点动态重映射；传 null 禁用（测试用），默认按官方客户端行为启用。 */
   endpointRouting?: ZcodeEndpointRouting | null;
   /** 客户端签名；传 null 禁用（测试用），默认按官方客户端行为启用。 */
@@ -112,8 +116,10 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
    * 会话级套餐路由：模型 slug 的套餐段（zcode-<kind>/）或 API provider 段
    * （zcode-<providerId>/）决定快照、目录与凭据来自哪条路由；每条路由一个
    * 独立配置缓存，key 的解析与上游调用本身不变。
-   * start-plan 暂不暴露：zcode-plan 中继在鉴权之外还要求阿里云 captcha（code 3007），
-   * 网关无法 headless 通过，暴露了也无法调用（见 docs/exec-plans/tech-debt-tracker.md）。
+   * start-plan 于 2026-11-01 起重新暴露：请求形态按官方客户端三段 system 块
+   * 重组（start-plan-request.ts，magpie-community/plugins v0.1.40 实证可过中继
+   * 形态校验）；405/3012 拒答原样透传并附中文归因。凭据仍按路由隔离，gift
+   * 失败不会烧个人/团队 Coding Plan。
    */
   type ZcodeRoute = {
     plan: ZcodeSelection["kind"];
@@ -124,8 +130,9 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
   const planRoutes: ZcodeRoute[] = [
     { plan: "individual-coding-plan" },
     { plan: "team-coding-plan" },
+    { plan: "start-plan" },
   ];
-  const identity = dependencies.identity ?? readZcodeIdentity();
+  const identity = dependencies.identity ?? readZcodeIdentity(home);
   let synchronizeAPIKeyRoutes: (strict?: boolean) => void = () => {};
   const republishFromPlans = (force = false) => {
     const current = planRoutes.map((route) => route.snapshot);
@@ -228,6 +235,9 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     // provider 的 Key 与模型变化由各自 cache 的 provider_config watcher 驱动。
   }
   const fetchUpstream = dependencies.fetch ?? ((url: string, init: RequestInit) => fetch(url, init));
+  // start-plan 走 node:https 的 HTTP/1.1 传输：中继按协议画像拒绝 Bun fetch 的 h2 流量。
+  const startPlanFetch = dependencies.startPlanFetch
+    ?? (dependencies.fetch ? dependencies.fetch : createStartPlanFetch());
   const activeRequests = new Set<AbortController>();
   const endpointRouting = dependencies.endpointRouting !== null
     ? dependencies.endpointRouting ?? new ZcodeEndpointRouting({
@@ -419,17 +429,26 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         const model = zcodeUpstreamModel(requested, snapshot);
         if (!model) { cleanup(); return fail(404, "此模型不属于 ZCode 当前套餐或厂商目录"); }
         const translated = await translateZcodeRequest(input, model, to);
+        const startPlan = snapshot.plan === "start-plan";
+        // 该请求的全部上游调用（含视觉续跑腿）统一走选定的传输。
+        const send = startPlan ? startPlanFetch : fetchUpstream;
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
-        const routedUrl = endpointRouting
-          // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中转）；resolve 内部 fail-open，失败保持原 URL。
-          ? (await endpointRouting.resolve(baseUpstreamUrl, key)).url
-          : baseUpstreamUrl;
+        const routedUrl = startPlan
+          // start-plan 中继地址固定且校验请求形态，不参与端点重映射；query 按官方形态剥离。
+          ? startPlanUpstreamUrl(baseUpstreamUrl)
+          : endpointRouting
+            // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中继）；resolve 内部 fail-open，失败保持原 URL。
+            ? (await endpointRouting.resolve(baseUpstreamUrl, key)).url
+            : baseUpstreamUrl;
         upstreamUrl = routedUrl;
         // 从当前快照重建协议头与会话归因，不采信入站客户端的 ZCode 身份或授权头。
         const context = contexts.resolve(request, snapshot);
         const headers = buildZcodeModelHeaders(identity, context, zcodePlan(snapshot), key);
-        const beta = request.headers.get("anthropic-beta")?.trim();
-        if (beta && beta.length <= 1024 && /^[\x20-\x7e]+$/.test(beta)) headers.set("anthropic-beta", beta);
+        // 中继按官方形态校验 start-plan 请求；官方 start-plan 流量不带 anthropic-beta。
+        if (!startPlan) {
+          const beta = request.headers.get("anthropic-beta")?.trim();
+          if (beta && beta.length <= 1024 && /^[\x20-\x7e]+$/.test(beta)) headers.set("anthropic-beta", beta);
+        }
         // 客户端签名作用域绑定 base origin 与当前会话；端点重映射发生在签名之后（先签后路由）。
         const signingScope = {
           apiKey: key,
@@ -440,6 +459,10 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         // 版本未知（本机未装 ZCode）时无法声明可信客户端版本，跳过签名。
         const signable = clientSigning !== undefined && signingScope.clientVersion !== "unknown";
         const body = decorateZcodeBody(translated.body, context);
+        // start-plan 正文按官方客户端形态重组（三段 system 块 + 日期 turn + 设备归因）。
+        const upstreamBody = startPlan
+          ? dressZcodeStartPlanBody(body, { family: snapshot.family, upstreamModel: model, identity, context })
+          : body;
         // 图片识别适配：请求含图片时把被吸收的 analyze_image 调用落到网关执行并续跑上游。
         let gatewayTools: ZcodeGatewayToolsHook | undefined;
         let continuationLegs = 0;
@@ -464,7 +487,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
                     if (signable) await clientSigning!.decorate(requestHeaders, signingScope);
                     return requestHeaders;
                   },
-                  fetchImpl: fetchUpstream,
+                  fetchImpl: send,
                   signal: abort.signal,
                   // 错误正文脱敏必须在截断之前发生（见 ZcodeExecutorOptions.redact）。
                   redact,
@@ -483,13 +506,13 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
               const toolResults = calls.map(({ call, result }) => ({
                 type: "tool_result", tool_use_id: call.id, content: [{ type: "text", text: result }],
               }));
-              (body.messages as unknown[]).push({ role: "assistant", content: toolUses }, { role: "user", content: toolResults });
+              (upstreamBody.messages as unknown[]).push({ role: "assistant", content: toolUses }, { role: "user", content: toolResults });
               continuationLegs++;
               // 续跑腿逐次重新签名（ts/nonce/PoW 不可复用）；签名失败按未签名继续。
               const legHeaders = new Headers(headers);
               if (signable) await clientSigning!.decorate(legHeaders, signingScope);
-              const response = await fetchUpstream(routedUrl, {
-                method: "POST", headers: legHeaders, body: JSON.stringify(body), redirect: "manual", signal: abort.signal,
+              const response = await send(routedUrl, {
+                method: "POST", headers: legHeaders, body: JSON.stringify(upstreamBody), redirect: "manual", signal: abort.signal,
               });
               if (!response.ok) {
                 // 与执行信封同规则：先对完整正文脱敏、后截断，避免跨边界 key 前缀泄漏。
@@ -501,15 +524,15 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
           };
         }
         // 记录转换后真正发往上游的正文；未开启请求日志时不付出遍历脱敏的开销。
-        upstreamRequestBody = sink ? redactValue(body) : undefined;
-        const serializedBody = JSON.stringify(body);
+        upstreamRequestBody = sink ? redactValue(upstreamBody) : undefined;
+        const serializedBody = JSON.stringify(upstreamBody);
         const postUpstream = async (): Promise<{ response: Response; signed: boolean }> => {
           // 每次发送都克隆基础头并现场签名；签名值（ts/nonce/PoW）不可跨请求复用。
           const requestHeaders = new Headers(headers);
           const signed = signable ? await clientSigning!.decorate(requestHeaders, signingScope) : false;
           upstreamRequestHeaders = requestHeaders;
           return {
-            response: await fetchUpstream(routedUrl, {
+            response: await send(routedUrl, {
               method: "POST", headers: requestHeaders, body: serializedBody, redirect: "manual", signal: abort.signal,
             }),
             signed,
@@ -539,6 +562,8 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
             if (isZcodeRecord(error) && isZcodeRecord(error.error) && typeof error.error.message === "string") message = error.error.message;
             else message = JSON.stringify(error);
           } catch { /* 非 JSON 上游错误保留脱敏正文。 */ }
+          const refusalHint = startPlan ? zcodeStartPlanRefusalHint(upstream.status, text) : undefined;
+          if (refusalHint) message = `${message}\n${refusalHint}`;
           return fail(upstream.status, message, "upstream_error");
         }
         let chunks = "";

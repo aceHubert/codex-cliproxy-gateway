@@ -680,6 +680,42 @@ test("缓存缺少国内登录时请求自愈：凭据错误触发重扫发现�
   });
 });
 
+test("Codex 多智能体历史：agent_message 与 additional_tools 信封可正常转换", async () => {
+  // Codex 实发（2026-10-30 抓包 codebuddy-v1-responses-http-*.log）：多智能体会话的
+  // input 历史带 agent_message（author/recipient 路由元数据 + input_text +
+  // encrypted_content 私有载荷）与 additional_tools 信封（tools 为空的请求里工具只
+  // 在历史内声明）。真实反例：400「不支持的 Responses history 项类型 agent_message」。
+  await fixture(async ({ create, chats }) => {
+    const handler = create({});
+    const response = await handler(request("codebuddy-intl/gpt-5.6-luna", {
+      stream: false,
+      input: [
+        { type: "additional_tools", id: "at_1", role: "developer", tools: [
+          { type: "namespace", name: "functions", description: "", tools: [
+            { type: "custom", name: "exec", description: "Run JavaScript code to orchestrate tool calls" },
+          ] },
+        ] },
+        { type: "message", role: "user", content: "跑一下" },
+        { type: "agent_message", id: "amsg_1", author: "/root/app_code", recipient: "/root",
+          content: [
+            { type: "input_text", text: "Message Type: MESSAGE\nTask name: /root\n" },
+            { type: "encrypted_content", encrypted_content: "gAAAAAB-private" },
+          ] },
+        { type: "custom_tool_call", id: "tc_1", call_id: "tc_1", name: "exec", namespace: "functions", input: "{\"timeout_ms\":20000}" },
+        { type: "custom_tool_call_output", id: "tco_1", call_id: "tc_1", output: [{ type: "output_text", text: "Wait completed." }] },
+      ],
+    }));
+    assert.equal(response.status, 200, JSON.stringify(await response.text()));
+    assert.equal(chats.length, 1);
+    const upstream = JSON.stringify(chats[0]!.body);
+    assert.ok(upstream.includes("Message Type: MESSAGE"), "agent_message 文本按 assistant 回放");
+    assert.ok(upstream.includes("Wait completed."), "信封声明的 custom 工具调用/输出成对回放");
+    assert.ok(!upstream.includes("gAAAAAB-private"), "加密载荷不得外发上游");
+    const tools = (chats[0]!.body as { tools?: unknown[] }).tools;
+    assert.equal(Array.isArray(tools) ? tools.length : 0, 1, "additional_tools 声明并入本轮工具");
+  });
+});
+
 test("请求日志不落 token 明文", async () => {
   await fixture(async ({ create, directory }) => {
     const handler = create({ config: { requestLogging: true } });

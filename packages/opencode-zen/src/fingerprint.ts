@@ -17,6 +17,8 @@ import fingerprintData from "./fingerprint-data.json";
  *    无模板的普通长文本均 429）；模板随官方发版换代，快照过期即整体 429。tools
  *    不再要求官方实名（仅客户端工具 + 最小 read 亦过；无 tools 未单测，网关恒带
  *    工具）；官方标题模板不在白名单（官方 CLI 自己的标题生成也 429）。
+ *    另有**工具名黑名单对**（2026-10-30 实测，见 OPENCODE_ZEN_BLOCKED_TOOL_NAME_PAIRS）：
+ *    特定两名同场声明即整请求 429，配额同文案；破除见 breakOpencodeZenBlockedToolNamePairs。
  * 3. **传输层**：仅接受 `stream: true`；非流式一律被拒，适配器对非流式客户端必须
  *    上游强制流式并在网关侧聚合 SSE 为完整 JSON。
  * 4. **端点层**：`https://opencode.ai/inference/openai/v1`（元数据 provider.api 同源）；
@@ -165,6 +167,124 @@ export function mergeOpencodeZenGateTools(clientTools: unknown): unknown[] {
 /** Responses 协议工具的扁平名（{type:"function", name, …}，无 function 包裹）。 */
 function flatToolName(tool: Record<string, unknown>): string | undefined {
   return typeof tool.name === "string" ? tool.name : undefined;
+}
+
+/**
+ * 上游工具名黑名单对（2026-10-30 家宽与机场双出口逐项隔离实测，大小写不敏感）：
+ * 特定两名同场声明即整请求 429 FreeUsageLimitError（与配额耗尽同文案）。匹配为
+ * **子串包含**而非整名相等——改名成 `GetWorkflowRun_z` / `GetWorkflowRun2`（仍含
+ * `getworkflowrun` 子串）照旧 429，`Get_Workflow_Run`（子串被打断）与 `ToolB`
+ * （完全换名）均 200。已确认三对，分别命中不同客户端工具族：前两对为 ZCode 的
+ * dynamic-workflow 族（`CreateWorkflow`+`GetWorkflowRun`、`AmendWorkflow`+
+ * `FillWorkflowHole`），第三对为 Codex 的多 agent 协作族（`spawn_agent`+
+ * `wait_agent`，含于 Codex Desktop 的 additional_tools 信封）——疑似按已知客户端
+ * 工具集指纹定向的反滥用规则。破除方式：同场时对第二名内禁用子串做确定性打断
+ * （子串中点插 `_`，仍含则重复打断；与在场名冲突时再追加 `_2`、`_3`…），响应侧
+ * 身份映射还原原名。新增黑名单对时在表内追加并补探针。
+ */
+const OPENCODE_ZEN_BLOCKED_TOOL_NAME_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["createworkflow", "getworkflowrun"],
+  ["amendworkflow", "fillworkflowhole"],
+  ["spawn_agent", "wait_agent"],
+];
+
+/** 在禁用子串中点插 `_` 打断包含关系；重复出现时逐个打断直至干净（有安全上限）。 */
+function breakForbiddenSubstring(name: string, forbidden: string): string {
+  let out = name;
+  for (let guard = 0; guard < 16; guard += 1) {
+    const index = out.toLowerCase().indexOf(forbidden);
+    if (index === -1) return out;
+    const cut = index + Math.floor(forbidden.length / 2);
+    out = `${out.slice(0, cut)}_${out.slice(cut)}`;
+  }
+  return `${out}_x`;
+}
+
+/** 三种上游形状的工具名改写：chat 包裹（function.name）/ Responses 扁平（name）。 */
+function renameUpstreamTool(tool: Record<string, unknown>, to: string): Record<string, unknown> {
+  const fn = tool.function;
+  if (isPlainObject(fn) && typeof fn.name === "string") {
+    return { ...tool, function: { ...(fn as Record<string, unknown>), name: to } };
+  }
+  return { ...tool, name: to };
+}
+
+export interface OpencodeZenToolPairBreak {
+  body: Record<string, unknown>;
+  /** 上游名 → 客户端原名的改名表（响应侧身份映射用）；空表 = 无需改名。 */
+  renames: Map<string, string>;
+}
+
+/** tools 内的一个可命名单元：顶层声明（declIndex 缺省）或 gemini functionDeclarations 内层声明。 */
+interface ToolNameUnit {
+  entryIndex: number;
+  declIndex?: number;
+  name: string;
+}
+
+function collectToolNameUnits(tools: unknown[]): ToolNameUnit[] {
+  const units: ToolNameUnit[] = [];
+  tools.forEach((tool, entryIndex) => {
+    if (!isPlainObject(tool)) return;
+    if (Array.isArray(tool.functionDeclarations)) {
+      (tool.functionDeclarations as unknown[]).forEach((declaration, declIndex) => {
+        if (isPlainObject(declaration) && typeof declaration.name === "string" && declaration.name) {
+          units.push({ entryIndex, declIndex, name: declaration.name });
+        }
+      });
+      return;
+    }
+    const viaFunction = toolName(tool as ToolLike);
+    const name = viaFunction ?? (typeof tool.name === "string" && tool.name ? tool.name : undefined);
+    if (name) units.push({ entryIndex, name });
+  });
+  return units;
+}
+
+/**
+ * 破除工具名黑名单对：命中对内第二名按禁用子串确定性打断（`GetWorkflowRun` →
+ * `GetWork_flowRun`；打断后仍与在场名冲突时再追加 `_2`、`_3`…），其余字段原样
+ * 保留。未命中任何对时原 body 引用直返。顶层声明（chat 包裹 / Responses 扁平）
+ * 与 gemini functionDeclarations 内层声明均处理；黑名单对均为 function 工具。
+ */
+export function breakOpencodeZenBlockedToolNamePairs(body: Record<string, unknown>): OpencodeZenToolPairBreak {
+  if (!Array.isArray(body.tools)) return { body, renames: new Map() };
+  const tools = body.tools as unknown[];
+  const units = collectToolNameUnits(tools);
+  const lowerNames = new Set(units.map((unit) => unit.name.toLowerCase()));
+  const renames = new Map<string, string>();
+  const rewritten = [...tools];
+  for (const [first, second] of OPENCODE_ZEN_BLOCKED_TOOL_NAME_PAIRS) {
+    const hasFirst = units.some((unit) => unit.name.toLowerCase().includes(first));
+    const secondUnits = units.filter((unit) => unit.name.toLowerCase().includes(second));
+    if (!hasFirst || secondUnits.length === 0) continue;
+    for (const unit of secondUnits) {
+      let candidateName = breakForbiddenSubstring(unit.name, second);
+      let attempt = 2;
+      while (lowerNames.has(candidateName.toLowerCase())) {
+        candidateName = `${breakForbiddenSubstring(unit.name, second)}_${attempt}`;
+        attempt += 1;
+      }
+      const original = rewritten[unit.entryIndex];
+      if (unit.declIndex === undefined) {
+        rewritten[unit.entryIndex] = renameUpstreamTool(original as Record<string, unknown>, candidateName);
+      } else if (isPlainObject(original) && Array.isArray(original.functionDeclarations)) {
+        rewritten[unit.entryIndex] = {
+          ...original,
+          functionDeclarations: (original.functionDeclarations as unknown[]).map((declaration, index) =>
+            index === unit.declIndex && isPlainObject(declaration)
+              ? { ...declaration, name: candidateName }
+              : declaration),
+        };
+      } else {
+        continue;
+      }
+      lowerNames.add(candidateName.toLowerCase());
+      renames.set(candidateName, unit.name);
+    }
+  }
+  if (renames.size === 0) return { body, renames };
+  return { body: { ...body, tools: rewritten }, renames };
 }
 
 /**

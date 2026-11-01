@@ -68,6 +68,36 @@ test("Codex 信封项归一化：additional_tools 并入工具且 compaction_tri
   assert.equal(notes.filter((note) => note.includes("compaction_trigger")).length, 1);
 });
 
+test("agent_message 历史项按 assistant 回放并剥离 encrypted_content 私有载荷", async () => {
+  // Codex 多智能体实发：input 历史出现 agent_message 项（author/recipient 为内部
+  // 路由元数据，content 含 input_text 与上游私有 encrypted_content）。真实反例：
+  // codebuddy 通道 400「不支持的 Responses history 项类型 agent_message」。
+  const { body, notes } = await convertRequest("chat-completions", "responses", {
+    model: "m",
+    input: [
+      { type: "message", role: "user", content: "跑一下" },
+      { type: "agent_message", id: "amsg_1", author: "/root/app_code", recipient: "/root",
+        content: [
+          { type: "input_text", text: "Message Type: MESSAGE\nTask name: /root\n" },
+          { type: "encrypted_content", encrypted_content: "gAAAAAB-private" },
+        ] },
+      { type: "agent_message", id: "amsg_2", content: "纯文本答复" },
+      { type: "message", role: "user", content: "继续" },
+    ],
+    stream: true,
+  });
+  const messages = messagesOf(body);
+  assert.equal(index(messages, 0).role, "user");
+  assert.equal(index(messages, 1).role, "assistant");
+  assert.ok(JSON.stringify(index(messages, 1).content).includes("Message Type: MESSAGE"), "agent_message 文本按 assistant 回放");
+  // 纯文本 agent_message（字符串 content）是独立一轮，不与含文本的前一轮合并。
+  assert.equal(index(messages, 2).role, "assistant");
+  assert.equal(index(messages, 2).content, "纯文本答复");
+  assert.equal(index(messages, 3).role, "user");
+  assert.ok(!JSON.stringify(body).includes("gAAAAAB-private"), "加密载荷不得进入上游请求");
+  assert.equal(notes.filter((note) => note.includes("encrypted_content")).length, 1);
+});
+
 for (const target of ["chat-completions", "anthropic", "gemini"] as const) {
   test(`additional_tools → ${target}：函数声明、参数与历史调用使用同一身份`, async () => {
     const parameters = { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false };

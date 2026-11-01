@@ -166,10 +166,16 @@ function anthropicMessagesOf(converted: { body: Record<string, unknown> }): Mess
   const raw = converted.body.messages;
   if (!Array.isArray(raw)) fail("convertRequest 未返回有效 Anthropic 消息");
   return raw.map((entry) => {
-    if (!record(entry) || (entry.role !== "user" && entry.role !== "assistant") || !Array.isArray(entry.content)) {
+    if (!record(entry) || (entry.role !== "user" && entry.role !== "assistant")) {
       fail("convertRequest 返回了无效消息");
     }
-    return { role: entry.role as "user" | "assistant", content: entry.content.filter(record) };
+    // Anthropic Messages API 允许 content 为纯字符串；anthropic 源直通保留原样，
+    // 这里归一化为 text 块数组，与收口层的块形状契约一致。
+    const content = typeof entry.content === "string"
+      ? [{ type: "text", text: entry.content }]
+      : entry.content;
+    if (!Array.isArray(content)) fail("convertRequest 返回了无效消息");
+    return { role: entry.role as "user" | "assistant", content: content.filter(record) };
   });
 }
 

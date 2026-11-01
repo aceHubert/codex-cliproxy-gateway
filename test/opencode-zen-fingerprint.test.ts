@@ -5,6 +5,7 @@ import {
   OPENCODE_ZEN_CLIENT_TOOLS,
   OPENCODE_ZEN_CLIENT_USER_AGENT,
   OPENCODE_ZEN_TITLE_SYSTEM_PROMPT,
+  breakOpencodeZenBlockedToolNamePairs,
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
@@ -220,4 +221,95 @@ test("注入请求体：reasoning_effort 按调用方传入的实时档位裁决
     reasoning_effort: "high",
   }, SESSION);
   assert.equal(noLevels.body.reasoning_effort, "high");
+});
+
+test("工具名黑名单对破除：CreateWorkflow+GetWorkflowRun 同场时打断第二名子串", () => {
+  // chat 包裹形状：命中对 → GetWorkflowRun 改名 GetWorkflowRun_z，其余原样保留。
+  const chatBody = {
+    tools: [
+      { type: "function", function: { name: "CreateWorkflow", description: "d1", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GetWorkflowRun", description: "d2", parameters: { type: "object" } } },
+      { type: "function", function: { name: "Read", description: "d3", parameters: { type: "object" } } },
+    ],
+  };
+  const chat = breakOpencodeZenBlockedToolNamePairs(chatBody);
+  assert.equal(chat.renames.get("GetWork_flowRun"), "GetWorkflowRun");
+  const names = (chat.body.tools as Array<{ function: { name: string } }>).map((t) => t.function.name);
+  assert.deepEqual(names, ["CreateWorkflow", "GetWork_flowRun", "Read"]);
+  // 打断后不得再含禁用子串（门禁为子串包含匹配，后缀式改名无效——2026-10-30 实测 _z/2 后缀仍 429）。
+  assert.ok(!names.some((name) => name.toLowerCase().includes("getworkflowrun")));
+  // 描述与 schema 原样保留（只有名字变化）。
+  const renamed = (chat.body.tools as Array<{ function: Record<string, unknown> }>)[1];
+  assert.equal(renamed.function.description, "d2");
+
+  // 未命中（只有单边）时 body 原引用直返、改名表为空。
+  const singleInput = {
+    tools: [{ type: "function", function: { name: "CreateWorkflow", parameters: { type: "object" } } }],
+  };
+  const single = breakOpencodeZenBlockedToolNamePairs(singleInput);
+  assert.equal(single.body, singleInput, "无命中时原 body 引用直返");
+  assert.equal(single.renames.size, 0);
+
+  // Responses 扁平形状同样破除。
+  const flat = breakOpencodeZenBlockedToolNamePairs({
+    tools: [
+      { type: "function", name: "createworkflow", parameters: { type: "object" } },
+      { type: "function", name: "GETWORKFLOWRUN", parameters: { type: "object" } },
+    ],
+  });
+  assert.equal(flat.renames.get("GETWORK_FLOWRUN"), "GETWORKFLOWRUN", "检测大小写不敏感");
+
+  // gemini functionDeclarations 形状同样破除。
+  const gemini = breakOpencodeZenBlockedToolNamePairs({
+    tools: [{ functionDeclarations: [
+      { name: "CreateWorkflow", parameters: { type: "object" } },
+      { name: "GetWorkflowRun", parameters: { type: "object" } },
+    ] }],
+  });
+  const declarations = (gemini.body.tools as Array<{ functionDeclarations: Array<{ name: string }> }>)[0].functionDeclarations;
+  assert.deepEqual(declarations.map((d) => d.name), ["CreateWorkflow", "GetWork_flowRun"]);
+
+  // 改名目标撞上在场名时追加序号（打断名已被占用 → _2）。
+  const collision = breakOpencodeZenBlockedToolNamePairs({
+    tools: [
+      { type: "function", function: { name: "CreateWorkflow", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GetWorkflowRun", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GetWork_flowRun", parameters: { type: "object" } } },
+    ],
+  });
+  assert.equal(collision.renames.get("GetWork_flowRun_2"), "GetWorkflowRun");
+
+  // 黑名单对之外的同族组合（AmendWorkflow+GetWorkflowRun）不受影响。
+  const other = breakOpencodeZenBlockedToolNamePairs({
+    tools: [
+      { type: "function", function: { name: "AmendWorkflow", parameters: { type: "object" } } },
+      { type: "function", function: { name: "GetWorkflowRun", parameters: { type: "object" } } },
+    ],
+  });
+  assert.equal(other.renames.size, 0);
+
+  // Codex 多 agent 协作族对（spawn_agent+wait_agent，2026-10-30 实测）：含于命名空间
+  // 扁平化后的 JSON 字符串名内也应检测并打断（子串包含语义）。
+  const codexFlat = breakOpencodeZenBlockedToolNamePairs({
+    tools: [
+      { type: "function", function: { name: '["collaboration","spawn_agent"]', parameters: { type: "object" } } },
+      { type: "function", function: { name: '["collaboration","wait_agent"]', parameters: { type: "object" } } },
+    ],
+  });
+  assert.equal(codexFlat.renames.size, 1);
+  const [renamedFlat] = codexFlat.renames.keys();
+  assert.ok(!renamedFlat.toLowerCase().includes("wait_agent"), "打断后的名字不得再含禁用子串");
+  assert.equal(codexFlat.renames.get(renamedFlat), '["collaboration","wait_agent"]');
+
+  // 顶层平铺的 spawn_agent+wait_agent 同样破除。
+  const codexPlain = breakOpencodeZenBlockedToolNamePairs({
+    tools: [
+      { type: "function", function: { name: "spawn_agent", parameters: { type: "object" } } },
+      { type: "function", function: { name: "wait_agent", parameters: { type: "object" } } },
+    ],
+  });
+  assert.equal(codexPlain.renames.size, 1);
+  const [renamedPlain] = codexPlain.renames.keys();
+  assert.ok(!renamedPlain.toLowerCase().includes("wait_agent"));
+  assert.equal(codexPlain.renames.get(renamedPlain), "wait_agent");
 });

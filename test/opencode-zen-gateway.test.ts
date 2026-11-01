@@ -1377,3 +1377,39 @@ test("其他 agent 客户端系统提示词经官方模板包裹：四入口统�
     })), "GEMINI-SENTINEL", "gemini 入口");
   });
 });
+
+test("工具名黑名单对破除：anthropic 入口同场 CreateWorkflow+GetWorkflowRun 打断子串过闸并还原响应", TIMEOUT, async () => {
+  // 上游 mock 按改名后的名字回 tool_call，验证响应侧身份映射还原回客户端原名。
+  await fixture(async (fixture) => {
+    const handler = fixture.create();
+    await (await handler(new Request("http://127.0.0.1:8327/v1/models"))).text();
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: MODEL, max_tokens: 64, stream: true,
+        system: "SENTINEL 系统提示词",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [
+          { name: "CreateWorkflow", description: "create", input_schema: { type: "object", properties: {} } },
+          { name: "GetWorkflowRun", description: "get run", input_schema: { type: "object", properties: {} } },
+        ],
+      }),
+    }));
+    const text = await response.text();
+    assert.equal(response.status, 200, `anthropic 入口转发失败：${text.slice(0, 200)}`);
+    // 上游请求体：黑名单对第二名加 _z 后缀，read 照常垫补。
+    const up = fixture.upstream as NonNullable<Fixture["upstream"]>;
+    const names = (up.body.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
+    assert.ok(names.includes("CreateWorkflow"), "第一名原名保留");
+    assert.ok(names.includes("GetWork_flowRun"), "第二名应打断禁用子串过黑名单对");
+    assert.ok(!names.includes("GetWorkflowRun"), "原名不得出现在上游 tools");
+    assert.ok(names.includes("read"), "read 保险合并不受影响");
+    // 客户端响应：tool_use 名还原为客户端原名。
+    assert.ok(text.includes("\"name\":\"GetWorkflowRun\""), `响应应还原原名（GetWorkflowRun）：${text.slice(0, 300)}`);
+    assert.ok(!text.includes("GetWork_flowRun"), "改名不得泄漏给客户端");
+  }, () => sse([
+    chunkFrame({ role: "assistant", tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "GetWork_flowRun", arguments: "{}" } }] }),
+    chunkFrame({}, "tool_calls"),
+  ]));
+});

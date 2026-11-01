@@ -255,6 +255,8 @@ async function withGateway(
       planCaches: { "api-key": currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>>,
       identity: IDENTITY,
       endpointRouting: null,
+      // 自管目录文件（zcode-catalog.json）必须落在测试临时目录，污染真实运行主目录。
+      cacheDirectory: directory,
       fetch: async (url, init) => {
         const target = String(url);
         if (target.endsWith("/api/paas/c1f3a7e2/v2/client")) {
