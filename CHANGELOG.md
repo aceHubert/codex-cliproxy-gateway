@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.0 (2026-11-01)
+
+#### :rocket: New Feature
+* `agy`, `llm-bridge`, `opencode-zen`, `zcode`
+  * [#30](https://github.com/aceHubert/codex-cliproxy-gateway/pull/30) feat(zcode): 重新启用 start-plan 路由并适配 zen 黑名单对门禁 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.19.0 (2026-10-26)
 
 #### :rocket: New Feature
