@@ -331,8 +331,12 @@ export class ResponsesOutputShell {
         throw new Error("tool arguments 必须是 JSON 对象");
       }
       if (block.custom) {
-        const input = (parsed as Json).input;
-        if (typeof input !== "string") throw new Error("custom tool input 必须是字符串");
+        // 声明给上游的 custom 信封是 {input:string}，但模型（尤其非 OpenAI 系）可能
+        // 不严格遵循：input 写成对象/数字，或整段省略只给业务字段。归一为字符串保住
+        // 回合——字符串原样、其余形状 JSON 序列化（缺失时保留完整参数对象），内容不
+        // 静默丢失；异常形状会让工具侧执行报错，模型下一轮自行修正，优于整回合 failed。
+        const raw = (parsed as Json).input;
+        const input = typeof raw === "string" ? raw : JSON.stringify(raw === undefined || raw === null ? parsed : raw);
         block.item.input = input;
         if (input) {
           this.pending.push(this.event("response.custom_tool_call_input.delta", { ...base, delta: input }));

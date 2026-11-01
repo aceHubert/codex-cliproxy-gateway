@@ -574,6 +574,35 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
         (item.role === "assistant" ? assistantContent() : userContent()).parts.push(...parts);
         continue;
       }
+      if (item.type === "agent_message") {
+        // Codex 多智能体历史：agent 产出的消息（author/recipient 为内部路由元数据）
+        // 按 assistant 回放文本与图片；encrypted_content 是上游私有加密载荷，跨厂商
+        // 不可解，直接剥离。
+        const parts: GeminiPart[] = [];
+        const content = item.content;
+        if (typeof content === "string") parts.push({ text: content });
+        else if (Array.isArray(content)) {
+          for (const raw of content) {
+            if (!record(raw)) fail("agent_message 包含无效内容块");
+            if (raw.type === "encrypted_content") continue;
+            if (raw.type === "input_text" || raw.type === "output_text" || raw.type === "text") parts.push(textPart(raw, "agent_message"));
+            else if (raw.type === "input_image" || raw.type === "image") {
+              const source = raw.image_url ?? raw.url;
+              const url = typeof source === "string" ? source : record(source) ? source.url : undefined;
+              if (typeof url !== "string" || !url) fail("agent_message 的 input_image 缺少 image_url");
+              if (url.startsWith("data:")) {
+                const match = /^data:([^;,]*)(?:;charset=[^;,]*)?;base64,(.*)$/s.exec(url);
+                if (!match) fail("agent_message 的 data URI 必须是 base64 编码");
+                parts.push({ inlineData: { mimeType: match[1] || "image/png", data: match[2] } });
+              } else {
+                parts.push({ fileData: { fileUri: url } });
+              }
+            } else fail(`agent_message 包含不支持的内容块类型 ${String(raw.type)}`);
+          }
+        } else fail("agent_message 的 content 必须是字符串或数组");
+        assistantContent().parts.push(...parts);
+        continue;
+      }
       if (item.type === "function_call" || item.type === "custom_tool_call") {
         const identity = toolIdentity(item.name, item.namespace);
         const custom = item.type === "custom_tool_call";

@@ -1,12 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import { resolvePaths } from "@agent-proxy/plugin-api";
 import fingerprintData from "./fingerprint-data.json";
 import type { ZcodeProviderSnapshot } from "./config.ts";
 
 /**
- * ZCode 客户端指纹（`fingerprint-data.json`，按本机 ZCode.app 3.14.5 与真实
- * 会话流量分析提取）：UA 模板的 `{version}` 由运行时读取的本机版本填充；
+ * ZCode 客户端指纹（`fingerprint-data.json`，按本机 ZCode.app 3.17.1 与真实
+ * 会话流量/中继实验提取）：UA 模板的 `{version}` 由运行时读取的本机版本填充；
  * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
  */
 interface ZcodeFingerprint {
@@ -20,6 +23,25 @@ interface ZcodeFingerprint {
   agentSystemPrompt: string;
   titleSystemPrompt: string;
   webSearchSystemPrompt: string;
+  /** start-plan 中继校验的官方段落文本（3.17.1 `assembleSystemMessages` 形态）。 */
+  startPlanPrompt: {
+    identity: string;
+    desktopContext: string;
+    dynamicBehavior: string;
+    contextManagement: string;
+    environment: {
+      heading: string;
+      invokedLine: string;
+      cwdLabel: string;
+      gitLabel: string;
+      platformLabel: string;
+      shellLabel: string;
+      osVersionLabel: string;
+      untrustedNotice: string;
+      poweredByTemplate: string;
+      currentDateTemplate: string;
+    };
+  };
 }
 const FINGERPRINT = fingerprintData as ZcodeFingerprint;
 
@@ -35,6 +57,8 @@ export interface ZcodeIdentity {
   platform: string;
   arch: string;
   osVersion: string;
+  /** 本机 ZCode 的设备 ID（telemetry-state.json 的 deviceMid）；start-plan 归因使用。 */
+  deviceId?: string;
 }
 
 export interface ZcodeRequestContext {
@@ -55,7 +79,19 @@ function printable(value: unknown, fallback = "unknown"): string {
   return normalized && PRINTABLE_ASCII.test(normalized) ? normalized : fallback;
 }
 
-function readIdentity(): ZcodeIdentity {
+/** 读取本机 ZCode 的设备 ID；home 与 v2 两种布局同 readPreferred 的探测顺序。 */
+function readDeviceId(home: string): string | undefined {
+  for (const file of [path.join(home, "telemetry-state.json"), path.join(home, "v2", "telemetry-state.json")]) {
+    let parsed: unknown;
+    try { parsed = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* 缺失或损坏时试下一布局。 */ continue; }
+    if (!record(parsed) || typeof parsed.deviceMid !== "string") continue;
+    const value = parsed.deviceMid.trim();
+    if (value && value.length <= 128 && PRINTABLE_ASCII.test(value)) return value;
+  }
+  return undefined;
+}
+
+function readIdentity(home?: string): ZcodeIdentity {
   let appVersion = "unknown";
   if (process.platform === "darwin") {
     try {
@@ -68,20 +104,25 @@ function readIdentity(): ZcodeIdentity {
   let timezone = "unknown";
   try { language = printable(Intl.DateTimeFormat().resolvedOptions().locale); } catch { /* 保持 unknown。 */ }
   try { timezone = printable(Intl.DateTimeFormat().resolvedOptions().timeZone); } catch { /* 保持 unknown。 */ }
-  return Object.freeze({
+  const identity: ZcodeIdentity = {
     appVersion,
     language,
     timezone,
     platform: printable(process.platform),
     arch: printable(os.arch()),
     osVersion: printable(os.release()),
-  });
+  };
+  const deviceId = readDeviceId(home ?? path.join(resolvePaths().home, ".zcode"));
+  if (deviceId) identity.deviceId = deviceId;
+  return Object.freeze(identity);
 }
 
 // 首次启用时读取公开版本；关闭 ZCode 的命令不执行额外系统查询。
 let identityCache: ZcodeIdentity | undefined;
 
-export function readZcodeIdentity(): ZcodeIdentity {
+/** zcodeHome 为本机 .zcode 目录；缺省按运行主目录定位（测试经注入 identity 覆盖）。 */
+export function readZcodeIdentity(zcodeHome?: string): ZcodeIdentity {
+  if (zcodeHome) return readIdentity(zcodeHome);
   return { ...(identityCache ??= readIdentity()) };
 }
 
@@ -126,15 +167,17 @@ export function buildZcodeModelHeaders(
 ): Headers {
   const headers = buildZcodeSourceHeaders(identity);
   headers.set("content-type", "application/json");
-  headers.set("accept", "text/event-stream");
+  if (plan !== "start-plan") headers.set("accept", "text/event-stream");
   headers.set("anthropic-version", "2023-06-01");
   headers.set("x-request-id", context.requestId);
   headers.set("x-zcode-session-type", context.sessionType);
   headers.set("x-zcode-trace-id", context.traceId);
-  headers.set("x-query-id", context.queryId);
+  if (plan !== "start-plan") headers.set("x-query-id", context.queryId);
   headers.set("x-session-id", context.sessionId);
   headers.set("authorization", `Bearer ${apiKey}`);
   if (plan !== "start-plan") headers.set("x-api-key", apiKey);
+  // 官方 3.16 起的模型调用归因头；中继按官方客户端形态校验 start-plan 请求。
+  if (plan === "start-plan") headers.set("x-zcode-query-source", "main_turn");
   return headers;
 }
 

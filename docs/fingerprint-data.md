@@ -31,8 +31,8 @@ Claude Code anthropic、chat/gemini 客户端）进入都得到同一份官方�
 模型目录条目的 `model_messages.instructions_template`（真实 Codex catalog 快照
 `models/codex_client_models.json` 中每个条目都带 17–21K 字符官方提示词）；**只替换
 `base_instructions` 无效**——实测 qoder 会话仍发出 19,754 字符官方提示词，与模板长度一致。
-目录注入只惠及读目录的 Codex 客户端，Claude Code 等自带提示词、不读 catalog 的客户端得不到注入
-（tech-debt 17-①），故 2026-10-23 下移到转换层统一注入；旧目录缓存中已注入的提示词与转换层注入
+目录注入只惠及读目录的 Codex 客户端，Claude Code 等自带提示词、不读 catalog 的客户端得不到注入，
+故 2026-10-23 下移到转换层统一注入（原双路径不一致债务已随该迁移了结）；旧目录缓存中已注入的提示词与转换层注入
 为同一文本，整体替换幂等，过渡期上游形状不变，无需强制失效缓存。
 
 **OpenCode Zen（2026-10-26 起，门禁换代后收回例外）**：zen 的门禁恢复 system 内容校验——
@@ -216,7 +216,7 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
     no-affinity-header 等对照），实跑 13/13 OK。
   - **2026-10-26 门禁换代（换 IP 后逐项隔离实测；10-15「read 实名 + 标头最小集」画像整体失效）**：
     ① **会话层新增时间段新鲜度校验**——哈希/随机位当时间段的派生 id 一律 429（2/2），现铸
-    （当前时间）id 连续 200，窗口未精测（≥45 分钟仍有效）；`deriveOpenCodeSessionId` 改为
+    （当前时间）id 连续 200，新鲜度窗口宽（2026-10-30 实测 24 小时前铸造 id 仍 200，非小时级）；`deriveOpenCodeSessionId` 改为
     「铸造时刻时间段 + 外部 id 派生后缀」，跨请求粘性改由 resolver 进程内缓存提供（不再承诺
     跨进程恒定）；② **system 恢复内容校验且为包含关系**——须包含官方当前代 GA 模板全文
     （截断 500/2000 字、无模板普通长文本均 429；模板在前/在后均过闸；改模板中部一词仍过，
@@ -234,6 +234,29 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
     取值捷径（新增）：改本机 opencode 目录缓存（`~/.local/share/opencode/opencode.db` kv 表
     `models-dev:catalog*` 的 `api` 字段）指向本地转发代理，跑一次 `opencode2 run` 即可截获
     当前代模板与工具（测后须还原缓存）。
+  - **2026-10-30 工具名黑名单对门禁（ZCode/Codex 全量工具集 100% 429 的真因；当日凌晨曾误判
+    为「CGNAT 池瞬态耗尽」，经用户原请求逐字段重放推翻）**：上游对 tools 数组做**工具名
+    配对黑名单**——已确认三对：ZCode dynamic-workflow 族 `CreateWorkflow`+`GetWorkflowRun`、
+    `AmendWorkflow`+`FillWorkflowHole`，与 Codex Desktop 多 agent 协作族 `spawn_agent`+
+    `wait_agent`（含于 additional_tools 信封、命名空间扁平化后的名字里）；同场声明即整请求
+    429 FreeUsageLimitError（与配额耗尽同文案）；匹配为**子串包含且大小写不敏感**
+    （`GetWorkflowRun_z`/`GetWorkflowRun2`/含子串的 JSON 串名照挂，`Get_Workflow_Run`/
+    `wait__agent`/`ToolB` 过）。同族其它组合（Create+Resume/List/Amend/Save/FillHole、
+    Amend+Get、spawn/wait 单发）与名字倍增均放行，非计分模型；指令含 "Codex" 字样、核心
+    工具（shell/update_plan/apply_patch/view_image）均不触发。疑似按已知客户端工具集指纹
+    定向的反滥用规则（修复部署后 10:31 Codex 新会话仍 429 → 复刻其二进制 rollout 原请求
+    二分出第三对）。排查方法学：zen 日志按设计不落完整负载——ZCode 侧从
+    `~/.zcode/cli/rollout/model-io-session_*.jsonl`、Codex 侧从 `~/.codex/sessions/**/rollout-*.jsonl`
+    （response_item 含 additional_tools 信封与消息原文）取原请求重放二分；注意带 tools 时
+    read 硬性在场，漏 read 的探针全部假阳性 429。网关缓解：`breakOpencodeZenBlockedToolNamePairs`
+    （fingerprint.ts）在 `adaptOpencodeZenUpstreamRequest` 出口统一对命中对 B 侧做确定性子串
+    打断（禁用子串中点插 `_`，冲突追加序号），身份映射同步登记、响应侧 tool_call 还原原名；
+    ZCode 186 工具与 Codex 544KB 信封原请求真机 200 复验（修复前同请求 429 对照）。
+    当日凌晨 01:26 的 /v1/responses 单发 429 现可归因该第三对（Codex 同一工具族）。
+    另：GA 2.2.1（10-29 发布，模板含 `${OPENCODE_TOOL_GUIDANCE}` 占位符、结构有变）未滚
+    包含校验，快照 2.1.4 仍收；会话时间段新鲜度窗口实测 ≥24h 放宽；家宽匿名池当晚两次被
+    诊断流量打空（~50 分钟自愈），与黑名单同文案易混淆——批量 429 时先用最小健康探针分层
+    再定性。
   - **目录与端点（双文件缓存）**：store 维护两个磁盘文件——`opencode-zen-metadata.json` 存原始
     数据（动态 ids + 官方元数据 + 探针裁决；ids 按 10 分钟 TTL 刷新，元数据按 6 小时 TTL
     刷新，裁决 24 小时），`opencode-zen-catalog.json` 存由上述数据生成的**成品目录**
@@ -276,3 +299,5 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 | 2026-10-15 | opencode-zen | 终版画像修正：`read` 唯一必须（schema 非空即过，官方完整定义与 `{path:{}}` 最小形均可；bash/shell 及数量无关），合并面由 read+shell 收敛为仅 read；标头最小集 Authorization+UA+session-id+affinity（完整集下单缺 affinity 互备放行）；帖子 zen/v1 curl 为迁移间隙过时信息（复测死透）；探针重写 13 项实测 OK（linux.do 2912664 同结论） |
 | 2026-10-26 | opencode-zen | 门禁换代适配：会话派生改「当前时间段 + 确定性后缀」（服务端校验新鲜度，哈希时间段被拒），粘性转进程内缓存；system 恢复包含校验（须含 GA 2.1.4 模板全文 21,010 字符），转发路新增 `mergeOpencodeZenGateSystem` 包裹客户端 system；端点迁 `/inference/openai/v1`（/models 列表留 `/inference/v1`，新增 `OPENCODE_ZEN_MODELS_ENDPOINT`）；快照 2.0.29 → 2.1.4；探针重写 9 项；实测匿名池按 IP 滚动限额（与形态拒绝同文案，换出口复测再定性）；e2e 真机 200 |
 | 2026-10-23 | zcode/codebuddy/qoder/agy | 提示词注入从 catalog 合成期下移到请求转换层：llm-bridge 新增 `stripClientSystemPrompt`（四协议剥离客户端系统级内容，非变更式），各适配器 `request.ts` 把 `agentSystemPrompt` 种入上游系统槽唯一基底（整体替换语义，任何客户端协议进入均生效）；目录条目停发改写提示词（zcode 保持 vendor 空串、其余保持 gpt 基线基底），plugin-api 契约移除 `withAgentSystemPrompt`；旧缓存注入值与转换层注入同一文本，替换幂等无需失效（解决 tech-debt 17-① 双路径不一致） |
+| 2026-10-30 | opencode-zen | 工具名黑名单对门禁发现与适配：确认三对（ZCode `CreateWorkflow`+`GetWorkflowRun`、`AmendWorkflow`+`FillWorkflowHole`；Codex `spawn_agent`+`wait_agent`）同场声明即 429（子串包含、大小写不敏感、与配额同文案）；新增 `breakOpencodeZenBlockedToolNamePairs` 在适配出口对命中对 B 侧确定性子串打断（身份映射还原原名），配单元+网关测试；ZCode 186 工具与 Codex 544KB 信封原请求真机 200；另实测 GA 2.2.1 未滚模板校验（快照不换）、会话新鲜度窗口 ≥24h、家宽池可被测试打空（~50 分钟自愈） |
+| 2026-11-01 | zcode | 快照升 3.17.1 并统一数据源：① `userAgentTemplate` 更新为 `ZCode/{version} ai-sdk/anthropic/3.0.81`——官方 3.16+ 的 AI SDK 客户端工厂（zcode.cjs `pD`）对所有 anthropic 请求（coding plan 与 start-plan 中继同一路径）统一把 ai-sdk 后缀追加到 UA，10-09「无后缀」为 3.14.5 时代实流（api.z.ai 对 UA 宽容，带后缀实测同样 200）；② `agentSystemPrompt` 更新为新开场句 "You are ZCode, an interactive agent"（`buildCliPrefixSection`，与 start-plan 的 cli_prefix 同一文本单一来源）；③ 新增 `startPlanPrompt`（start-plan 中继校验的官方段落：identity/desktopContext/dynamicBehavior/contextManagement/environment 模板，程序化提取自 zcode.cjs，各段 SHA-256 进测试）——与既有指纹数据同文件同节奏维护，不再单设 `start-plan-prompt.json`；④ 中继拒绝 Bun fetch 的 h2 画像（HTTP/1.1 200 / h2 405），start-plan 传输走 `createStartPlanFetch()`（node:https 恒 h1）。实验记录见 [调研文档](zcode-start-plan-research.md) 2026-11-01 节 |

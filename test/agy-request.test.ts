@@ -46,6 +46,26 @@ test("agy 请求转换：chat 源的 system 消息被官方提示词整体替换
   assert.deepEqual(request.contents, [{ role: "user", parts: [{ text: "检查文件" }] }]);
 });
 
+test("agy 请求转换：agent_message 按 model 角色回放并剥离 encrypted_content", TIMEOUT, () => {
+  // Codex 多智能体历史的 agent_message（author/recipient 为内部路由元数据）不得
+  // 触发「不支持的 Responses history 项类型」；encrypted_content 跨厂商不可解。
+  const { request } = translated({
+    input: [
+      { type: "message", role: "user", content: "跑一下" },
+      { type: "agent_message", id: "amsg_1", author: "/root/app_code", recipient: "/root",
+        content: [
+          { type: "input_text", text: "Message Type: MESSAGE\n" },
+          { type: "encrypted_content", encrypted_content: "gAAAAAB-private" },
+        ] },
+    ],
+  });
+  assert.deepEqual(request.contents, [
+    { role: "user", parts: [{ text: "跑一下" }] },
+    { role: "model", parts: [{ text: "Message Type: MESSAGE\n" }] },
+  ]);
+  assert.ok(!JSON.stringify(request).includes("gAAAAAB-private"), "加密载荷不得进入上游请求");
+});
+
 test("agy 请求转换：assistant 历史映射 model 角色", TIMEOUT, () => {
   const { request } = translated({
     input: [

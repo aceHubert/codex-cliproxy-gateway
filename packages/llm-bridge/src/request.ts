@@ -475,6 +475,24 @@ function responsesSourceToPrepared(body: Json, registry: ToolRegistry): Prepared
       registry.note(`已剥离 ${type} history 项（工具增补/压缩标记，不进入消息历史）`);
       continue;
     }
+    if (type === "agent_message") {
+      // Codex 多智能体历史：agent 产出的消息（author/recipient 为内部路由元数据，
+      // 跨上游无意义）按 assistant 回放文本与图片；encrypted_content 是上游私有的
+      // 加密载荷，跨厂商不可解，剥离并显式记录（与 reasoning 信封同款处理）。
+      const wasArray = Array.isArray(item.content);
+      const visible = wasArray
+        ? (item.content as unknown[]).filter((part) => {
+          if (isRecord(part) && part.type === "encrypted_content") {
+            registry.note("已剥离 agent_message 的 encrypted_content 私有载荷（跨上游不可转发）");
+            return false;
+          }
+          return true;
+        })
+        : item.content;
+      const parts = contentPartsFromImages(describeResponsesContent(visible, "agent_message.content"));
+      for (const part of parts) builder.appendAssistantText(part, wasArray);
+      continue;
+    }
     fail(`不支持的 Responses history 项类型 ${type}`);
   }
 

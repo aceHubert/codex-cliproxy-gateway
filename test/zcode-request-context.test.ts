@@ -34,7 +34,7 @@ test("套餐依据快照的连接形态，模型请求按套餐使用正确鉴�
 test("模型来源头为受控白名单且不含设备或授权信息", () => {
   const model = buildZcodeSourceHeaders(identity);
   assert.equal(model.get("http-referer"), "https://zcode.z.ai");
-  assert.equal(model.get("user-agent"), "ZCode/3.11.2");
+  assert.equal(model.get("user-agent"), "ZCode/3.11.2 ai-sdk/anthropic/3.0.81");
   assert.equal(model.get("x-zcode-agent"), "glm");
   for (const headers of [model]) {
     assert.equal(headers.get("x-device-mid"), null);
@@ -44,7 +44,7 @@ test("模型来源头为受控白名单且不含设备或授权信息", () => {
   }
   const unsafe = buildZcodeSourceHeaders({ ...identity, appVersion: "bad\nvalue", language: "\t", platform: "<bad>" });
   assert.equal(unsafe.get("x-zcode-app-version"), null);
-  assert.equal(unsafe.get("user-agent"), "ZCode/unknown");
+  assert.equal(unsafe.get("user-agent"), "ZCode/unknown ai-sdk/anthropic/3.0.81");
   assert.equal(unsafe.get("x-client-language"), "unknown");
 });
 
@@ -130,7 +130,7 @@ test("ZCode 来源头与内置提示词全部取自本模块指纹数据文件",
   assert.equal(headers.get("x-release-channel"), data.releaseChannel);
   assert.equal(headers.get("http-referer"), data.referer);
   // 内置提示词按真实会话流量记录：agent 身份行 / 标题生成 / 网页搜索三个用途。
-  assert.equal(data.agentSystemPrompt, "You are ZCode, an interactive coding agent");
+  assert.equal(data.agentSystemPrompt, "You are ZCode, an interactive agent");
   assert.ok(data.titleSystemPrompt.startsWith("Generate a concise title for this coding session."));
   assert.equal(data.webSearchSystemPrompt, "You are an assistant for performing a web search tool use.");
 });

@@ -7,6 +7,7 @@ import {
   createOpenCodeSessionResolver,
 } from "./session.ts";
 import {
+  breakOpencodeZenBlockedToolNamePairs,
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
   injectOpencodeZenFingerprintBody,
@@ -330,6 +331,18 @@ function adaptOpencodeZenUpstreamRequest(
   // muse-spark 家族的 /responses 实现受限：适配出口统一做模型级净化，其余模型零变化。
   if (isOpencodeZenMuseSparkUpstreamModel(ctx.upstreamModel)) {
     adapted.body = sanitizeOpencodeZenMuseSparkResponsesBody(adapted.body);
+  }
+  // 工具名黑名单对破除（所有协议出口统一收口）：命中对的第二名加 _z 后缀过闸，
+  // 身份映射同步登记，响应侧 tool_call 按改名还原回客户端原名。
+  const pairBroken = breakOpencodeZenBlockedToolNamePairs(adapted.body);
+  if (pairBroken.renames.size > 0) {
+    adapted.body = pairBroken.body;
+    const tools = new Map(adapted.tools);
+    for (const [upstreamName, originalName] of pairBroken.renames) {
+      const identity = tools.get(originalName) ?? { name: originalName, custom: false };
+      tools.set(upstreamName, identity);
+    }
+    adapted.tools = tools;
   }
   return adapted;
 }

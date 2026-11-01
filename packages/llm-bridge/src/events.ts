@@ -385,10 +385,12 @@ function responsesUsageToBridge(value: unknown): BridgeUsage | undefined {
   return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
-function responsesStopReason(status: string, reason: string | undefined): BridgeStopReason {
+function responsesStopReason(status: string, reason: string | undefined, sawToolCall = false): BridgeStopReason {
   // incomplete 的原因缺失或未知时仍保留未完成，不能降为正常 stop。
   if (status === "incomplete") return reason === "content_filter" ? "content_filter" : "length";
-  return "stop";
+  // Responses 协议没有 stop_reason 概念：completed 且产出过工具调用时，对
+  // anthropic/gemini 出口按其语义给 tool_calls，驱动客户端工具循环。
+  return sawToolCall ? "tool_calls" : "stop";
 }
 
 async function* parseResponsesStream(body: ReadableStream<Uint8Array>, model: string): AsyncGenerator<BridgeStreamEvent> {
@@ -627,6 +629,7 @@ export async function* parseUpstreamEvents(protocol: ClientProtocol, upstream: R
         return;
       }
       if (status !== "completed" && status !== "incomplete") throw new Error("Responses 上游 JSON 缺少有效终态");
+      let sawToolCall = false;
       if (Array.isArray(payload.output)) {
         for (const item of payload.output) {
           if (!isRecord(item)) continue;
@@ -643,6 +646,7 @@ export async function* parseUpstreamEvents(protocol: ClientProtocol, upstream: R
               }
             }
           } else if (item.type === "function_call" || item.type === "custom_tool_call") {
+            sawToolCall = true;
             if (item.type === "custom_tool_call" && status === "completed" && typeof item.input !== "string") {
               throw new Error("Responses completed custom 输入必须是字符串");
             }
@@ -657,7 +661,7 @@ export async function* parseUpstreamEvents(protocol: ClientProtocol, upstream: R
         }
       }
       const reason = isRecord(payload.incomplete_details) && typeof payload.incomplete_details.reason === "string" ? payload.incomplete_details.reason : undefined;
-      const stop = responsesStopReason(status, reason);
+      const stop = responsesStopReason(status, reason, sawToolCall);
       yield { type: "message_start", id: typeof payload.id === "string" ? payload.id : "", model: typeof payload.model === "string" ? payload.model : model };
       yield { type: "message_end", stop_reason: stop, raw_stop_reason: status, usage: responsesUsageToBridge(isRecord(payload.usage) ? payload.usage : undefined) };
       return;

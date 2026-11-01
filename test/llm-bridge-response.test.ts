@@ -243,6 +243,52 @@ test("Responses custom 与 function 混合调用：分别缓冲、解包并恢�
   }
 });
 
+test("Responses custom 工具调用未按信封出参：input 归一为字符串保住回合", async () => {
+  // 真实反例（codebuddy/deepseek 通道）：模型把 custom 工具参数写成对象或省略
+  // input 字段，收尾时抛「custom tool input 必须是字符串」→ response.failed，
+  // Codex 显示 stream disconnected before completion。归一为字符串后回合正常
+  // completed，形状异常由工具执行侧报错、模型下一轮自行修正。
+  const result = await createResponsesClientOutput(eventsOf([
+    { type: "message_start", id: "up", model: "up" },
+    { type: "tool_call_start", tool_call: { id: "obj", name: "m" } },
+    { type: "tool_call_delta", tool_call: { id: "obj", arguments_delta: "{\"input\":{\"code\":\"x\"}}" } },
+    { type: "tool_call_end", tool_call: { id: "obj" } },
+    { type: "tool_call_start", tool_call: { id: "miss", name: "m2" } },
+    { type: "tool_call_delta", tool_call: { id: "miss", arguments_delta: "{\"foo\":1}" } },
+    { type: "tool_call_end", tool_call: { id: "miss" } },
+    { type: "tool_call_start", tool_call: { id: "num", name: "m3" } },
+    { type: "tool_call_delta", tool_call: { id: "num", arguments_delta: "{\"input\":1}" } },
+    { type: "tool_call_end", tool_call: { id: "num" } },
+    { type: "tool_call_start", tool_call: { id: "empty", name: "m4" } },
+    { type: "tool_call_delta", tool_call: { id: "empty", arguments_delta: "{}" } },
+    { type: "tool_call_end", tool_call: { id: "empty" } },
+    { type: "message_end", stop_reason: "tool_calls" },
+  ]), {
+    model: "display/model",
+    stream: true,
+    toolIdentities: new Map([
+      ["m", { name: "exec", custom: true, namespace: "functions" }],
+      ["m2", { name: "exec", custom: true, namespace: "functions" }],
+      ["m3", { name: "exec", custom: true, namespace: "functions" }],
+      ["m4", { name: "exec", custom: true, namespace: "functions" }],
+    ]),
+  });
+  const frames = await readResponsesEvents(result.response);
+  assert.equal(frames.some((event) => event.type === "response.failed"), false, "形状异常不得终止整回合");
+  const completed = frames.at(-1) as Json & { response: { output: Json[] } };
+  assert.equal(completed.type, "response.completed");
+  const obj = completed.response.output.find((item) => item.call_id === "obj")!;
+  assert.equal(obj.input, "{\"code\":\"x\"}", "对象 input 序列化保留内容");
+  assert.equal(obj.status, "completed");
+  const miss = completed.response.output.find((item) => item.call_id === "miss")!;
+  assert.equal(miss.input, "{\"foo\":1}", "缺失 input 时保留完整参数对象");
+  assert.equal(miss.status, "completed");
+  const num = completed.response.output.find((item) => item.call_id === "num")!;
+  assert.equal(num.input, "1", "数字 input 序列化保留内容");
+  const empty = completed.response.output.find((item) => item.call_id === "empty")!;
+  assert.equal(empty.input, "{}", "空对象退化为空参数对象字符串");
+});
+
 test("ResponsesOutputShell custom 收尾选项不会重复正文，空 input 也正常完成", () => {
   for (const customToolInputAtClose of [undefined, false, true]) {
     for (const input of ["正文\n下一行", ""]) {
@@ -265,8 +311,11 @@ test("ResponsesOutputShell custom 收尾选项不会重复正文，空 input 也
   }
 });
 
-test("Responses custom 无效参数产生 failed，禁止发布包装或可执行正文", async () => {
-  for (const arguments_delta of ['{"input":', '{}', '{"input":1}', '[]', 'null', '"文本"']) {
+test("Responses custom 参数为非对象 JSON 时仍整回合 failed，不发布可执行正文", async () => {
+  // 边界：对象形状但 input 缺失/非字符串（deepseek 等实发形态）已改为归一继续
+  // （见上一下用例）；数组/null/纯文本/截断 JSON 不是信封对象，无法无损归一，
+  // 维持 failed，禁止把残缺内容发布成可执行 input。
+  for (const arguments_delta of ['{"input":', '[]', 'null', '"文本"']) {
     for (const stream of [true, false]) {
       const result = await createResponsesClientOutput(eventsOf([
         { type: "message_start", id: "up", model: "up" },
