@@ -1,0 +1,190 @@
+test/zcode-start-plan-request.test.ts
+  s_23b0545f3c2df4::t_9df0d5a59a369f 25,27,29-31,34,38-47,49,52,60,62-64,68-71,101,106-108,112-113
+  s_23b0545f3c2df4::t_3b2b2963fcf2cd 28
+  s_23b0545f3c2df4::t_56b50860b15690 72-73,81
+  s_23b0545f3c2df4::t_a67b0285db1d76 9
+  s_23b0545f3c2df4::t_111426ef52a22c 1-8,10-24,26,32-33,35-37,48,50-51,53-59,61,65-67,74-80,82-100,102-105,109-111,114-171
+  s_23b0545f3c2df4::t_b9f094165dde24 172-174
+test/zcode-gateway.test.ts
+  s_23b0545f3c2df4::t_21f6348234dce7 1055-1058,1069
+  s_23b0545f3c2df4::t_fe91e08841af95 1204
+  s_23b0545f3c2df4::t_bc0526a0b2898e 1196-1198
+  s_23b0545f3c2df4::t_c169573649782c 979,983,989,1003-1004,1016,1019-1027,1029-1032,1038-1054,1059-1068,1070,1172,1211-1212,1215,1230-1231
+  s_23b0545f3c2df4::t_27e712102e277b 1181,1191-1195,1199-1200
+  s_23b0545f3c2df4::t_6a3edd3db983bd 1183,1201-1203,1205-1210,1223
+  s_23b0545f3c2df4::t_3e6de8455e65c1 1028
+  s_23b0545f3c2df4::t_f92b5501857fea 1173-1174,1177
+  s_23b0545f3c2df4::t_ff5fcf1e4288ff 1175-1176
+  s_23b0545f3c2df4::t_9cac7804eede29 1184-1186,1224
+  s_23b0545f3c2df4::t_b3ab44632b836b 1033-1037
+  s_23b0545f3c2df4::t_388fc87b1aab39 1216-1219
+  s_23b0545f3c2df4::t_9602ea6814db37 1170-1171
+  s_23b0545f3c2df4::t_74acea423e31c7 1178-1180
+  s_23b0545f3c2df4::t_dcc6ebf58d5f77 1182
+  s_23b0545f3c2df4::t_19f6dd3be9b6e2 1187-1190
+  s_23b0545f3c2df4::t_15b4c4f9d13096 1213-1214
+  s_23b0545f3c2df4::t_25c6d6e97d1234 1220-1222
+  s_23b0545f3c2df4::t_9f841e17566994 1225-1229
+docs/fingerprint-data.md
+  s_836ef0b51f90c7::t_84561c9e32a9ff 219
+  s_836ef0b51f90c7::t_f52f7f700a77e8 238,256
+  s_836ef0b51f90c7::t_9834cbb7d2c4fd 302
+  s_836ef0b51f90c7::t_effb5ef73c26a5 237,239-255,257-259
+  s_ecb0373622d7dd::t_1b70677d840f03 34-35,303
+docs/histories/2026-11/20261101-1554-zcode-start-plan-route-restart.md
+  s_23b0545f3c2df4::t_98baebc9432c99 1-31,34-36,43-55
+  s_23b0545f3c2df4::t_585ddf551639bb 32-33,37-42
+  s_23b0545f3c2df4::t_3dad636d9219d8 71-93
+  s_23b0545f3c2df4::t_45636ebde348f2 56-70
+  s_23b0545f3c2df4::t_d085751f1647a6 94-112
+docs/histories/2026-10/20261030-0340-zen-tool-name-pair-blacklist-gate.md
+  s_836ef0b51f90c7::t_96765fc5bbcbf7 1-59
+  s_836ef0b51f90c7::t_64e46ee936a01a 60
+test/llm-bridge-response.test.ts
+  s_9195fde4d6695d::t_e9bd29a510047a 246-258,265-271,274-277,279-285,290-291
+  s_9195fde4d6695d::t_c3c73b45475974 314-318
+  s_9195fde4d6695d::t_73521f56c7a966 259-264,272-273,286-289
+  s_9195fde4d6695d::t_1235fa9da96c32 278
+test/codebuddy-gateway.test.ts
+  s_9195fde4d6695d::t_0efb0b3183dea4 683-718
+docs/zcode-start-plan-research.md
+  s_23b0545f3c2df4::t_0e68bd3b9afb39 1
+packages/zcode/src/index.ts
+  s_23b0545f3c2df4::t_35a384f0bed7ed 514
+  s_23b0545f3c2df4::t_58b86292c7e0fd 119-122,133,135
+  s_23b0545f3c2df4::t_f93fb027073c35 462-465
+  s_23b0545f3c2df4::t_25c689badb3dc1 238
+  s_23b0545f3c2df4::t_4b84345dbf238e 527-528
+  s_23b0545f3c2df4::t_215cc1f6597b1d 239-240
+  s_23b0545f3c2df4::t_c00a70e6d3a416 51-53
+  s_23b0545f3c2df4::t_f3803c6f96d9d2 515
+  s_23b0545f3c2df4::t_ace4a631c862fc 490
+  s_23b0545f3c2df4::t_869f9e7f2d9407 565-566
+  s_23b0545f3c2df4::t_25c30fd2e540b9 433-434
+  s_23b0545f3c2df4::t_f57499aad9997c 26
+  s_23b0545f3c2df4::t_0f6e829ca56c11 535
+  s_23b0545f3c2df4::t_3ca97e9263e7e9 432,436-442,447-451
+  s_23b0545f3c2df4::t_ebd474eb25a726 509
+test/zcode-signing.test.ts
+  s_23b0545f3c2df4::t_0b111f452e4bb3 258-259
+packages/agy/src/request.ts
+  s_9195fde4d6695d::t_377b43d8c3f366 577-605
+test/opencode-zen-convert.test.ts
+  s_9195fde4d6695d::t_b09235c37b1903 355-358,373-380
+  s_4780f0f7545a55::t_c05589ea297038 381
+test/opencode-zen-gateway.test.ts
+  s_836ef0b51f90c7::t_802a64daf924de 1380-1415
+docs/histories/2026-10/20261030-1650-custom-tool-input-coercion.md
+  s_9195fde4d6695d::t_b9995267b9d306 1-44
+packages/opencode-zen/src/fingerprint.ts
+  s_836ef0b51f90c7::t_eb11640a84e882 182-183,190-201
+  s_836ef0b51f90c7::t_cc55210c4a7050 20-21
+  s_836ef0b51f90c7::t_e6860314ab2dc4 245-248,284
+  s_836ef0b51f90c7::t_18b0e786155f86 172-173,184-186,189,202,204-215,242-244,249-252,255-257,285,287-289
+  s_836ef0b51f90c7::t_16e7578d3ba0aa 187
+  s_836ef0b51f90c7::t_d07214ee65a550 188
+  s_836ef0b51f90c7::t_8f162e07d1ae26 174-181
+  s_836ef0b51f90c7::t_7a263fe2939ff8 258-283
+  s_836ef0b51f90c7::t_b00863afba11a5 203,216-241,253-254,286
+scripts/zen-gate-probe.ts
+  s_836ef0b51f90c7::t_d0f430ca442b57 177-178
+  s_836ef0b51f90c7::t_27410fb65bb045 161-164
+packages/opencode-zen/src/index.ts
+  s_836ef0b51f90c7::t_2ec1e0accad23b 10
+  s_836ef0b51f90c7::t_382a1414617a20 335-346
+test/opencode-zen-fingerprint.test.ts
+  s_836ef0b51f90c7::t_8cbfddd51d3bf8 225-243,245,249-288
+  s_836ef0b51f90c7::t_15b3df7d4f237e 244,246-248
+  s_836ef0b51f90c7::t_2a15fc3586867f 8
+  s_836ef0b51f90c7::t_3991d363886327 289-291
+packages/llm-bridge/src/request.ts
+  s_9195fde4d6695d::t_2544d179baf831 478-495
+packages/llm-bridge/src/output.ts
+  s_9195fde4d6695d::t_dc1391bf386bdb 334-339
+packages/zcode/src/request.ts
+  s_23b0545f3c2df4::t_1f37c950dc9338 169,172-178
+test/llm-bridge-convert.test.ts
+  s_9195fde4d6695d::t_4ba553cfe64b12 71-89,93,97-100
+  s_9195fde4d6695d::t_54394633921dde 90-92,94-96
+docs/histories/2026-10/20261030-1545-responses-agent-message-history-item.md
+  s_9195fde4d6695d::t_ec664543842e62 1-49
+test/agy-request.test.ts
+  s_9195fde4d6695d::t_5c9a733c8c7b6e 49-68
+packages/zcode/src/response.ts
+  s_23b0545f3c2df4::t_e349abdd0df954 270-274
+packages/zcode/src/request-context.ts
+  s_23b0545f3c2df4::t_60dedaabc3f691 11-12
+  s_23b0545f3c2df4::t_206f0135ac8f68 26-44
+  s_23b0545f3c2df4::t_cd4fcf07018710 3,5
+  s_23b0545f3c2df4::t_956ffe22e9fe16 82-94,107,114,116-117
+  s_23b0545f3c2df4::t_05897a31ee8f3d 6
+  s_23b0545f3c2df4::t_ae1d562bcb3166 115
+  s_23b0545f3c2df4::t_7d1e815b8a1e47 123-125
+  s_23b0545f3c2df4::t_1911ad4a5798e9 179-180
+  s_23b0545f3c2df4::t_9ea307045556e6 60-61
+  s_23b0545f3c2df4::t_7cbc461adc9613 170,175
+packages/llm-bridge/src/events.ts
+  s_23b0545f3c2df4::t_cf7b27d8c88c56 388,391-393
+  s_23b0545f3c2df4::t_9e1d3455b6b89c 632,649
+  s_23b0545f3c2df4::t_22379f33959615 664
+packages/zcode/src/start-plan-request.ts
+  s_23b0545f3c2df4::t_6d56104483f350 12-13,15,19-20,22,48-49
+  s_23b0545f3c2df4::t_30157f6d169459 26-28
+  s_23b0545f3c2df4::t_6be97db0dcc69c 108-109,118
+  s_23b0545f3c2df4::t_e9676c7fcaec97 169-173
+  s_23b0545f3c2df4::t_0912f4c1fb8083 189
+  s_23b0545f3c2df4::t_c2fb89a2d407dc 77-80
+  s_23b0545f3c2df4::t_07e89b1b9e3582 14
+  s_23b0545f3c2df4::t_aa3995cc695b7a 154-155
+  s_23b0545f3c2df4::t_53e8d7b12d9d68 6-11,16-18,31-34,43-45,70,83-95,98-103,106-107,111,115,117,119-121,127,139-140
+  s_23b0545f3c2df4::t_4ab7b8d7f86636 1-5,21,23-25,29-30,35-42,46-47,50-69,71-76,81-82,96-97,104-105,110,112-114,116,122-126,128-138,141-153,156-166
+  s_23b0545f3c2df4::t_4294aea254d8e3 167-168,174-188,190-221
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47fdee999dfa908a9f867aec48271650287ef56b",
+  "prompts": {},
+  "sessions": {
+    "s_23b0545f3c2df4": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_62777fe0-6a63-4b43-9ab0-67635739923d",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_4780f0f7545a55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a18b9b-f7ae-7851-a427-6ef425dd38d1",
+        "model": "cliproxy/gpt-6-astra"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_836ef0b51f90c7": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "session_df77eab80feb887264359bf74b46c6c7",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_9195fde4d6695d": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_3084172e-3447-46fd-87ca-b63692e10b6f",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    },
+    "s_ecb0373622d7dd": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19660-e05e-7b92-895e-8f17893f7ac3",
+        "model": "zcode-start-plan/glm-5.3-flash"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
