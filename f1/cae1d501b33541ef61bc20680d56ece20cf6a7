@@ -1,0 +1,22 @@
+docs/histories/2026-11/20261102-1535-zcode-start-plan-log-entitlement-gate.md
+  h_8158b585b672a3 1-42
+packages/zcode/src/index.ts
+  h_8158b585b672a3 27,138-139,143-149,151-152,154,160-161
+packages/zcode/src/plans.ts
+  h_8158b585b672a3 1-3,81-161
+test/zcode-gateway.test.ts
+  h_8158b585b672a3 1106-1145
+test/zcode-plans.test.ts
+  h_8158b585b672a3 3-12,47-122
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f1cae1d501b33541ef61bc20680d56ece20cf6a7",
+  "prompts": {},
+  "humans": {
+    "h_8158b585b672a3": {
+      "author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
