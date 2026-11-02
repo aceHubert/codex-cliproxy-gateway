@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.1 (2026-11-02)
+
+#### :bug: Bug Fix
+* `zcode`
+  * [#31](https://github.com/aceHubert/codex-cliproxy-gateway/pull/31) fix(zcode): 依据宿主日志门禁 Start Plan 目录 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.20.0 (2026-11-01)
 
 #### :rocket: New Feature
