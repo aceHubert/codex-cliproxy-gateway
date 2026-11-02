@@ -24,6 +24,7 @@ import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signi
 import { isZcodeRecord } from "./wire.ts";
 import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
 import { createStartPlanFetch, dressZcodeStartPlanBody, startPlanUpstreamUrl, zcodeStartPlanRefusalHint } from "./start-plan-request.ts";
+import { zcodeStartPlanEntitledFromLog } from "./plans.ts";
 import type { ZcodeIdentity } from "./request-context.ts";
 import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
 import type { RequestLogSink } from "@agent-proxy/plugin-api";
@@ -134,17 +135,30 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
   ];
   const identity = dependencies.identity ?? readZcodeIdentity(home);
   let synchronizeAPIKeyRoutes: (strict?: boolean) => void = () => {};
+  /** 上次发布时的 Start Plan 门禁结果；undefined（无日志信号）不参与变化判定。 */
+  let publishedStartPlanGate: boolean | undefined;
   const republishFromPlans = (force = false) => {
     const current = planRoutes.map((route) => route.snapshot);
     const previous = publishedSnapshots;
+    // Start Plan 权益由 ZCode 宿主日志判定：无记录为 undefined（不拦截发布，沿用上游
+    // 405/3012 兜底）；快照不变而门禁翻转（计划开始/结束）同样要重投影，让 get 路径
+    // 也能即时增删免费档条目。
+    const startPlanSnapshot = planRoutes.find((route) => route.plan === "start-plan")?.snapshot;
+    const startPlanGate = startPlanSnapshot
+      ? zcodeStartPlanEntitledFromLog(home, startPlanSnapshot.family)
+      : undefined;
     if (!force && previous && current.length === previous.length
-      && current.every((snapshot, index) => snapshot === previous[index])) return;
+      && current.every((snapshot, index) => snapshot === previous[index])
+      && startPlanGate === publishedStartPlanGate) return;
     publishedSnapshots = current;
+    publishedStartPlanGate = startPlanGate;
     // 各可用套餐目录的并集：单套餐失效只撤下自己的条目，其余套餐继续可选。
     const models: ModelCatalog["models"] = [];
     const seen = new Set<string>();
     for (const route of planRoutes) {
       if (!route.snapshot) continue;
+      // 日志判定无权益：撤下免费档条目；会话点名已撤模型仍由上游 405/3012 拒绝。
+      if (route.plan === "start-plan" && startPlanGate === false) continue;
       for (const entry of createZcodeCatalog(route.snapshot, vendorCatalog).models) {
         const slug = entry.slug.toLowerCase();
         if (seen.has(slug)) continue;

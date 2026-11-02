@@ -1103,6 +1103,46 @@ test("单个套餐失效只撤下自己的条目，其余套餐继续服务", as
   });
 });
 
+test("Start Plan 目录随宿主日志权益判定即时增减，无信号时保持现状", async () => {
+  await fixture(async ({ config, directory }) => {
+    const zcodeHome = path.join(directory, "zcode-home");
+    const logs = path.join(zcodeHome, "v2", "logs");
+    fs.mkdirSync(logs, { recursive: true });
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const logFile = path.join(logs, `${date}.log`);
+    const line = (providerId: string, payload: Json) =>
+      `[host-log] [usage-stats] billing/balance 请求完成 ${JSON.stringify({ providerId, payload })}`;
+    const active = line("account:zai-start-plan", { code: 0, data: { plans: [
+      { plan_id: "zcode-v3-start-plan-wk", name: "ZCODE WEEKEND BUILD", status: "active",
+        entitlements: [{ capabilities: ["model:glm-5.3", "model:glm-5.3-flash"] }] },
+    ] } });
+    const expired = line("account:zai-start-plan", { code: 0, data: { plans: [] } });
+    fs.writeFileSync(logFile, `${active}\n`);
+    const adapter = createZcodeAdapter(config, {
+      cacheDirectory: directory, endpointRouting: null, clientSigning: null,
+      zcodeHome,
+      planCaches: { "start-plan": { get: async () => snapshot("zai", "start-plan"), close() {} } },
+    });
+    const ids = async () => (await adapter.catalog()).models.map((model) => model.slug);
+    try {
+      assert.deepEqual(await ids(), ["zcode-start-plan/glm-5.3", "zcode-start-plan/glm-5.3-flash"]);
+      // 计划到期：宿主日志出现空 plans 记录 → get 路径即时撤下（无需重启或刷新配置缓存）。
+      fs.writeFileSync(logFile, `${expired}\n`);
+      assert.deepEqual(await ids(), []);
+      assert.deepEqual(JSON.parse(fs.readFileSync(path.join(directory, "zcode-catalog.json"), "utf8")).models, []);
+      // 新计划开始：日志恢复 active → 免费档条目重新发布。
+      fs.writeFileSync(logFile, `${active}\n`);
+      assert.deepEqual(await ids(), ["zcode-start-plan/glm-5.3", "zcode-start-plan/glm-5.3-flash"]);
+      // 日志信号消失（跨天/宿主未运行）→ 不因缺信号清空已有目录。
+      fs.rmSync(logFile, { force: true });
+      assert.deepEqual(await ids(), ["zcode-start-plan/glm-5.3", "zcode-start-plan/glm-5.3-flash"]);
+    } finally {
+      adapter.close();
+    }
+  });
+});
+
 test("多个官方 API Key 按 providerId 前缀独立路由与鉴权", async () => {
   await fixture(async ({ config, directory, create }) => {
     const home = path.join(directory, ".zcode");
