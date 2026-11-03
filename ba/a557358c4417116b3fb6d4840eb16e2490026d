@@ -1,0 +1,23 @@
+packages/llm-bridge/src/request.ts
+  s_f85e1773257e05::t_f56b3f45785142 456-477
+test/agy-request.test.ts
+  s_f85e1773257e05::t_880ed8990d984d 457-474
+test/llm-bridge-convert.test.ts
+  s_f85e1773257e05::t_32240faf9d347c 907-945
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "baa557358c4417116b3fb6d4840eb16e2490026d",
+  "prompts": {},
+  "sessions": {
+    "s_f85e1773257e05": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19f28-485b-7fc1-ad0b-ce8065147c1d",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
