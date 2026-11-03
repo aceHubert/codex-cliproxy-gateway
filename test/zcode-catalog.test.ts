@@ -4,6 +4,7 @@ import path from "node:path";
 import { test } from "./host-test.ts";
 import assert from "node:assert/strict";
 import vendorModels from "@agent-proxy/models/vendor_models.json";
+import { getCodexBaselineEntry } from "@agent-proxy/models";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -47,21 +48,29 @@ test("ZCode 厂商目录由内置预设纯内存合成，不落盘", { timeout: 
   });
 });
 
-test("ZCode 厂商目录保留模型包预设，不继承 GPT 设置或宣告 WebSocket", () => {
+test("ZCode 厂商目录以基线整包克隆合成，预设字段作为替换层逐项生效", () => {
   const catalog = buildZcodeVendorCatalog();
+  const base = getCodexBaselineEntry();
   for (const preset of vendorModels["z.ai"]) {
     const entry = catalog.models.find(model => model.slug === preset.name)!;
     assert.ok(entry);
+    // 预设声明的字段逐项替换基底（真实窗口、reasoning 档位、空值中和等）。
     const { name: _name, ...fields } = preset;
     for (const [key, value] of Object.entries(fields)) {
       assert.deepEqual(entry[key], value, `模型 ${preset.name} 保留预设字段 ${key}`);
     }
+    // Codex 行为字段默认继承基线（与其余 agent 插件一致，客户端据此组装
+    // additional_tools 工具组与全量 MCP 工具集）。
+    assert.equal(entry.tool_mode, base.tool_mode);
+    assert.equal(entry.multi_agent_version, base.multi_agent_version);
+    assert.equal(entry.use_responses_lite, base.use_responses_lite);
+    assert.deepEqual(entry.service_tiers, base.service_tiers);
+    // 实验工具集继承基线（clock/send_user_message_async 随 additional_tools 命名空间下发）；
+    // 提示词仍由预设置空中和；WebSocket 不宣告。
+    assert.deepEqual(entry.experimental_supported_tools, base.experimental_supported_tools);
+    assert.equal(entry.base_instructions, "");
     assert.equal(entry.prefer_websockets, false);
     assert.equal(entry.supports_search_tool, true);
-    assert.equal(entry.base_instructions, "");
-    assert.equal(entry.service_tiers, undefined);
-    assert.equal(entry.additional_speed_tiers, undefined);
-    assert.equal(entry.supports_image_detail_original, undefined);
   }
 });
 

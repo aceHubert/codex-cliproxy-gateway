@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import { createHash } from "node:crypto";
-import { getVendorModelPresets } from "@agent-proxy/models";
-import { compileModelOverrides, synthesizeModelEntry } from "@agent-proxy/plugin-api";
+import { getCodexBaselineEntry, getVendorModelPresets } from "@agent-proxy/models";
 import { atomicWrite } from "@agent-proxy/plugin-api";
-import type { ModelCatalog } from "@agent-proxy/plugin-api";
+import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 import type { ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
 
 const vendorModelIds = () => (getVendorModelPresets()["z.ai"] ?? []).map((model) => model.name);
@@ -85,25 +84,30 @@ function stripZcodeChannelLabel(name: string): string {
 
 /**
  * 仅由模型包的厂商预设合成全量裸 ID 目录。纯内存计算，
- * 重建成本与模型条数同级，不需要磁盘缓存，也不携带任何套餐或授权信息。
+ * 重建成本与模型条数同级，不需要磁盘缓存，不携带任何套餐或授权信息。
+ * 合成策略与其余 agent 插件（agy/qoder/zen/codebuddy）一致：以 Codex 基线整包
+ * 克隆为底座，厂商预设作为自定义替换层逐字段覆盖——tool_mode、multi_agent_version、
+ * use_responses_lite 等 Codex 行为字段默认继承基线（客户端据此组装 additional_tools
+ * 与全量 MCP 工具集），z.ai 预设声明真实能力（context_window、reasoning 档位）并以
+ * 空值中和不适用的基线字段（base_instructions 置空、experimental_supported_tools 清空）。
  */
 export function buildZcodeVendorCatalog(): ModelCatalog {
-  const vendorModels = getVendorModelPresets();
-  const modelIds = (vendorModels["z.ai"] ?? []).map((model) => model.name);
-  const vendors = compileModelOverrides(vendorModels, "vendor_models.json");
-  const preset = { models: modelIds.map((id, index) =>
-    synthesizeModelEntry(`z.ai/${id}`, index, { models: [] }, vendors)) };
-  return { models: preset.models.map((entry) => {
-    const slug = entry.slug.slice("z.ai/".length);
-    return {
-      ...entry,
-      slug,
-      display_name: entry.display_name ?? slug,
-      prefer_websockets: false,
-      // zcode 链路已把 Responses web_search 原生映射为 web_search_20250305（实测 z.ai 支持）。
-      supports_search_tool: true,
-    };
-  }) };
+  const presets = getVendorModelPresets()["z.ai"] ?? [];
+  const base = getCodexBaselineEntry();
+  const models = presets.map((preset, index) => {
+    const { name, display_name, ...overrides } = preset;
+    const entry = { ...structuredClone(base), ...(overrides as Partial<ModelEntry>) };
+    entry.slug = name;
+    entry.display_name = typeof display_name === "string" && display_name ? display_name : name;
+    entry.priority = index;
+    return entry;
+  });
+  return { models: models.map((entry) => ({
+    ...entry,
+    prefer_websockets: false,
+    // zcode 链路已把 Responses web_search 原生映射为 web_search_20250305（实测 z.ai 支持）。
+    supports_search_tool: true,
+  })) };
 }
 
 /** /models 只按快照套餐的支持集合筛选并加套餐作用域前缀，不重新合成厂商元数据。 */
