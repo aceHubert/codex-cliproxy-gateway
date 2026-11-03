@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.3 (2026-11-03)
+
+#### :bug: Bug Fix
+* `agy`, `llm-bridge`
+  * [#33](https://github.com/aceHubert/codex-cliproxy-gateway/pull/33) fix(llm-bridge): 无 call_id 的注入通知降级为 user 通知 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.20.2 (2026-11-03)
 
 #### :bug: Bug Fix
