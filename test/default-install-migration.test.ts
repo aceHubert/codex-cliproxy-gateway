@@ -77,7 +77,9 @@ test("旧默认安装迁移整个目录、状态、权限与凭据，保留旧�
   assert.equal(prepareDefaultInstallMigration(migration.paths, { HOME: home }, "linux"), undefined);
   rollback();
   assert.equal(fs.existsSync(paths.runtimeHome), false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(codexHome, ".codex-cliproxy-owner.json"), "utf8")).runtimeHome, legacy);
+  // 固件写在旧名下；迁移收养后声明移到新名，回滚恢复的内容也在新名。
+  assert.equal(fs.existsSync(path.join(codexHome, ".codex-cliproxy-owner.json")), false);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(codexHome, ".agent-proxy-owner.json"), "utf8")).runtimeHome, legacy);
 }));
 
 test("新配置优先、旧配置补缺，回滚恢复新目录原有文件", () => fixture((home, legacy) => {
@@ -446,6 +448,7 @@ test("旧 config-only 安装保持首次安装语义，完成后记录来源且�
   rollback();
   assert.equal(fs.existsSync(paths.stateFile), false);
   assert.equal(fs.existsSync(path.join(paths.codexHome, ".codex-cliproxy-owner.json")), false);
+  assert.equal(fs.existsSync(path.join(paths.codexHome, ".agent-proxy-owner.json")), false);
 }));
 
 test("缺失 state 的旧标准服务恢复自定义客户端目录，显式冲突只读报错", () => fixture((home, legacy) => {
@@ -459,47 +462,65 @@ test("缺失 state 的旧标准服务恢复自定义客户端目录，显式冲�
   assert.equal(fs.existsSync(paths.runtimeHome), false);
 }));
 
+test("缺失 state 且 plist 仍在旧文件名时，按旧命名 plist 恢复客户端目录", () => fixture((home, legacy) => {
+  const paths = resolvePaths({ HOME: home });
+  const codexHome = path.join(home, "legacy-filename-client");
+  json(path.join(legacy, "config.json"), {});
+  // install 的收养迁移尚未运行（确认门之前）：新文件名不存在，plist 还在旧文件名下。
+  const agents = path.dirname(paths.launchAgent);
+  fs.mkdirSync(agents, { recursive: true });
+  fs.writeFileSync(path.join(agents, "codex-cliproxy-gateway.plist"), renderLaunchAgent({ bunPath: "/opt/bun", cliPath: "/opt/old/dist/index.js", configPath: path.join(legacy, "config.json"), codexHome, logPath: path.join(legacy, "gateway.log"), label: "codex-cliproxy-gateway" }));
+  const migration = prepareDefaultInstallMigration(paths, { HOME: home }, "linux")!;
+  assert.equal(migration.paths.codexHome, codexHome);
+  assert.equal(fs.existsSync(paths.runtimeHome), false);
+}));
+
 test("旧托管安装切手动先转交归属，成功后释放声明并支持失败恢复", () => fixture((home, legacy) => {
   const paths = resolvePaths({ HOME: home, CODEX_HOME: path.join(home, "managed-client") });
   json(path.join(legacy, "config.json"), {});
   json(path.join(legacy, "state.json"), { codexConfigManaged: true, codexHome: paths.codexHome, config: {} });
   const owner = path.join(paths.codexHome, ".codex-cliproxy-owner.json");
+  const ownerFile = path.join(paths.codexHome, ".agent-proxy-owner.json");
   json(owner, { runtimeHome: legacy });
   const migration = prepareDefaultInstallMigration(paths, { HOME: home }, "linux", undefined, true)!;
   const rollback = migration.apply();
-  assert.equal(JSON.parse(fs.readFileSync(owner, "utf8")).runtimeHome, paths.runtimeHome);
-  releaseCodexHome(migration.paths);
+  // 迁移收养：旧名声明转交到新名后按新内容托管。
   assert.equal(fs.existsSync(owner), false);
+  assert.equal(JSON.parse(fs.readFileSync(ownerFile, "utf8")).runtimeHome, paths.runtimeHome);
+  releaseCodexHome(migration.paths);
+  assert.equal(fs.existsSync(ownerFile), false);
   json(paths.stateFile, { codexConfigManaged: false, codexHome: paths.codexHome, config: {} });
   migration.complete();
   const other = resolvePaths({ HOME: home, CODEX_HOME: paths.codexHome, CODEX_CLIPROXY_HOME: path.join(home, "other-instance") });
   assertCodexHomeAvailable(other, false);
   rollback();
-  assert.equal(JSON.parse(fs.readFileSync(owner, "utf8")).runtimeHome, legacy);
+  assert.equal(JSON.parse(fs.readFileSync(ownerFile, "utf8")).runtimeHome, legacy);
 }));
 
 test("旧 config-only 无 state 但遗留 owner 时，明确手动安装转交并释放真实旧声明", () => fixture((home, legacy) => {
   const paths = resolvePaths({ HOME: home });
   json(path.join(legacy, "config.json"), {});
   const owner = path.join(paths.codexHome, ".codex-cliproxy-owner.json");
+  const ownerFile = path.join(paths.codexHome, ".agent-proxy-owner.json");
   json(owner, { runtimeHome: legacy });
   assert.equal(fs.existsSync(path.join(legacy, "state.json")), false);
   const migration = prepareDefaultInstallMigration(paths, { HOME: home }, "linux", undefined, true)!;
   const rollback = migration.apply();
   assert.equal(fs.existsSync(paths.stateFile), false);
-  assert.equal(JSON.parse(fs.readFileSync(owner, "utf8")).runtimeHome, paths.runtimeHome);
-  releaseCodexHome(migration.paths);
   assert.equal(fs.existsSync(owner), false);
+  assert.equal(JSON.parse(fs.readFileSync(ownerFile, "utf8")).runtimeHome, paths.runtimeHome);
+  releaseCodexHome(migration.paths);
+  assert.equal(fs.existsSync(ownerFile), false);
   rollback();
-  assert.equal(JSON.parse(fs.readFileSync(owner, "utf8")).runtimeHome, legacy);
+  assert.equal(JSON.parse(fs.readFileSync(ownerFile, "utf8")).runtimeHome, legacy);
 }));
 
 test("旧 config-only 无 state 且无 owner 时，明确手动安装不补建声明", () => fixture((home, legacy) => {
   const paths = resolvePaths({ HOME: home });
   json(path.join(legacy, "config.json"), {});
-  const owner = path.join(paths.codexHome, ".codex-cliproxy-owner.json");
   const rollback = prepareDefaultInstallMigration(paths, { HOME: home }, "linux", undefined, true)!.apply();
-  assert.equal(fs.existsSync(owner), false);
+  assert.equal(fs.existsSync(path.join(paths.codexHome, ".codex-cliproxy-owner.json")), false);
+  assert.equal(fs.existsSync(path.join(paths.codexHome, ".agent-proxy-owner.json")), false);
   assert.equal(fs.existsSync(paths.stateFile), false);
   rollback();
 }));

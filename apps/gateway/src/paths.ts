@@ -120,12 +120,23 @@ export function resolvePaths(env?: NodeJS.ProcessEnv, runtimeHomeOverride?: stri
     /** 上游 API key 的文件后端（非 darwin 平台替代 macOS Keychain）：0600、原子写，内容是明文密钥。 */
     credentialsFile: path.join(runtimeHome, "credentials.json"),
     launchAgent: runtimeHomeOverride
-      ? path.join(runtimeHome, "Library", "LaunchAgents", "codex-cliproxy-gateway-temp.plist")
-      : path.join(home, "Library", "LaunchAgents", `codex-cliproxy-gateway${instanceSuffix}.plist`),
+      ? path.join(runtimeHome, "Library", "LaunchAgents", "agent-proxy-gateway-temp.plist")
+      : path.join(home, "Library", "LaunchAgents", `agent-proxy-gateway${instanceSuffix}.plist`),
     /** Web UI 的 LaunchAgent（默认不加载运行，`agent-proxy web` 按需启动）。 */
     webUiLaunchAgent: runtimeHomeOverride
-      ? path.join(runtimeHome, "Library", "LaunchAgents", "codex-cliproxy-webui-temp.plist")
-      : path.join(home, "Library", "LaunchAgents", `codex-cliproxy-webui${instanceSuffix}.plist`),
+      ? path.join(runtimeHome, "Library", "LaunchAgents", "agent-proxy-webui-temp.plist")
+      : path.join(home, "Library", "LaunchAgents", `agent-proxy-webui${instanceSuffix}.plist`),
+  };
+}
+
+/**
+ * 服务更名前的 plist 路径；仅用于 install 的收养迁移与 uninstall 的残留清理，
+ * 正常读写一律走 paths.launchAgent / paths.webUiLaunchAgent。
+ */
+export function legacyLaunchAgentPaths(paths: ResolvedPaths): { legacyGatewayPlist: string; legacyWebUiPlist: string } {
+  return {
+    legacyGatewayPlist: path.join(paths.home, "Library", "LaunchAgents", `codex-cliproxy-gateway${paths.instanceSuffix}.plist`),
+    legacyWebUiPlist: path.join(paths.home, "Library", "LaunchAgents", `codex-cliproxy-webui${paths.instanceSuffix}.plist`),
   };
 }
 

@@ -4,12 +4,13 @@ import type { StdioOptions } from "node:child_process";
 import { resolvePaths } from "./paths.ts";
 import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "./credentials-store.ts";
 
-export const KEYCHAIN_SERVICE = "codex-cliproxy-gateway";
+export const KEYCHAIN_SERVICE = "agent-proxy-gateway";
+/** 项目更名前的 Keychain 槽位名；仅默认实例读取时回退、卸载时一并删除，写入只落新槽位。 */
+const LEGACY_KEYCHAIN_SERVICE = "codex-cliproxy-gateway";
 
 /**
- * 上游 API key 的 Keychain 服务名：默认实例沿用历史槽位（存量安装零迁移），
- * 其他实例加与 launchd label 相同的主目录哈希后缀——不同实例的密钥互不覆盖，
- * 非默认实例也绝不回退读取默认槽位。
+ * 上游 API key 的 Keychain 服务名：其他实例加与 launchd label 相同的主目录哈希后缀——
+ * 不同实例的密钥互不覆盖，非默认实例也绝不回退读取默认（或旧命名默认）槽位。
  */
 export function keychainService(): string {
   return KEYCHAIN_SERVICE + resolvePaths().instanceSuffix;
@@ -39,7 +40,8 @@ function saveApiKeyInKeychain(apiKey: string, account: string, service: string, 
   ]);
 }
 
-function readApiKeyFromKeychain(optional: boolean, account: string, service: string, execute: KeychainExecutor): string {
+/** 单槽位查找：缺失返回 undefined，由调用方决定回退与报错语义。 */
+function findKeychainPassword(account: string, service: string, execute: KeychainExecutor): string | undefined {
   try {
     return execute([
       "find-generic-password",
@@ -50,8 +52,7 @@ function readApiKeyFromKeychain(optional: boolean, account: string, service: str
       "-w",
     ]);
   } catch {
-    if (optional) return "";
-    throw new Error(`Upstream API key was not found in macOS Keychain (service: ${service})`);
+    return undefined;
   }
 }
 
@@ -92,11 +93,27 @@ export function createApiKeyStore(
   if (platform === "darwin") {
     // 存储对象创建时固定槽位，后续异步调用切换实例或用户环境也不会串槽。
     const account = keychainAccount();
+    const instanceSuffix = resolvePaths().instanceSuffix;
     const service = keychainService();
     return {
       save: (apiKey) => saveApiKeyInKeychain(apiKey, account, service, executeKeychain),
-      read: (optional = false) => readApiKeyFromKeychain(optional, account, service, executeKeychain),
-      delete: () => deleteApiKeyFromKeychain(account, service, executeKeychain),
+      read: (optional = false) => {
+        const current = findKeychainPassword(account, service, executeKeychain);
+        if (current !== undefined) return current;
+        // 更名前的默认实例密钥仍在旧命名槽位：读到即用，不回写不删除；
+        // 非默认实例旧命名时代不存在，绝不回退，避免读到默认实例的密钥。
+        if (instanceSuffix === "") {
+          const legacy = findKeychainPassword(account, LEGACY_KEYCHAIN_SERVICE, executeKeychain);
+          if (legacy !== undefined) return legacy;
+        }
+        if (optional) return "";
+        throw new Error(`Upstream API key was not found in macOS Keychain (service: ${service})`);
+      },
+      delete: () => {
+        deleteApiKeyFromKeychain(account, service, executeKeychain);
+        // 卸载语义是完全移除本实例凭据；默认实例的旧命名槽位一并回收，实例槽位不碰。
+        if (instanceSuffix === "") deleteApiKeyFromKeychain(account, LEGACY_KEYCHAIN_SERVICE, executeKeychain);
+      },
     };
   }
   return {

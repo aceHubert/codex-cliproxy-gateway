@@ -142,7 +142,7 @@ test("合并排除规则只命中点名模型：未排除的 Zen 可用，其他
       body: JSON.stringify({ model: "agy/hidden-model", input: "test" }),
     }));
     assert.equal(blocked.status, 404);
-    assert.equal(blocked.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+    assert.equal(blocked.headers.get("x-agent-proxy"), "model-excluded");
     const response = await handler(chatRequest());
     assert.equal(response.status, 200);
     await response.text();
@@ -1166,7 +1166,7 @@ test("Zen WebSocket 握手本地拒绝，令客户端降级 HTTPS/SSE", TIMEOUT,
       assert.equal(matchesPluginUpgrade(upgrade, config, "opencode-zen"), true);
       const response = await handler(upgrade);
       assert.equal(response.status, 426);
-      assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "opencode-zen-http-only");
+      assert.equal(response.headers.get("x-agent-proxy"), "opencode-zen-http-only");
     }
     // 非 zen 模型、非 responses 路径、未启用开关三种情形都不拦截。
     const upgrade = (hint: string, url = "http://127.0.0.1:8327/v1/responses") => new Request(url, {

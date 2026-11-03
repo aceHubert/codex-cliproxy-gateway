@@ -68,8 +68,8 @@ function makePaths(home: string): ResolvedPaths {
     logDir: path.join(runtimeHome, "logs"),
     uiTokenFile: path.join(runtimeHome, "ui-token"),
     credentialsFile: path.join(runtimeHome, "credentials.json"),
-    launchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-gateway.plist"),
-    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
+    launchAgent: path.join(home, "Library", "LaunchAgents", "agent-proxy-gateway.plist"),
+    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "agent-proxy-webui.plist"),
     instanceSuffix: "",
   };
 }

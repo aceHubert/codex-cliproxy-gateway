@@ -167,6 +167,7 @@ test("托管切手动中断后卸载释放自己的遗留归属，保留客户�
     await runCli(["uninstall"]);
     assert.equal(fs.readFileSync(clientPaths.configToml, "utf8"), content);
     assert.equal(fs.existsSync(path.join(codexA, ".codex-cliproxy-owner.json")), false);
+    assert.equal(fs.existsSync(path.join(codexA, ".agent-proxy-owner.json")), false);
   `);
 });
 
@@ -183,7 +184,7 @@ test("客户端恢复后的卸载重试不再修改已交给另一实例的配�
     await assert.rejects(runCli(["restart"]), /uninstall is unfinished/);
     await runCli(["uninstall"]);
     assert.equal(fs.readFileSync(pathsB.configToml, "utf8"), content);
-    assert.equal(JSON.parse(fs.readFileSync(path.join(codexA, ".codex-cliproxy-owner.json"))).runtimeHome, rootB);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(codexA, ".agent-proxy-owner.json"))).runtimeHome, rootB);
     assert.equal(fs.existsSync(pathsA.stateFile), false);
   `);
 });
@@ -200,6 +201,7 @@ test("服务安装失败恢复客户端配置并撤销本次归属声明", { tim
     await assert.rejects(runCli(["install", "--select", "none", "--key-env", "TEST_UPSTREAM_KEY"]), /模拟服务启动失败/);
     assert.equal(fs.readFileSync(path.join(codexA, "config.toml"), "utf8"), original);
     assert.equal(fs.existsSync(path.join(codexA, ".codex-cliproxy-owner.json")), false);
+    assert.equal(fs.existsSync(path.join(codexA, ".agent-proxy-owner.json")), false);
     assert.equal(fs.existsSync(pathsA.stateFile), false);
     assert.ok(calls.includes("install"));
   `);
@@ -225,6 +227,7 @@ test("成功手动安装回收转换或卸载中断留下的自身声明，不�
       await runCli(["install", "--yes", "--manual-codex-config", "--select", "none", "--key-env", "TEST_UPSTREAM_KEY"]);
       assert.equal(fs.readFileSync(clientPaths.configToml, "utf8"), content);
       assert.equal(fs.existsSync(path.join(codexA, ".codex-cliproxy-owner.json")), false);
+    assert.equal(fs.existsSync(path.join(codexA, ".agent-proxy-owner.json")), false);
       const updatedState = JSON.parse(fs.readFileSync(pathsA.stateFile));
       assert.equal(updatedState.codexConfigManaged, false);
       assert.equal(updatedState.uninstallClientRestored, undefined);

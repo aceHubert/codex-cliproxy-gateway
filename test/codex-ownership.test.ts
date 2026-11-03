@@ -41,7 +41,7 @@ test("托管声明禁止 A 与 B 顺序争用，卸载不能删除其他实例�
   const a = instance(home, "A");
   const b = instance(home, "B");
   claimCodexHome(a);
-  const file = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const file = path.join(a.codexHome, ".agent-proxy-owner.json");
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { runtimeHome: a.runtimeHome });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.throws(() => assertCodexHomeAvailable(b, false), /managed by gateway/);
@@ -54,7 +54,7 @@ test("托管声明禁止 A 与 B 顺序争用，卸载不能删除其他实例�
 
 test("安装失败回滚只移除本次新建声明，重复声明的回滚保留原文件", () => fixture((home) => {
   const a = instance(home, "A");
-  const file = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const file = path.join(a.codexHome, ".agent-proxy-owner.json");
   const rollback = claimCodexHome(a);
   const sameOwnerRollback = claimCodexHome(a);
   sameOwnerRollback();
@@ -70,7 +70,7 @@ test("旧声明撤销后重新创建的同实例声明不受旧回滚影响", ()
   releaseCodexHome(a);
   claimCodexHome(a);
   rollback();
-  assert.ok(fs.existsSync(path.join(a.codexHome, ".codex-cliproxy-owner.json")));
+  assert.ok(fs.existsSync(path.join(a.codexHome, ".agent-proxy-owner.json")));
 }));
 
 test("同一运行目录与客户端目录的软链别名共享归属", () => fixture((home) => {
@@ -82,13 +82,13 @@ test("同一运行目录与客户端目录的软链别名共享归属", () => fi
   const alias = instance(home, "runtime-alias", path.join(home, "client-alias"));
   assert.doesNotThrow(() => assertCodexHomeAvailable(alias, false));
   claimCodexHome(alias)();
-  assert.ok(fs.existsSync(path.join(a.codexHome, ".codex-cliproxy-owner.json")));
+  assert.ok(fs.existsSync(path.join(a.codexHome, ".agent-proxy-owner.json")));
 }));
 
 test("损坏的归属文件明确报错且不被托管覆盖，手动模式保持只读", () => fixture((home) => {
   const a = instance(home, "A");
   fs.mkdirSync(a.codexHome);
-  const file = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const file = path.join(a.codexHome, ".agent-proxy-owner.json");
   fs.writeFileSync(file, "broken");
   assert.throws(() => claimCodexHome(a), /Cannot read Codex ownership/);
   assert.throws(() => releaseCodexHome(a), /Cannot read Codex ownership/);
@@ -177,7 +177,7 @@ test("已完成客户端恢复的默认卸载记录不阻止另一实例取得�
   });
   const other = instance(home, "B", defaults.codexHome);
   assert.doesNotThrow(() => claimCodexHome(other));
-  assert.equal(JSON.parse(fs.readFileSync(path.join(other.codexHome, ".codex-cliproxy-owner.json"), "utf8")).runtimeHome, other.runtimeHome);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(other.codexHome, ".agent-proxy-owner.json"), "utf8")).runtimeHome, other.runtimeHome);
 }));
 
 test("标准 LaunchAgent 识别旧实例归属，XML 转义不影响路径判定", () => fixture((home) => {
@@ -186,11 +186,59 @@ test("标准 LaunchAgent 识别旧实例归属，XML 转义不影响路径判定
   const agents = path.join(home, "Library", "LaunchAgents");
   fs.mkdirSync(agents, { recursive: true });
   const escape = (value: string) => value.replaceAll("&", "&amp;");
-  fs.writeFileSync(path.join(agents, "codex-cliproxy-gateway-12345678.plist"), `<dict>
+  // 更名前后的服务命名都参与扫描：同一安装形态不应因 plist 文件名不同而漏判。
+  for (const plistName of ["codex-cliproxy-gateway-12345678.plist", "agent-proxy-gateway-12345678.plist"]) {
+    fs.writeFileSync(path.join(agents, plistName), `<dict>
     <key>ProgramArguments</key><array><string>bun</string><string>serve</string><string>--config</string><string>${escape(a.gatewayConfig)}</string></array>
     <key>EnvironmentVariables</key><dict><key>CODEX_HOME</key><string>${escape(a.codexHome)}</string></dict></dict>`);
+  }
   assert.throws(() => assertCodexHomeAvailable(b, false), /managed by gateway/);
   assert.doesNotThrow(() => assertCodexHomeAvailable(a, false));
   state(a.stateFile, { codexConfigManaged: false });
   assert.doesNotThrow(() => assertCodexHomeAvailable(b, false));
+}));
+
+test("更名前的归属声明在声明写入前被收养为新名", () => fixture((home) => {
+  const a = instance(home, "A");
+  fs.mkdirSync(a.codexHome, { recursive: true });
+  const legacy = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const current = path.join(a.codexHome, ".agent-proxy-owner.json");
+  fs.writeFileSync(legacy, `${JSON.stringify({ runtimeHome: a.runtimeHome })}\n`, { mode: 0o600 });
+  claimCodexHome(a);
+  assert.ok(!fs.existsSync(legacy), "旧名声明在收养后不应残留");
+  assert.equal(JSON.parse(fs.readFileSync(current, "utf8")).runtimeHome, a.runtimeHome);
+  releaseCodexHome(a);
+  assert.ok(!fs.existsSync(current));
+}));
+
+test("新旧归属声明并存时同归属去重、冲突报错", () => fixture((home) => {
+  const a = instance(home, "A");
+  fs.mkdirSync(a.codexHome, { recursive: true });
+  const legacy = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const current = path.join(a.codexHome, ".agent-proxy-owner.json");
+  fs.writeFileSync(legacy, `${JSON.stringify({ runtimeHome: a.runtimeHome })}\n`);
+  fs.writeFileSync(current, `${JSON.stringify({ runtimeHome: a.runtimeHome })}\n`);
+  claimCodexHome(a);
+  assert.ok(!fs.existsSync(legacy), "归属一致的旧副本应清理");
+
+  const b = instance(home, "B");
+  fs.mkdirSync(b.codexHome, { recursive: true });
+  const bLegacy = path.join(b.codexHome, ".codex-cliproxy-owner.json");
+  const bCurrent = path.join(b.codexHome, ".agent-proxy-owner.json");
+  fs.writeFileSync(bLegacy, `${JSON.stringify({ runtimeHome: path.join(home, "other") })}\n`);
+  fs.writeFileSync(bCurrent, `${JSON.stringify({ runtimeHome: b.runtimeHome })}\n`);
+  assert.throws(() => claimCodexHome(b), /ownership conflict/);
+}));
+
+test("卸载同时释放新旧命名的归属声明", () => fixture((home) => {
+  const a = instance(home, "A");
+  fs.mkdirSync(a.codexHome, { recursive: true });
+  const legacy = path.join(a.codexHome, ".codex-cliproxy-owner.json");
+  const current = path.join(a.codexHome, ".agent-proxy-owner.json");
+  for (const file of [legacy, current]) {
+    fs.writeFileSync(file, `${JSON.stringify({ runtimeHome: a.runtimeHome })}\n`);
+  }
+  releaseCodexHome(a);
+  assert.ok(!fs.existsSync(legacy));
+  assert.ok(!fs.existsSync(current));
 }));

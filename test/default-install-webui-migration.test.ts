@@ -38,19 +38,23 @@ test("运行中的受管 Web UI 迁移入口和日志后重载，失败回滚恢
   assert.ok(after.includes(path.join(options.runtimeHome, "webui.log")));
   assert.ok(!after.includes(path.join(options.legacyRuntimeHome, "webui.log")));
   assert.ok(after.includes("codex-cliproxy-webui"));
-  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootstrap", "kickstart"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootout", "bootstrap", "kickstart"]);
+  // 探测、回收与拉起都必须按 plist 内声明的真实 Label（旧命名）：按新名探测会把
+  // 运行中的旧服务当成未加载，按新名 kickstart 则必然失败。
+  const labelCalls = calls.filter((args) => args[0] === "print" || args[0] === "kickstart").map((args) => args.at(-1));
+  assert.ok(labelCalls.every((target) => String(target).endsWith("/codex-cliproxy-webui")), String(labelCalls));
   assert.equal(fs.statSync(options.plistPath).mode & 0o777, 0o640);
   assert.equal(fs.readdirSync(directory).filter((name) => name.includes("bak-agent-proxy")).length, 1);
   rollback();
   assert.equal(fs.readFileSync(options.plistPath, "utf8"), before);
-  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootstrap", "kickstart", "bootout", "bootstrap", "kickstart"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootout", "bootstrap", "kickstart", "bootout", "bootout", "bootstrap", "kickstart"]);
 }));
 
 test("已加载但停止的 Web UI 仅更新定义，保持停止", () => fixture((directory) => {
   const options = setup(directory);
   const calls: string[][] = [];
   const rollback = prepareManagedWebUiMigration(options, (args) => { calls.push(args); return args[0] === "print" ? "state = not running\n" : ""; })!();
-  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootstrap"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootout", "bootstrap"]);
   rollback();
   assert.equal(calls.some((args) => args[0] === "kickstart"), false);
 }));
@@ -91,5 +95,5 @@ test("Web UI 重载失败时恢复原 plist 并重新启动原服务", () => fix
     return "";
   })!(), /bootstrap failed/);
   assert.equal(fs.readFileSync(options.plistPath, "utf8"), before);
-  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootstrap", "bootout", "bootstrap", "kickstart"]);
+  assert.deepEqual(calls.map((args) => args[0]), ["print", "bootout", "bootout", "bootstrap", "bootout", "bootout", "bootstrap", "kickstart"]);
 }));

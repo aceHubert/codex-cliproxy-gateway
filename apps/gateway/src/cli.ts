@@ -15,7 +15,7 @@ import {
   agentConfigEnabled,
   effectiveAgentConfig,
 } from "./config.ts";
-import { realPathOrResolve, resolvePaths, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker } from "./paths.ts";
+import { realPathOrResolve, resolvePaths, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker, legacyLaunchAgentPaths } from "./paths.ts";
 import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
 import { prepareDefaultInstallMigration } from "./default-install-migration.ts";
 import { resolveInstalledCodexPaths, assertCodexHomeAvailable, claimCodexHome, codexOwnerRuntimeHome, releaseCodexHome } from "./codex-ownership.ts";
@@ -76,6 +76,9 @@ import {
   launchAgentStatus,
   gatewayServiceLabel,
   webUiServiceLabel,
+  adoptLegacyLaunchAgents,
+  removeLegacyLaunchAgents,
+  plistServiceLabel,
 } from "./launchd.ts";
 import { MOUNT_PATH } from "./types.ts";
 import type {
@@ -874,6 +877,13 @@ async function install(options: CliOptions): Promise<void> {
       return;
     }
   }
+  // 确认更新后、执行迁移前收养旧命名 plist：目录迁移内的 Web UI 迁移按新路径读写。
+  adoptLegacyLaunchAgents({
+    gatewayPlist: migration.paths.launchAgent,
+    webUiPlist: migration.paths.webUiLaunchAgent,
+    ...legacyLaunchAgentPaths(migration.paths),
+    instanceSuffix: migration.paths.instanceSuffix,
+  });
   const rollback = migration.apply();
   try {
     await runWithInstancePaths(migration.paths, () => installCurrent({ ...options, yes: true }, () => migration.complete()));
@@ -944,6 +954,13 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
       return;
     }
   }
+  // 确认门之后、写 plist 之前收养旧命名 plist：拒绝安装则零改动，纯改名不扰服务。
+  adoptLegacyLaunchAgents({
+    gatewayPlist: paths.launchAgent,
+    webUiPlist: paths.webUiLaunchAgent,
+    ...legacyLaunchAgentPaths(paths),
+    instanceSuffix: paths.instanceSuffix,
+  });
   const { config } = mergedGatewayConfig(paths, currentGatewayConfig, overrides);
   config.configVersion = GATEWAY_CONFIG_VERSION;
   // 配置规范由当前程序维护，安装时覆盖用户残留的旧地址或自定义地址。
@@ -1031,8 +1048,12 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
   // LaunchAgent 的恢复责任从开始替换 plist 时即成立：installLaunchAgent 内部会先覆盖
   // plist 并 bootout 原服务，若 bootstrap/kickstart 抛错，launchInstalled 尚未置位，
   // 但旧 plist 已被覆盖、原服务已停止——先留底原内容与加载态，失败时回写并拉回服务。
+  // 留底的是 plist 内声明的真实 Label（更名前的安装是旧 label），加载态与恢复拉起都按它判定。
   const previousPlist = fs.existsSync(paths.launchAgent) ? fs.readFileSync(paths.launchAgent, "utf8") : undefined;
-  const previousServiceLoaded = previousPlist !== undefined && launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix)) !== null;
+  const previousServiceLabel = previousPlist !== undefined
+    ? plistServiceLabel(previousPlist, gatewayServiceLabel(paths.instanceSuffix))
+    : gatewayServiceLabel(paths.instanceSuffix);
+  const previousServiceLoaded = previousPlist !== undefined && launchAgentStatus(previousServiceLabel) !== null;
   let launchTouched = false;
   let tomlUnchanged = false;
 
@@ -1165,7 +1186,7 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
             // launchd 里已加载的是新任务定义：kickstart 只会按它重启，必须
             // bootout + bootstrap 才能让恢复到磁盘的旧 plist 重新生效；旧任务
             // 本就未加载时只需卸载新任务，回到安装前的未加载状态。
-            if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
+            if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, previousServiceLabel);
             else stopLaunchAgent(paths.launchAgent);
           } else {
             restartLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
@@ -1189,7 +1210,7 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
           atomicWrite(paths.launchAgent, previousPlist, 0o644);
           // 安装尝试已 bootout 原服务：若它之前处于加载态，按旧 plist 重新加载拉回；
           // 本就未加载的残留 plist 只恢复文件并卸载新任务，不凭空拉起服务。
-          if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, gatewayServiceLabel(paths.instanceSuffix));
+          if (previousServiceLoaded) reloadLaunchAgent(paths.launchAgent, previousServiceLabel);
           else stopLaunchAgent(paths.launchAgent);
         } else {
           uninstallLaunchAgent(paths.launchAgent);
@@ -1254,6 +1275,8 @@ async function uninstall(options: CliOptions): Promise<void> {
   uninstallLaunchAgent(paths.launchAgent);
   // Web UI 是独立 LaunchAgent：卸载时一并回收其任务与 plist（未安装时静默忽略）。
   uninstallLaunchAgent(paths.webUiLaunchAgent);
+  // 更名前的旧命名任务与 plist 同属本产品，卸载语义是彻底移除（未安装时静默忽略）。
+  removeLegacyLaunchAgents({ ...legacyLaunchAgentPaths(paths), instanceSuffix: paths.instanceSuffix });
   const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
   // 手动模式的 config.toml 属于用户：不还原受管键，也不清理其引用的目录文件。
   if (restoresClient) {
@@ -1662,7 +1685,13 @@ async function status(): Promise<void> {
   const paths = resolvePaths();
   const installed = fs.existsSync(paths.stateFile);
   const config = fs.existsSync(paths.gatewayConfig) ? loadGatewayConfig(paths.gatewayConfig) : undefined;
-  const service = process.platform === "darwin" ? launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix)) : null;
+  // 探测兼顾 plist 内的真实 Label：收养后未重装的安装，任务仍加载在旧 label 下。
+  const service = process.platform === "darwin"
+    ? launchAgentStatus(gatewayServiceLabel(paths.instanceSuffix))
+      ?? (fs.existsSync(paths.launchAgent)
+        ? launchAgentStatus(plistServiceLabel(fs.readFileSync(paths.launchAgent, "utf8"), gatewayServiceLabel(paths.instanceSuffix)))
+        : null)
+    : null;
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
   const configuredBaseUrl = readRootTomlString(source, "openai_base_url");
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");

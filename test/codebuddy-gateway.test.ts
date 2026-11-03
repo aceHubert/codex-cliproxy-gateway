@@ -769,7 +769,7 @@ test("WebSocket 升级按 codebuddy 前缀本地拒绝，不桥接上游", async
     assert.ok(matchesPluginUpgrade(wsRequest, config, "codebuddy"));
     const response = await handler(wsRequest);
     assert.equal(response.status, 426);
-    assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "codebuddy-http-only");
+    assert.equal(response.headers.get("x-agent-proxy"), "codebuddy-http-only");
   });
 });
 

@@ -112,7 +112,7 @@ test("launchd preserves custom CODEX_HOME for the provider snapshot", () => {
     configPath: "/tmp/gateway.json",
     codexHome: "/tmp/codex<&>",
     logPath: "/tmp/gateway.log",
-    label: "codex-cliproxy-gateway",
+    label: "agent-proxy-gateway",
   });
   assert.match(plist, /<key>CODEX_HOME<\/key>/);
   assert.match(plist, /<string>\/tmp\/codex&lt;&amp;&gt;<\/string>/);
@@ -1315,7 +1315,7 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
       "x-codex-routing-hint": "model=cliproxy/gpt-5.6-luna",
     });
     assert.match(head, /^HTTP\/1\.1 426/);
-    assert.match(head, /x-codex-cliproxy-gateway: websocket-upstream-unavailable/);
+    assert.match(head, /x-agent-proxy: websocket-upstream-unavailable/);
     const files = fs.readdirSync(logDir);
     // 协商失败不进错误摘要，但 ws-dial-failed 留在分组日志里可追溯。
     assert.equal(files.some((name) => name.startsWith("cliproxy-error-")), false);
@@ -1426,7 +1426,7 @@ test("realtime sideband dial failure surfaces as 502 instead of a silent 101", a
       authorization: "Bearer sideband-oauth",
     });
     assert.match(head, /^HTTP\/1\.1 502/);
-    assert.match(head, /x-codex-cliproxy-gateway: realtime-upstream-unavailable/);
+    assert.match(head, /x-agent-proxy: realtime-upstream-unavailable/);
     // 真实故障必须进错误摘要（原先的表现是 101 后静默断开）：摘要在进程日志里，不再另开文件。
     assert.deepEqual(fs.readdirSync(logDir).filter((name) => name.startsWith("cliproxy-error-")), []);
     const digest = fs.readFileSync(processLog, "utf8");
