@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.2 (2026-11-03)
+
+#### :bug: Bug Fix
+* `models`, `zcode`
+  * [#32](https://github.com/aceHubert/codex-cliproxy-gateway/pull/32) fix(zcode): 厂商目录改为基线整包克隆合成 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.20.1 (2026-11-02)
 
 #### :bug: Bug Fix
