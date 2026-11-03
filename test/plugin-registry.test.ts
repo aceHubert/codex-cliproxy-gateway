@@ -185,7 +185,7 @@ test("HTTP-only WS 握手返回 426，HTTP 重试仍命中原插件", async () =
     const response = await registry.dispatchWebSocket(wsContext("agent/model", () => { upstreamCalls++; return true; }), () => { defaultCalls++; return new Response(); });
     assert.equal(response?.status, 426);
     assert.equal(response?.headers.get("x-agent-proxy-websocket"), "unsupported");
-    assert.equal(response?.headers.get("x-codex-cliproxy-gateway"), "agent-http-only");
+    assert.equal(response?.headers.get("x-agent-proxy"), "agent-http-only");
     assert.deepEqual([httpCalls, wsCalls, upstreamCalls, defaultCalls], [0, 0, 0, 0]);
     assert.equal(await (await registry.dispatchHttp(httpContext("agent/model"), () => { defaultCalls++; return new Response(); })).text(), "SSE");
     assert.deepEqual([httpCalls, wsCalls, upstreamCalls, defaultCalls], [1, 0, 0, 0]);

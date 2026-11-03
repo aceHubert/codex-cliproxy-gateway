@@ -188,7 +188,7 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
       // 被排除的 agy 模型在适配器转发前被 404 拦截，不触达上游。
       const blocked = await handler(responsesRequest(AGY_MODEL));
       assert.equal(blocked.status, 404);
-      assert.equal(blocked.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+      assert.equal(blocked.headers.get("x-agent-proxy"), "model-excluded");
       assert.equal(inferBodies.length, 0);
     } finally {
       handler.close();
@@ -264,12 +264,12 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
         body: JSON.stringify({ model: OPENCODE_ZEN_EXCLUDED, messages: [{ role: "user", content: "hi" }] }),
       }));
       assert.equal(chat.status, 404);
-      assert.equal(chat.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+      assert.equal(chat.headers.get("x-agent-proxy"), "model-excluded");
 
       // responses 入口：同样拦截。
       const responses = await handler(responsesRequest(OPENCODE_ZEN_EXCLUDED));
       assert.equal(responses.status, 404);
-      assert.equal(responses.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+      assert.equal(responses.headers.get("x-agent-proxy"), "model-excluded");
       assert.equal(opencodeZenInferCalls.length, 0);
 
       // 未被排除的 zen 模型不受影响：chat/completions 正常进入 Zen 转发。
@@ -314,8 +314,8 @@ function webUiFixture(): { handler: (request: Request) => Promise<Response>; pat
     logDir: path.join(runtimeHome, "logs"),
     uiTokenFile: path.join(runtimeHome, "ui-token"),
     credentialsFile: path.join(runtimeHome, "credentials.json"),
-    launchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-gateway.plist"),
-    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "codex-cliproxy-webui.plist"),
+    launchAgent: path.join(home, "Library", "LaunchAgents", "agent-proxy-gateway.plist"),
+    webUiLaunchAgent: path.join(home, "Library", "LaunchAgents", "agent-proxy-webui.plist"),
   };
   const config: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,

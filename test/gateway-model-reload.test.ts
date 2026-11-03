@@ -127,7 +127,7 @@ test("模型热加载更新本地目录和推理排除规则并保持适配器�
     assert.equal(closed, 0);
     const blocked = await handler(request("zcode-test-zai/glm-5.3-flash"));
     assert.equal(blocked.status, 404);
-    assert.equal(blocked.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+    assert.equal(blocked.headers.get("x-agent-proxy"), "model-excluded");
     const response = await handler(new Request("http://127.0.0.1/v1/models?client_version=test"));
     const body = await response.json() as { models: Array<{ slug: string }> };
     assert.deepEqual(body.models.map((entry) => entry.slug).sort(), ["cliproxy/upstream-model", "gpt-native"]);
@@ -215,7 +215,7 @@ test("运行中网关经修订通知重载配置并保持监听服务", TIMEOUT,
       body: JSON.stringify({ model: "zcode/glm-5.3", input: "测试" }),
     });
     assert.equal(response.status, 404);
-    assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+    assert.equal(response.headers.get("x-agent-proxy"), "model-excluded");
     assert.equal((await fetch(new URL("healthz", server.url))).status, 200);
   } finally {
     server.stop(true);
@@ -303,7 +303,7 @@ test("静态热加载在启动旧快照完成后重新发布当前排除规则",
     await handler.reloadConfig({ ...config, excludedModels: [agentModel] });
     const excluded = JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")) as { models: Array<{ slug: string }> };
     assert.deepEqual(excluded.models.map((entry) => entry.slug), ["upstream-model"]);
-    assert.equal((await handler(request(agentModel))).headers.get("x-codex-cliproxy-gateway"), "model-excluded");
+    assert.equal((await handler(request(agentModel))).headers.get("x-agent-proxy"), "model-excluded");
   } finally {
     resolveCatalog(snapshot("glm-5.3"));
     handler.close();

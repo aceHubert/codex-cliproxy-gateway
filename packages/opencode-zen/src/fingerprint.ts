@@ -65,7 +65,7 @@ const GATE_REQUIRED_TOOL_ORDER = ["read"] as const;
 
 /** 稳定的 40-hex 项目标识：官方客户端对项目目录做哈希，服务端不校验注册，任意稳定值即可。 */
 export function createOpencodeZenProjectId(seed: string): string {
-  return createHash("sha1").update(`codex-cliproxy-gateway:${seed}`).digest("hex");
+  return createHash("sha1").update(`agent-proxy:${seed}`).digest("hex");
 }
 
 function traceHeaders(): { b3: string; traceparent: string } {

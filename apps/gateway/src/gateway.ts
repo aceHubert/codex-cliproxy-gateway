@@ -685,7 +685,7 @@ function officialRealtimeNotImplementedResponse(): Response {
     },
   }, {
     status: 426,
-    headers: { "x-codex-cliproxy-gateway": "official-realtime-not-implemented" },
+    headers: { "x-agent-proxy": "official-realtime-not-implemented" },
   });
 }
 
@@ -695,7 +695,7 @@ function websocketNotSupportedResponse(marker = "websocket-not-supported"): Resp
     status: 426,
     headers: {
       connection: "close",
-      "x-codex-cliproxy-gateway": marker,
+      "x-agent-proxy": marker,
     },
   });
 }
@@ -967,7 +967,7 @@ function excludedModelResponse(model: string): Response {
         hint: "Remove or narrow the exclusion (agent-proxy models --exclude, or the Web UI) to use this model",
       },
     },
-    { status: 404, headers: { "x-codex-cliproxy-gateway": "model-excluded" } },
+    { status: 404, headers: { "x-agent-proxy": "model-excluded" } },
   );
 }
 
@@ -1581,7 +1581,7 @@ export function startPluginGateway(
             });
             return new Response("Realtime upstream WebSocket failed", {
               status: 502,
-              headers: { "x-codex-cliproxy-gateway": "realtime-upstream-unavailable" },
+              headers: { "x-agent-proxy": "realtime-upstream-unavailable" },
             });
           });
         }

@@ -75,7 +75,7 @@ export function decodeOpenCodeSessionTimestamp(sessionId: string): number | unde
  * （Zen 按会话路由 prompt cache，缓存命中时 id 稳定即亲和稳定）。
  */
 export function deriveOpenCodeSessionId(external: string, timestampMs = Date.now()): string {
-  return createOpenCodeSessionId(timestampMs, `codex-cliproxy-gateway:session:${external}`);
+  return createOpenCodeSessionId(timestampMs, `agent-proxy:session:${external}`);
 }
 
 /** 入站标头的两种来源：fetch Headers 或已小写化的 plain object。 */

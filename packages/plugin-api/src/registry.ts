@@ -112,7 +112,7 @@ export class PluginRegistry {
         status: 426,
         headers: {
           "content-type": "application/json", connection: "close",
-          "x-codex-cliproxy-gateway": `${match.plugin.id}-http-only`,
+          "x-agent-proxy": `${match.plugin.id}-http-only`,
           "x-agent-proxy-websocket": "unsupported",
         },
       });

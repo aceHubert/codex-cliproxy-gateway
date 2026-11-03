@@ -664,7 +664,7 @@ test("Qoder WebSocket 握手与所有地域帧均拒绝进入上游桥", TIMEOUT
       assert.equal(matchesPluginUpgrade(upgrade, config, "qoder"), true);
       const response = await handler(upgrade);
       assert.equal(response.status, 426);
-      assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "qoder-http-only");
+      assert.equal(response.headers.get("x-agent-proxy"), "qoder-http-only");
       for (const route of ["official", "cliproxy"] as const) {
         for (const prefix of ["cliproxy/", ""]) assert.deepEqual(checkFrameRouting(JSON.stringify({ type: "response.create", model }), route, prefix, routingPluginFamily), { kind: "reject", model, family: "qoder" });
       }

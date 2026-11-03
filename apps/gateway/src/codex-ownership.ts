@@ -1,10 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { DEFAULT_RUNTIME_DIRECTORY, LEGACY_RUNTIME_DIRECTORY, realPathOrResolve } from "./paths.ts";
+import { DEFAULT_RUNTIME_DIRECTORY, LEGACY_RUNTIME_DIRECTORY, legacyLaunchAgentPaths, realPathOrResolve } from "./paths.ts";
 import type { ResolvedPaths } from "./types.ts";
 
-const OWNER_FILE = ".codex-cliproxy-owner.json";
+const OWNER_FILE = ".agent-proxy-owner.json";
+/** 项目更名前的归属声明文件名；读取回退兼容，声明写入前收养迁移。 */
+const LEGACY_OWNER_FILE = ".codex-cliproxy-owner.json";
 
 interface ClientState {
   codexHome?: string;
@@ -84,6 +86,43 @@ function ownerPath(paths: ResolvedPaths): string {
   return path.join(paths.codexHome, OWNER_FILE);
 }
 
+function legacyOwnerPath(paths: ResolvedPaths): string {
+  return path.join(paths.codexHome, LEGACY_OWNER_FILE);
+}
+
+/** 读路径兼容旧名声明：新名缺失时回退旧名；两者并存时归属须一致，任一损坏仍按 readOwner 抛错。 */
+function readOwnerAny(paths: ResolvedPaths): string | undefined {
+  const file = ownerPath(paths);
+  if (!fs.existsSync(file)) return readOwner(legacyOwnerPath(paths));
+  const owner = readOwner(file);
+  const legacy = legacyOwnerPath(paths);
+  if (fs.existsSync(legacy) && readOwner(legacy) !== owner) {
+    throw new Error(`Codex ownership conflict between ${file} and ${legacy}; preserve both files and repair their ownership before retrying install`);
+  }
+  return owner;
+}
+
+/**
+ * 写前收养：旧名声明存在而新名缺失时改名接管（同一份声明，零内容变化）；
+ * 两者并存且归属一致（或旧名归属属于可接受的历史归属——默认目录迁移的同源转交）
+ * 时清理旧名副本，其余冲突报错——避免卸载新名后旧名声明复活。
+ */
+function adoptOwnerFile(paths: ResolvedPaths, acceptableLegacyOwner?: string): void {
+  const file = ownerPath(paths);
+  const legacy = legacyOwnerPath(paths);
+  if (!fs.existsSync(legacy)) return;
+  if (!fs.existsSync(file)) {
+    fs.renameSync(legacy, file);
+    return;
+  }
+  const current = readOwner(file);
+  const previous = readOwner(legacy);
+  if (previous !== current && previous !== acceptableLegacyOwner) {
+    throw new Error(`Codex ownership conflict between ${file} and ${legacy}; preserve both files and repair their ownership before retrying install`);
+  }
+  fs.rmSync(legacy);
+}
+
 function readOwner(file: string): string | undefined {
   if (!fs.existsSync(file)) return undefined;
   try {
@@ -99,9 +138,7 @@ function readOwner(file: string): string | undefined {
 
 /** 当前客户端目录归属的实例主目录；无声明文件时返回 undefined，损坏内容按 readOwner 抛错。 */
 export function codexOwnerRuntimeHome(paths: ResolvedPaths): string | undefined {
-  const file = ownerPath(paths);
-  if (!fs.existsSync(file)) return undefined;
-  return readOwner(file);
+  return readOwnerAny(paths);
 }
 
 function assertOwner(paths: ResolvedPaths, owner: string | undefined): void {
@@ -122,8 +159,10 @@ function xmlValue(plist: string, key: string): string | undefined {
 
 /** 缺失 state 的旧默认安装仍可由标准服务定义恢复客户端目录。 */
 export function resolveLegacyServiceCodexPaths(paths: ResolvedPaths, env: NodeJS.ProcessEnv): ResolvedPaths {
-  if (!fs.existsSync(paths.launchAgent)) return resolveInstalledCodexPaths(paths, env);
-  const plist = fs.readFileSync(paths.launchAgent, "utf8");
+  // 更名前的 plist 尚未被 install 收养时仍按旧文件名识别，保持旧安装的解析行为不变。
+  const plistPath = fs.existsSync(paths.launchAgent) ? paths.launchAgent : legacyLaunchAgentPaths(paths).legacyGatewayPlist;
+  if (!fs.existsSync(plistPath)) return resolveInstalledCodexPaths(paths, env);
+  const plist = fs.readFileSync(plistPath, "utf8");
   const args = plist.match(/<key>\s*ProgramArguments\s*<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
   const configArg = args?.match(/<string>--config<\/string>\s*<string>([^<]*)<\/string>/)?.[1];
   if (!configArg || decodeXml(configArg) !== paths.gatewayConfig) return resolveInstalledCodexPaths(paths, env);
@@ -149,8 +188,9 @@ function assertLegacyOwners(paths: ResolvedPaths): void {
     && legacyDefaultState !== undefined && clientForState(nextDefaultState) === clientForState(legacyDefaultState)
     && clientForState(nextDefaultState) === realPathOrResolve(paths.codexHome);
   const migratedFrom = readState(paths.stateFile)?.defaultRuntimeMigratedFrom;
-  const owner = readOwner(ownerPath(paths));
-  const ownerMigration = owner ? (JSON.parse(fs.readFileSync(ownerPath(paths), "utf8")) as { defaultRuntimeMigratedFrom?: unknown }).defaultRuntimeMigratedFrom : undefined;
+  const owner = readOwnerAny(paths);
+  const ownerFile = fs.existsSync(ownerPath(paths)) ? ownerPath(paths) : legacyOwnerPath(paths);
+  const ownerMigration = owner ? (JSON.parse(fs.readFileSync(ownerFile, "utf8")) as { defaultRuntimeMigratedFrom?: unknown }).defaultRuntimeMigratedFrom : undefined;
   const migrated = defaultTransferred || ((migratedFrom === realPathOrResolve(defaultRuntime) || ownerMigration === realPathOrResolve(defaultRuntime))
     && owner === realPathOrResolve(paths.runtimeHome));
   // 新旧默认目录都可能缺少 owner，已有 state/备份仍保留客户端归属证明。
@@ -165,7 +205,7 @@ function assertLegacyOwners(paths: ResolvedPaths): void {
   const agentsDir = path.join(paths.home, "Library", "LaunchAgents");
   if (!fs.existsSync(agentsDir)) return;
   for (const entry of fs.readdirSync(agentsDir)) {
-    if (!/^codex-cliproxy-gateway(?:-[0-9a-f]{8})?\.plist$/.test(entry)) continue;
+    if (!/^(?:codex-cliproxy|agent-proxy)-gateway(?:-[0-9a-f]{8})?\.plist$/.test(entry)) continue;
     const plist = fs.readFileSync(path.join(agentsDir, entry), "utf8");
     const args = plist.match(/<key>\s*ProgramArguments\s*<\/key>\s*<array>([\s\S]*?)<\/array>/)?.[1];
     const configArg = args?.match(/<string>--config<\/string>\s*<string>([^<]*)<\/string>/)?.[1];
@@ -183,11 +223,13 @@ function assertLegacyOwners(paths: ResolvedPaths): void {
 
 /** 已有归属可证明缺失 state 的旧安装；查询只读，不补建声明。 */
 export function hasLegacyCodexOwnership(paths: ResolvedPaths, legacyRuntimeHome: string): boolean {
-  return readOwner(ownerPath(paths)) === realPathOrResolve(legacyRuntimeHome);
+  return readOwnerAny(paths) === realPathOrResolve(legacyRuntimeHome);
 }
 
 /** 默认目录迁移只允许从旧实例转交归属，返回原始内容供失败恢复。 */
 export function migrateCodexOwnership(paths: ResolvedPaths, legacyRuntimeHome: string): () => void {
+  // 新名已指向新目录、旧名仍指向旧默认目录是同源转交的合法中间态，收养时放行清理。
+  adoptOwnerFile(paths, realPathOrResolve(legacyRuntimeHome));
   const file = ownerPath(paths);
   const owner = readOwner(file);
   const current = realPathOrResolve(paths.runtimeHome);
@@ -217,13 +259,14 @@ export function assertCodexHomeAvailable(paths: ResolvedPaths, manual: boolean):
   if (paths.instanceSuffix && realPathOrResolve(paths.codexHome) === realPathOrResolve(path.join(paths.home, ".codex"))) {
     throw new Error("Custom gateway instances must use a distinct CODEX_HOME; the default ~/.codex directory cannot be managed. Use --manual-codex-config instead");
   }
-  assertOwner(paths, readOwner(ownerPath(paths)));
+  assertOwner(paths, readOwnerAny(paths));
   assertLegacyOwners(paths);
 }
 
 /** 安装阶段原子声明所有权；返回的回滚函数只撤销本次新建且未被替换的声明。 */
 export function claimCodexHome(paths: ResolvedPaths): () => void {
   assertCodexHomeAvailable(paths, false);
+  adoptOwnerFile(paths, realPathOrResolve(paths.runtimeHome));
   const file = ownerPath(paths);
   const existingOwner = readOwner(file);
   assertOwner(paths, existingOwner);
@@ -252,9 +295,10 @@ export function claimCodexHome(paths: ResolvedPaths): () => void {
   };
 }
 
-/** 卸载仅释放本实例的声明，不删除其他实例的文件。 */
+/** 卸载仅释放本实例的声明（含旧命名的同名声明），不删除其他实例的文件。 */
 export function releaseCodexHome(paths: ResolvedPaths): void {
-  const file = ownerPath(paths);
-  const owner = readOwner(file);
-  if (owner === realPathOrResolve(paths.runtimeHome)) fs.rmSync(file);
+  const current = realPathOrResolve(paths.runtimeHome);
+  for (const file of [ownerPath(paths), legacyOwnerPath(paths)]) {
+    if (readOwner(file) === current) fs.rmSync(file);
+  }
 }

@@ -793,7 +793,7 @@ test("official Realtime routes are reserved with 426 before generic forwarding",
     for (const request of requests) {
       const response = await handler(request);
       assert.equal(response.status, 426);
-      assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "official-realtime-not-implemented");
+      assert.equal(response.headers.get("x-agent-proxy"), "official-realtime-not-implemented");
       assert.equal((await response.json() as { error: { code: string } }).error.code, "official_realtime_proxy_not_implemented");
     }
     assert.equal(fetchCalls, 0);
@@ -2004,7 +2004,7 @@ test("config 按实例分派：实例未安装时不触碰默认服务", async (
   // 默认服务的 plist 存在（内容为假 plist）：旧实现会因它存在而重启默认服务。
   const defaultPlistDir = path.join(home, "Library", "LaunchAgents");
   fs.mkdirSync(defaultPlistDir, { recursive: true });
-  fs.writeFileSync(path.join(defaultPlistDir, "codex-cliproxy-gateway.plist"), "default-service-plist");
+  fs.writeFileSync(path.join(defaultPlistDir, "agent-proxy-gateway.plist"), "default-service-plist");
   const originalLog = console.log;
   const printed: string[] = [];
   console.log = (line?: unknown) => { printed.push(String(line)); };
@@ -2013,7 +2013,7 @@ test("config 按实例分派：实例未安装时不触碰默认服务", async (
     await runCli(["config", "--debug", "on"]);
     assert.match(printed.join("\n"), /LaunchAgent is not installed; configuration saved without restart/);
     assert.equal(JSON.parse(fs.readFileSync(path.join(instanceA, "config.json"), "utf8")).debug, true);
-    assert.equal(fs.readFileSync(path.join(defaultPlistDir, "codex-cliproxy-gateway.plist"), "utf8"),
+    assert.equal(fs.readFileSync(path.join(defaultPlistDir, "agent-proxy-gateway.plist"), "utf8"),
       "default-service-plist");
     // 默认实例的配置目录未被写入。
     assert.equal(fs.existsSync(path.join(home, ".agent-proxy-gateway", "config.json")), false);
@@ -2049,9 +2049,9 @@ test("config 按实例分派：实例已安装时重启自己的 plist，不动�
   fs.mkdirSync(plistDir, { recursive: true });
   // A 已安装：带后缀的 plist 存在（假内容，bootstrap 会失败——只要证明操作打的是
   // A 的 plist/label 而不是默认服务即可）；默认 plist 同样在场且内容必须原样保留。
-  const instancePlist = path.join(plistDir, `codex-cliproxy-gateway-${suffix}.plist`);
+  const instancePlist = path.join(plistDir, `agent-proxy-gateway-${suffix}.plist`);
   fs.writeFileSync(instancePlist, "instance-a-plist-not-loadable");
-  fs.writeFileSync(path.join(plistDir, "codex-cliproxy-gateway.plist"), "default-service-plist");
+  fs.writeFileSync(path.join(plistDir, "agent-proxy-gateway.plist"), "default-service-plist");
   const originalLog = console.log;
   const printed: string[] = [];
   console.log = (line?: unknown) => { printed.push(String(line)); };
@@ -2062,11 +2062,11 @@ test("config 按实例分派：实例已安装时重启自己的 plist，不动�
       runCli(["config", "--debug", "on"]),
       (error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        return message.includes(`codex-cliproxy-gateway-${suffix}.plist`)
-          || message.includes(`codex-cliproxy-gateway-${suffix}`);
+        return message.includes(`agent-proxy-gateway-${suffix}.plist`)
+          || message.includes(`agent-proxy-gateway-${suffix}`);
       },
     );
-    assert.equal(fs.readFileSync(path.join(plistDir, "codex-cliproxy-gateway.plist"), "utf8"),
+    assert.equal(fs.readFileSync(path.join(plistDir, "agent-proxy-gateway.plist"), "utf8"),
       "default-service-plist");
   } finally {
     console.log = originalLog;

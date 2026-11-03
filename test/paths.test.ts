@@ -56,7 +56,7 @@ test("runtimeHome override scopes instance state and the LaunchAgent to the conf
   const env = { HOME: "/home/tester" };
   const production = resolvePaths(env);
   assert.equal(production.runtimeHome, "/home/tester/.agent-proxy-gateway");
-  assert.equal(production.launchAgent, "/home/tester/Library/LaunchAgents/codex-cliproxy-gateway.plist");
+  assert.equal(production.launchAgent, "/home/tester/Library/LaunchAgents/agent-proxy-gateway.plist");
 
   // `serve --config <dir>/config.json` 的临时实例：管理面文件全部落在配置同目录；
   // LaunchAgent 使用 -temp 占位名——即使配置就放在 $HOME 下，也绝不与默认服务路径相同。
@@ -70,7 +70,7 @@ test("runtimeHome override scopes instance state and the LaunchAgent to the conf
   assert.equal(instance.logDir, path.join(root, "logs"));
   assert.equal(
     instance.launchAgent,
-    path.join(root, "Library/LaunchAgents/codex-cliproxy-gateway-temp.plist"),
+    path.join(root, "Library/LaunchAgents/agent-proxy-gateway-temp.plist"),
   );
   // 复现 review 场景：--config $HOME/config.json 时 home 几何派生曾恰好命中默认服务。
   const homeInstance = resolvePaths(env, "/home/tester");
@@ -90,8 +90,8 @@ test("CODEX_CLIPROXY_HOME 重定向运行主目录：plist 留在 ~/Library/Laun
   assert.equal(redirected.codexHome, "/home/tester/.codex");
   // plist 必须留在用户的 ~/Library/LaunchAgents（launchd 登录只扫描该目录），
   // 非默认实例用文件名后缀区分，label/Keychain 服务名共用同一后缀。
-  assert.ok(/^codex-cliproxy-gateway-[0-9a-f]{8}\.plist$/.test(path.basename(redirected.launchAgent)));
-  assert.ok(/^codex-cliproxy-webui-[0-9a-f]{8}\.plist$/.test(path.basename(redirected.webUiLaunchAgent)));
+  assert.ok(/^agent-proxy-gateway-[0-9a-f]{8}\.plist$/.test(path.basename(redirected.launchAgent)));
+  assert.ok(/^agent-proxy-webui-[0-9a-f]{8}\.plist$/.test(path.basename(redirected.webUiLaunchAgent)));
   assert.equal(path.dirname(redirected.launchAgent), "/home/tester/Library/LaunchAgents");
   assert.ok(redirected.instanceSuffix.startsWith("-"), redirected.instanceSuffix);
   assert.equal(instanceMarker("/data/ccp-home"), redirected.instanceSuffix.slice(1));
@@ -99,7 +99,7 @@ test("CODEX_CLIPROXY_HOME 重定向运行主目录：plist 留在 ~/Library/Laun
   // 默认实例零迁移：标准 plist 文件名、空后缀、历史 label。
   const production = resolvePaths({ HOME: "/home/tester" });
   assert.equal(production.instanceSuffix, "");
-  assert.equal(production.launchAgent, "/home/tester/Library/LaunchAgents/codex-cliproxy-gateway.plist");
+  assert.equal(production.launchAgent, "/home/tester/Library/LaunchAgents/agent-proxy-gateway.plist");
 
   // 显式指到默认目录仍是默认实例身份。
   assert.equal(resolvePaths({ HOME: "/home/tester", CODEX_CLIPROXY_HOME: "/home/tester/.codex-cliproxy-gateway" }).instanceSuffix, "");

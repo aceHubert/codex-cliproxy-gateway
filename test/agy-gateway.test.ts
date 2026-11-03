@@ -398,7 +398,7 @@ test("agy WebSocket 升级一律本地 426", TIMEOUT, async () => {
     // handler 层同样必须拒绝：agy 上游不是 Responses WebSocket 端点，绝不桥接。
     const response = await create()(upgrade);
     assert.equal(response.status, 426);
-    assert.equal(response.headers.get("x-codex-cliproxy-gateway"), "agy-http-only");
+    assert.equal(response.headers.get("x-agent-proxy"), "agy-http-only");
   });
 });
 
