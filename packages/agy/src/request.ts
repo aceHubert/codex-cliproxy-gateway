@@ -632,7 +632,18 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
         continue;
       }
       if (item.type === "function_call_output" || item.type === "custom_tool_call_output") {
-        const callId = string(item.call_id, `${item.type}.call_id`);
+        if (typeof item.call_id !== "string" || !item.call_id) {
+          // Codex Desktop 注入无 call_id 的 function_call_output（codex_app 跨线程
+          // delegation 通知），没有可配对的调用；Gemini 形状无法表达无调用的
+          // functionResponse，按原位 user 文本通知降级回放（与公共桥接转换同合同）。
+          const identity = [item.namespace, item.name]
+            .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+            .join(".");
+          const summary = toolResultParts(item.output ?? item.content, `${item.type}.output`);
+          userContent().parts.push({ text: `[客户端注入的 ${String(item.type)} 通知${identity ? ` ${identity}` : ""}（无 call_id，非工具调用结果）]\n${summary.text}` });
+          continue;
+        }
+        const callId = item.call_id;
         const call = callNames.get(callId);
         if (!call || (item.type === "function_call_output") === call.custom) {
           fail(`${item.type} 未关联到同一 input 中匹配的工具调用 ${callId}`);

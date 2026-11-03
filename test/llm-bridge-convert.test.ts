@@ -904,3 +904,42 @@ test("strippedTools：同协议直通为空数组（无剥离发生）", async (
   });
   assert.deepEqual(strippedTools, []);
 });
+
+/* ===================== Codex Desktop 注入通知（无 call_id）===================== */
+
+test("无 call_id 的 function_call_output（Codex delegation 注入通知）降级为原位 user 通知", async () => {
+  // Codex Desktop 0.166 实发（2026-11-03，thread 01a19c5f，经 codebuddy-cn 通道）：
+  // 跨线程消息以 function_call_output 形状注入——携带 name/namespace 与 output，
+  // 却没有 call_id，也不对应任何 function_call。严格校验曾让整个回合 400
+  // 「function_call_output.call_id 必须是非空字符串」。
+  const { body, notes } = await convertRequest("chat-completions", "responses", {
+    model: "m",
+    input: [
+      { type: "message", role: "user", content: "开始" },
+      { type: "message", role: "assistant", content: "收到" },
+      { type: "function_call_output", id: "fco_1", name: "send_message_to_thread", namespace: "codex_app", output: "<codex_delegation>hello</codex_delegation>" },
+      { type: "message", role: "user", content: "继续" },
+    ],
+    stream: true,
+  });
+  const messages = messagesOf(body);
+  const degraded = messages.find((message) => typeof message.content === "string" && message.content.includes("<codex_delegation>"));
+  assert.ok(degraded, "通知内容必须保留在消息历史中");
+  assert.equal(degraded.role, "user");
+  assert.match(String(degraded.content), /\[客户端注入的 function_call_output 通知 codex_app\.send_message_to_thread（无 call_id，非工具调用结果）\]/);
+  // 位置语义：降级通知之后仍是后续 user 消息，不再是回合终点。
+  assert.equal(messages[messages.length - 1]?.role, "user");
+  assert.equal(messages[messages.length - 1]?.content, "继续");
+  assert.ok(notes.some((note) => note.includes("降级为 user 通知")), "notes 记录降级");
+});
+
+test("有 call_id 却未配对调用的 function_call_output 仍显式拒绝", async () => {
+  // call_id 存在但配不上调用是真正的协议损坏，不能借降级通道静默吞掉。
+  await assert.rejects(
+    convertRequest("chat-completions", "responses", {
+      model: "m",
+      input: [{ type: "function_call_output", call_id: "orphan_1", output: "x" }],
+    }),
+    /未关联到同一 input 中匹配的工具调用/,
+  );
+});
