@@ -453,7 +453,28 @@ function responsesSourceToPrepared(body: Json, registry: ToolRegistry): Prepared
       continue;
     }
     if (type === "function_call_output" || type === "custom_tool_call_output") {
-      const callId = requiredString(item.call_id, `${type}.call_id`);
+      if (typeof item.call_id !== "string" || !item.call_id) {
+        // Codex Desktop 会注入无 call_id 的 function_call_output（实测 codex_app 跨
+        // 线程 delegation 通知：携带 name/namespace 与 output，却不对应任何调用）。
+        // 这是 harness→模型的通知而非工具结果，跨协议没有可配对的调用可回放：
+        // 保持位置降级为 user 通知并显式记录，内容照常回放。
+        const identity = [item.namespace, item.name]
+          .filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+          .join(".");
+        const label = `[客户端注入的 ${type} 通知${identity ? ` ${identity}` : ""}（无 call_id，非工具调用结果）]`;
+        const raw = item.output ?? item.content;
+        const entries = describeResponsesContent(typeof raw === "string" || Array.isArray(raw) ? raw : "", `${type}.output`);
+        const hasBinary = entries.some((entry) => entry.kind !== "text");
+        builder.pushUser(
+          hasBinary
+            ? [{ type: "text", text: label }, ...contentPartsFromImages(entries)]
+            : [{ type: "text", text: `${label}\n${entries.map((entry) => (entry.kind === "text" ? entry.text : "")).join("\n")}` }],
+          Array.isArray(raw),
+        );
+        registry.note(`已将无 call_id 的 ${type}${identity ? `（${identity}）` : ""}降级为 user 通知`);
+        continue;
+      }
+      const callId = item.call_id;
       if (!callsSeen.has(callId)) fail(`${type} 未关联到同一 input 中匹配的工具调用 ${callId}`);
       if (resultsSeen.has(callId)) fail(`history 中重复的工具输出 ID ${callId}`);
       resultsSeen.add(callId);

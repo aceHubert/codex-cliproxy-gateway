@@ -454,3 +454,21 @@ test("agy 请求转换：agn1 信封的 thought 签名挂回下一个函数调�
   assert.ok(!JSON.stringify(contents).includes("gAAAAA-official-blob"));
   assert.ok(!JSON.stringify(contents).includes("agn1:"));
 });
+
+test("agy 请求转换：无 call_id 的 function_call_output（Codex delegation 通知）降级为 user 文本通知", TIMEOUT, () => {
+  // Codex Desktop 0.166 实发：跨线程 delegation 通知是无 call_id 的
+  // function_call_output；Gemini 形状无法表达无调用的 functionResponse，
+  // 按原位 user 文本通知回放（与 llm-bridge 降级合同一致）。
+  const { wrapper } = translateAgyRequest({
+    input: [
+      { type: "message", role: "user", content: "开始" },
+      { type: "function_call_output", id: "fco_1", name: "send_message_to_thread", namespace: "codex_app", output: "<codex_delegation>hello</codex_delegation>" },
+    ],
+  }, "gemini-3.8-flash");
+  const contents = (wrapper.request as Json).contents;
+  const texts = contents.flatMap((content: Json) => (content.parts as Json[]).map((part: Json) => part.text).filter(Boolean));
+  const degraded = texts.find((text: string) => text.includes("<codex_delegation>"));
+  assert.ok(degraded, "通知内容必须保留");
+  assert.match(degraded, /\[客户端注入的 function_call_output 通知 codex_app\.send_message_to_thread（无 call_id，非工具调用结果）\]/);
+  assert.equal(contents[0].role, "user");
+});
