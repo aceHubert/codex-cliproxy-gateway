@@ -1,0 +1,31 @@
+test/zcode-catalog.test.ts
+  s_8440897d819c0e::t_703c2470961588 51,53,57,62-67,71
+  s_8440897d819c0e::t_14f556b325275a 68-70
+  s_8440897d819c0e::t_2158aec4f5a977 7
+packages/zcode/src/catalog.ts
+  s_8440897d819c0e::t_a86314feedebaf 87-92,95-100,102-110
+  s_8440897d819c0e::t_eb280684e2c2ab 3,5
+  s_8440897d819c0e::t_d1e652bf741766 101
+docs/histories/2026-11/20261102-2151-zcode-catalog-baseline-clone.md
+  s_8440897d819c0e::t_9449caff2ca5b1 45
+  s_8440897d819c0e::t_e403e41dd8c508 46,50-51
+  s_8440897d819c0e::t_43badc463d1783 1-23,28-30,33-44,47-49,52-55,59-62,65-68,70-76
+  s_8440897d819c0e::t_71f7657c78f4c9 24-27,31-32
+  s_8440897d819c0e::t_1f303e810afab1 56-58,63-64,69
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "00278f29902e9d68b75c13c54e406f87ff14059a",
+  "prompts": {},
+  "sessions": {
+    "s_8440897d819c0e": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_e8e5fd21-4a57-4e44-bd25-5da4bf81cc71",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
