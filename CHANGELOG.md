@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.20.4 (2026-11-03)
+
+#### :rocket: New Feature
+* `opencode-zen`, `plugin-api`
+  * [#34](https://github.com/aceHubert/codex-cliproxy-gateway/pull/34) refactor(naming): 服务标识统一更名 agent-proxy ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.20.3 (2026-11-03)
 
 #### :bug: Bug Fix
