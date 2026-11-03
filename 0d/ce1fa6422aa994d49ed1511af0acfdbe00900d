@@ -1,0 +1,66 @@
+apps/gateway/src/cli.ts
+  h_8158b585b672a3 18,79-81,880-886,957-963,1051,1053-1056,1189,1213,1278-1279,1688-1694
+apps/gateway/src/codex-ownership.ts
+  h_8158b585b672a3 4,7-9,89-125,141,162-165,191-193,208,226,231-232,262,269,298,300-303
+apps/gateway/src/gateway.ts
+  h_8158b585b672a3 688,698,970,1584
+apps/gateway/src/keychain.ts
+  h_8158b585b672a3 7-9,12-13,43-44,55,96,100-116
+apps/gateway/src/launchd.ts
+  h_8158b585b672a3 7-11,23-32,149-150,160-200,214-218,245,263-266,270,278,281,305-311,317-319,330-334,338-342,346-353,365-366,371,373-374
+apps/gateway/src/paths.ts
+  h_8158b585b672a3 123-124,127-139
+docs/histories/2026-11/20261103-2045-agent-proxy-service-naming-refactor.md
+  h_8158b585b672a3 1-65
+packages/opencode-zen/src/fingerprint.ts
+  h_8158b585b672a3 68
+packages/opencode-zen/src/session.ts
+  h_8158b585b672a3 78
+packages/plugin-api/src/registry.ts
+  h_8158b585b672a3 115
+test/agy-gateway.test.ts
+  h_8158b585b672a3 401
+test/codebuddy-gateway.test.ts
+  h_8158b585b672a3 772
+test/codex-ownership.test.ts
+  h_8158b585b672a3 44,57,73,85,91,180,189-191,194,200-244
+test/credentials-store.test.ts
+  h_8158b585b672a3 6,191,197,203,259-301
+test/default-install-migration.test.ts
+  h_8158b585b672a3 80-82,451,465-477,483,487,489-491,497,504,511-513,515,522-523
+test/default-install-webui-migration.test.ts
+  h_8158b585b672a3 41-45,50,57,98
+test/gateway-model-reload.test.ts
+  h_8158b585b672a3 130,218,306
+test/gateway.test.ts
+  h_8158b585b672a3 796,2007,2016,2052,2054,2065-2066,2069
+test/instance-regressions.test.ts
+  h_8158b585b672a3 170,187,204,230
+test/launchd-migration.test.ts
+  h_8158b585b672a3 1-113
+test/model-exclude-gateway.test.ts
+  h_8158b585b672a3 191,267,272,317-318
+test/opencode-zen-gateway.test.ts
+  h_8158b585b672a3 145,1169
+test/paths.test.ts
+  h_8158b585b672a3 59,73,93-94,102
+test/plugin-registry.test.ts
+  h_8158b585b672a3 188
+test/qoder-gateway.test.ts
+  h_8158b585b672a3 667
+test/realtime.test.ts
+  h_8158b585b672a3 115,1318,1429
+test/webui.test.ts
+  h_8158b585b672a3 71-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "0dce1fa6422aa994d49ed1511af0acfdbe00900d",
+  "prompts": {},
+  "humans": {
+    "h_8158b585b672a3": {
+      "author": "hubert <hubert@lejian.com>"
+    }
+  }
+}
