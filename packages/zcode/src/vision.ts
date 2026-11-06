@@ -135,6 +135,18 @@ export function analysisFromExecutorText(text: string): string {
   return unwrapped || text.trim();
 }
 
+/**
+ * 服务端 analyze_image 执行失败的识别：失败时 result_summary 的首个文本条目以
+ * `MCP error <code>` 开头（实测瞬时故障返回 `MCP error 400: … "图片输入格式/解析错误"`）。
+ * 只检查摘要片段开头的一小段，避免把「内容恰好描述 MCP 报错的截图」的识别成功误判为失败。
+ */
+export function serverToolResultFailed(text: string): boolean {
+  const marker = "analyze_image_result_summary";
+  const index = text.lastIndexOf(marker);
+  const segment = (index >= 0 ? text.slice(index + marker.length) : text).slice(0, 200).replace(/\\/g, "");
+  return /mcp error \d+/i.test(segment);
+}
+
 export interface ZcodeExecutorOptions {
   url: string;
   model: string;
@@ -152,6 +164,27 @@ export interface ZcodeExecutorOptions {
    * 边界时，先截断再脱敏会留下可还原的前缀片段。由调用方（zcode.ts）注入。
    */
   redact?: (text: string) => string;
+  /** 每次尝试结束（成功、服务端失败或异常）后的观测回调；用于进程日志留痕。 */
+  onAttempt?: (summary: ZcodeExecutorAttempt) => void;
+}
+
+/** 观测回调必须不致命：落日志失败不得影响识别执行本身。 */
+function reportAttempt(options: ZcodeExecutorOptions, summary: ZcodeExecutorAttempt): void {
+  try {
+    options.onAttempt?.(summary);
+  } catch {
+    // 依赖插件主机上下文的日志实现可能在流中段抛错；观察钩子静默降级。
+  }
+}
+
+/** 一次 analyze_image 执行尝试的结果摘要；detail 已由调用方脱敏。 */
+export interface ZcodeExecutorAttempt {
+  attempt: number;
+  maxAttempts: number;
+  /** false 表示服务端执行失败（MCP 错误结果）或本次尝试抛错。 */
+  ok: boolean;
+  durationMs: number;
+  detail: string;
 }
 
 async function attemptOnce(options: ZcodeExecutorOptions): Promise<string> {
@@ -217,10 +250,29 @@ export async function executeZcodeAnalyzeImage(options: ZcodeExecutorOptions): P
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (options.signal?.aborted) throw new ZcodeVisionError("analyze_image 执行已取消");
+    const startedAt = Date.now();
     try {
-      return await attemptOnce(options);
+      const result = await attemptOnce(options);
+      // 服务端把 MCP 错误当正常结果流回（信封本身 HTTP 200）：识别为失败并重试，
+      // 实测该类失败为上游瞬时故障，同图同链路稍后即可成功。
+      if (serverToolResultFailed(result)) {
+        const detail = options.redact ? options.redact(result.slice(0, 200)) : result.slice(0, 200);
+        reportAttempt(options, { attempt, maxAttempts, ok: false, durationMs: Date.now() - startedAt, detail });
+        lastError = new ZcodeVisionError(detail);
+        if (options.signal?.aborted) throw lastError;
+        continue;
+      }
+      reportAttempt(options, {
+        attempt, maxAttempts, ok: true, durationMs: Date.now() - startedAt,
+        detail: `识别成功（图片 ${options.image.identifier}，${Math.trunc(options.image.data.length * 3 / 4 / 1024)}KB）`,
+      });
+      return result;
     } catch (error) {
       lastError = error;
+      reportAttempt(options, {
+        attempt, maxAttempts, ok: false, durationMs: Date.now() - startedAt,
+        detail: options.redact ? options.redact(error instanceof Error ? error.message : String(error)).slice(0, 200) : String(error).slice(0, 200),
+      });
       if (options.signal?.aborted) throw error;
     }
   }

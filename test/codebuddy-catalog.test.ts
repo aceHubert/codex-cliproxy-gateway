@@ -274,7 +274,7 @@ test("buildCodebuddyCatalog 取 serves 交集；project 按产品前缀投影", 
   assert.deepEqual(projected.models.map((entry) => entry.slug), ["workbuddy-intl/a", "workbuddy-intl/c"]);
 });
 
-test("服务端档位模型（Auto/Fast/Balanced/Primary/Deep）被目录过滤", () => {
+test("服务端档位模型（Auto/Fast/Balanced/Primary/Deep/Max）在两个产品和地域均被过滤", () => {
   const data = parseCodebuddyConfigData(cliConfig(
     [
       fixtureModel("default-model", { name: "Auto" }),
@@ -283,12 +283,59 @@ test("服务端档位模型（Auto/Fast/Balanced/Primary/Deep）被目录过滤"
       fixtureModel("balanced-model", { name: "Balanced" }),
       fixtureModel("primary-model", { name: "Primary" }),
       fixtureModel("deep-model", { name: "Deep" }),
+      fixtureModel("max-model", { name: "Max" }),
+      fixtureModel("MAX-MODEL", { name: "Max" }),
+      fixtureModel("max-model-v2"),
       fixtureModel("gpt-5.6-luna"),
     ],
-    ["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model", "gpt-5.6-luna"],
+    ["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model", "max-model", "MAX-MODEL", "max-model-v2", "gpt-5.6-luna"],
   ), "cli");
-  const catalog = buildCodebuddyCatalog(data, "intl-cli");
-  assert.deepEqual(catalog.models.map((entry) => entry.slug), ["gpt-5.6-luna"]);
+  for (const profile of ["cn-cli", "intl-cli", "cn-work", "intl-work"] as const) {
+    const catalog = buildCodebuddyCatalog(data, profile);
+    assert.deepEqual(catalog.models.map((entry) => entry.slug), ["max-model-v2", "gpt-5.6-luna"]);
+  }
+});
+
+test("WorkBuddy 已有目录缓存的档位模型在离线读取和刷新失败回退时均被过滤", async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "wb-catalog-tiers-"));
+  const accounts = [credential("cn-work"), credential("intl-work")];
+  try {
+    const seed = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      credentials: async () => accounts,
+      fetch: async () => Response.json({ code: 0, data: cliConfig([fixtureModel("gpt-5.6-luna")], ["gpt-5.6-luna"]) }),
+    });
+    await seed.refresh();
+    const file = path.join(directory, "workbuddy-catalog.json");
+    const cached = JSON.parse(fs.readFileSync(file, "utf8"));
+    for (const account of accounts) {
+      const entry = cached.profiles[account.profile];
+      // 模拟指纹有效、仍包含旧版档位项的缓存；读取不得依赖一次成功的网络刷新。
+      for (const id of ["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model", "max-model", "MAX-MODEL"]) {
+        entry.models.push(synthesizeCodebuddyEntry(fixtureModel(id), entry.models.length, account.profile));
+      }
+      entry.content_hash = createHash("sha256").update(JSON.stringify(entry.models)).digest("hex");
+    }
+    const contents = JSON.stringify(cached);
+    fs.writeFileSync(file, contents);
+    let fetched = 0;
+    const store = createCodebuddyCatalogStore({
+      cacheDirectory: directory,
+      catalogMode: "manual",
+      credentials: async () => accounts,
+      fetch: async () => { fetched++; throw new Error("测试上游不可用"); },
+    });
+    const expected = ["workbuddy-cn/gpt-5.6-luna", "workbuddy-intl/gpt-5.6-luna"];
+    assert.deepEqual((await store.reload()).models.map((model) => model.slug), expected);
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), expected);
+    assert.equal(fetched, 0, "离线目录不触发网络");
+    await store.refresh();
+    assert.equal(fetched, 2, "两地域刷新均失败后复用已过滤的 last-good");
+    assert.deepEqual((await store.catalog()).models.map((model) => model.slug), expected);
+    assert.equal(fs.readFileSync(file, "utf8"), contents, "过滤仅应用于读取结果，不改写原缓存指纹");
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("mergeCodebuddyCatalog 剥离上游同名前缀并按优先级追加", () => {

@@ -22,4 +22,8 @@ bun add @agent-proxy/codebuddy
 锁定账号时只展示该账号当前地域。每个产品的缓存文件内部按 profile 独立保存目录，
 单侧拉取失败会回退该侧缓存，不影响另一侧；客户端模型推送同样保留两个地域的模型 ID。
 
+CodeBuddy 和 WorkBuddy 目录默认过滤服务端自动选模档位：`default-model`、`auto`、
+`fast-model`、`balanced-model`、`primary-model`、`deep-model`、`max-model`。
+按完整 ID 匹配且不区分大小写，已有目录缓存和刷新失败回退同样应用此规则。
+
 [项目源码与文档](https://github.com/aceHubert/codex-cliproxy-gateway)

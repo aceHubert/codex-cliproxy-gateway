@@ -1,4 +1,4 @@
-import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
+import { bindHostMethods, getHostServices, withHostServices } from "@agent-proxy/plugin-api";
 import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
 import os from "node:os";
 import path from "node:path";
@@ -338,6 +338,11 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       const incoming = new URL(request.url);
       const group = logGroupFromPath(incoming.pathname);
       const zcode = isZcodeModel(input.model);
+      // 响应体由 HTTP 层在本插件的 withHostServices 之外泵送，流中段（onComplete、
+      // 视觉续跑腿）再调 getHostServices 会抛「插件主机上下文未初始化」——这也是
+      // 插件交换日志长期缺失的根因。捕获本次请求的主机上下文供流内回调显式重入。
+      const host = getHostServices();
+      const inHostContext = <T>(action: () => T): T => withHostServices(host, action);
       // 渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权与日志分流；模型 ID 不携带渠道。
       let family: ZcodeFamily | undefined;
       let key = "";
@@ -376,23 +381,26 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         logged = true;
         const durationMs = Date.now() - start;
         const at = incoming.pathname + incoming.search;
-        logExchange(sink, group, {
-          requestTime, method: request.method, url: at,
-          reqHeaders: request.headers, reqBody: redactValue(input),
-          status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
-        }, "zcode");
-        // 与网关主链一样，进程日志里每条请求恰好一行：逻辑错误也算错误，走错误摘要。
-        if (status >= 400 || logicalError) {
-          logGatewayError(sink?.processLog, {
+        // onComplete 等流内调用点已在主机上下文之外，落盘前显式重入。
+        inHostContext(() => {
+          logExchange(sink, group, {
             requestTime, method: request.method, url: at,
-            status: logicalError && status < 400 ? 502 : status,
-            message: redact(logicalError ?? body), upstreamUrl, durationMs,
-          });
-        } else {
-          logRequestSummary(sink?.processLog, {
-            requestTime, method: request.method, url: at, status, upstreamUrl, durationMs,
-          });
-        }
+            reqHeaders: request.headers, reqBody: redactValue(input),
+            status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
+          }, "zcode");
+          // 与网关主链一样，进程日志里每条请求恰好一行：逻辑错误也算错误，走错误摘要。
+          if (status >= 400 || logicalError) {
+            logGatewayError(sink?.processLog, {
+              requestTime, method: request.method, url: at,
+              status: logicalError && status < 400 ? 502 : status,
+              message: redact(logicalError ?? body), upstreamUrl, durationMs,
+            });
+          } else {
+            logRequestSummary(sink?.processLog, {
+              requestTime, method: request.method, url: at, status, upstreamUrl, durationMs,
+            });
+          }
+        });
       };
       const fail = (status: number, message: string, type?: string) => {
         const response = zcodeError(status, redact(message), type);
@@ -480,6 +488,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         // 图片识别适配：请求含图片时把被吸收的 analyze_image 调用落到网关执行并续跑上游。
         let gatewayTools: ZcodeGatewayToolsHook | undefined;
         let continuationLegs = 0;
+        const visionAttemptNotes: string[] = [];
         if (translated.vision) {
           gatewayTools = {
             maxContinuations: 3,
@@ -505,6 +514,23 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
                   signal: abort.signal,
                   // 错误正文脱敏必须在截断之前发生（见 ZcodeExecutorOptions.redact）。
                   redact,
+                  // 执行腿不经过网关交换日志：每次尝试的结局写进程日志，并在收尾时
+                  // 汇入交换日志尾部，服务端瞬时故障（如 MCP 1210）才能事后取证。
+                  onAttempt: (summary) => {
+                    visionAttemptNotes.push(`attempt ${summary.attempt}/${summary.maxAttempts} ${summary.ok ? "ok" : "failed"}: ${summary.detail}`);
+                    const entry = {
+                      requestTime, method: "POST",
+                      url: `${incoming.pathname}${incoming.search} [analyze_image ${summary.attempt}/${summary.maxAttempts}]`,
+                      durationMs: summary.durationMs, upstreamUrl: routedUrl,
+                    };
+                    inHostContext(() => {
+                      if (summary.ok) {
+                        logRequestSummary(sink?.processLog, { ...entry, status: 200 });
+                      } else {
+                        logGatewayError(sink?.processLog, { ...entry, status: 502, message: `[analyze_image] ${summary.detail}` });
+                      }
+                    });
+                  },
                 });
               } catch (error) {
                 if (abort.signal.aborted) throw error;
@@ -596,8 +622,9 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
             // 剥离的内置工具与图片识别续跑腿数写进交换日志，避免“静默降级”无从排查。
             const stripped = translated.dropped.length ? `\n--- stripped built-in tools: ${translated.dropped.join(", ")} ---` : "";
             const visionLegs = continuationLegs > 0 ? `\n--- analyze_image continuation legs: ${continuationLegs} ---` : "";
+            const visionAttempts = visionAttemptNotes.length ? `\n--- analyze_image attempts ---\n${visionAttemptNotes.join("\n")}` : "";
             if (!mapResult) log(stream ? 200 : payload.status === "failed" ? 502 : 200,
-              stream ? `${chunks}${stripped}${visionLegs}\n--- response.${payload.status} ---\n${JSON.stringify(redactValue(payload))}` : `${JSON.stringify(redactValue(payload))}${stripped}${visionLegs}`,
+              stream ? `${chunks}${stripped}${visionLegs}${visionAttempts}\n--- response.${payload.status} ---\n${JSON.stringify(redactValue(payload))}` : `${JSON.stringify(redactValue(payload))}${stripped}${visionLegs}${visionAttempts}`,
               new Headers({ "content-type": stream ? "text/event-stream" : "application/json" }),
               payload.status === "failed" ? JSON.stringify(payload.error ?? "响应失败") : undefined);
           },

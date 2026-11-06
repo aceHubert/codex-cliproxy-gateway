@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import bytes from "bytes";
 import {
@@ -27,7 +27,7 @@ import {
   hasRootTomlKey,
 } from "./toml.ts";
 import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
-import { fetchUpstreamCatalog, filterExcludedModels, invalidateModelsCache } from "./catalog.ts";
+import { fetchUpstreamCatalog, filterExcludedModels, compileModelFilter, invalidateModelsCache } from "./catalog.ts";
 import { resolveCodexClientVersion } from "./codex-version.ts";
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
 import {
@@ -209,8 +209,8 @@ Models:
                         saves)
   --model-merge-json URL  update the cached models.json override
   --push [TARGETS]     push the local agent plugin models into client tools;
-                        a checkbox picker confirms the list first (every model
-                        preselected — uncheck what you do not want and press
+                        a checkbox picker confirms the list first (unchecks saved
+                        in latestPushExcludedModels; new models selected — press
                         Enter; requires a terminal) and the managed
                         provider's model list is then fully replaced by ID
                         (manual additions inside the managed provider are
@@ -622,12 +622,12 @@ function warnGatewayConfig(file: string, value: unknown): void {
   }
 }
 
-function loadGatewayConfig(file: string): GatewayConfig {
+function loadGatewayConfig(file: string, applyDefaults = true): GatewayConfig {
   const value = loadJson<unknown>(file);
   if (!isJsonObject(value)) throw new Error(`Gateway config must be a JSON object: ${file}`);
   // 历史字段更名（见 LEGACY_FIELD_MIGRATIONS）在此补齐为新键；文件级迁移见 syncGatewayConfigFile。
   migrateLegacyConfig(value);
-  return effectiveAgentConfig(value) as unknown as GatewayConfig;
+  return (applyDefaults ? effectiveAgentConfig(value) : value) as unknown as GatewayConfig;
 }
 
 function writeGatewayConfig(file: string, value: GatewayConfig): void {
@@ -728,6 +728,7 @@ const AUDITED_FIELDS = [
   "upstreamType",
   "modelMergeJson",
   "selectedModels",
+  "latestPushExcludedModels",
   "excludedModels",
 ] as const;
 
@@ -1515,8 +1516,10 @@ export interface PushModelsDependencies {
  * 网关运行时刷新与 models --sync 负责。zcode 插件模型的剔除由 zcode 目标自己做
  * （ZCode 直连自家上游），管道不做目标特判。
  *
- * 推送前经交互勾选确认（用户裁决：不提供 --select 跳过）：全部预勾选，直接回车
- * 即全量推送；无终端时报可执行错误。目标名校验先于勾选，拼写错误不必进入选择器。
+ * 推送前经交互勾选确认（不提供 --select 跳过）：从全部本地插件模型中选择，仅用
+ * latestPushExcludedModels 恢复未选项；字段缺失时首次以 excludedModels 为默认值，
+ * 确认后独立保存（包括空数组），后续互不影响。新模型默认选中。
+ * 目标名校验先于勾选，拼写错误不必进入选择器。
  */
 export async function runModelsPush(
   targetOption: string | undefined,
@@ -1533,13 +1536,10 @@ export async function runModelsPush(
       if (!known.includes(id)) throw new Error(`unknown --push target "${id}"; available targets: ${known.join(", ")}`);
     }
   }
+  const paths = resolvePaths();
+  const configStat = fs.statSync(paths.gatewayConfig, { bigint: true });
   const { entries, failures } = await collectAdapterModels(config, {}, { refresh: false });
-  const scoped = filterExcludedModels(
-    { models: [...entries] },
-    config.excludedModels,
-    isInstalledPluginModel,
-  ).models;
-  if (scoped.length === 0) {
+  if (entries.length === 0) {
     throw new Error(
       "model push aborted; no local adapter models to push"
       + " (enable an adapter via config --zcode on / --codebuddy on / … and refresh its catalog first)",
@@ -1550,21 +1550,54 @@ export async function runModelsPush(
   if (!input.isTTY || !output.isTTY) {
     throw new Error(
       "models --push requires an interactive terminal to confirm the model list"
-      + " (every model is preselected and Enter pushes them all)",
+      + " (push exclusions are restored; new models are selected; press Enter to push)",
     );
   }
+  const savedExclusions: unknown = config.latestPushExcludedModels;
+  const validExclusions = Array.isArray(savedExclusions)
+    && savedExclusions.every((slug): slug is string => typeof slug === "string" && slug.trim().length > 0);
+  if (savedExclusions !== undefined && !validExclusions) {
+    console.warn("WARNING: Invalid latestPushExcludedModels in config.json; all available models are preselected.");
+  }
+  const pushExcludedSet = new Set<string>(validExclusions ? savedExclusions : []);
+  if (savedExclusions === undefined) {
+    const defaults = compileModelFilter(config.excludedModels);
+    for (const model of entries) {
+      if (defaults.isExcluded(model.slug)) pushExcludedSet.add(model.slug);
+    }
+  }
   const selectedSlugs = await chooseModels({
-    availableModels: scoped,
-    currentSelection: scoped.map((model) => model.slug),
+    availableModels: entries,
+    currentSelection: entries.filter((model) => !pushExcludedSet.has(model.slug)).map((model) => model.slug),
     requireNonEmpty: true,
     input,
     output,
     title: "Local plugin models - space toggles, Enter pushes",
   });
   const selectedSet = new Set(selectedSlugs);
+  const availableSet = new Set(entries.map((model) => model.slug));
+  // 暂时不可用的模型不参与本次编辑，保留原推送排除偏好。
+  const latestPushExcludedModels = [
+    ...[...pushExcludedSet].filter((slug) => !availableSet.has(slug)),
+    ...entries.filter((model) => !selectedSet.has(model.slug)).map((model) => model.slug),
+  ];
+  // 不重读配置；通过文件元数据拦截交互期间的修改，再备份并原子保存。
+  const latestStat = fs.statSync(paths.gatewayConfig, { bigint: true });
+  if (latestStat.ino !== configStat.ino || latestStat.size !== configStat.size
+    || latestStat.mtimeNs !== configStat.mtimeNs || latestStat.ctimeNs !== configStat.ctimeNs) {
+    throw new Error("Gateway config changed during model selection; rerun models --push to avoid overwriting changes");
+  }
+  if (savedExclusions === undefined || !validExclusions
+    || JSON.stringify(config.latestPushExcludedModels ?? []) !== JSON.stringify(latestPushExcludedModels)) {
+    const before = { ...config } as unknown as Record<string, unknown>;
+    fs.copyFileSync(paths.gatewayConfig, `${paths.gatewayConfig}.bak-agent-proxy-${Date.now()}-${randomUUID()}`);
+    writeGatewayConfig(paths.gatewayConfig, { ...config, latestPushExcludedModels });
+    config.latestPushExcludedModels = latestPushExcludedModels;
+    recordConfigAudit("models --push", config, before, paths);
+  }
   await pushModelsToTargets({
     targetOption,
-    entries: scoped.filter((model) => selectedSet.has(model.slug)),
+    entries: entries.filter((model) => selectedSet.has(model.slug)),
     failures,
     config,
     targets,
@@ -1578,7 +1611,8 @@ async function models(options: CliOptions): Promise<void> {
   const modelMergeJson = stringOption(options, "model-merge-json");
   const paths = resolvePaths();
   if (!fs.existsSync(paths.gatewayConfig)) throw new Error("Gateway is not installed");
-  const config = loadGatewayConfig(paths.gatewayConfig);
+  // 模型目录通过插件注册层应用缺省开关；保留原始字段，保存勾选时不写回隐式默认值。
+  const config = loadGatewayConfig(paths.gatewayConfig, false);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
   const upstreamOnly = config.upstreamOnly === true;
   if (modelMergeJson) config.modelMergeJson = modelMergeJson;

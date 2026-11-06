@@ -563,10 +563,11 @@ function fakeTty(): { input: unknown; output: unknown } {
   return { input, output };
 }
 
-test("interactive models --exclude lists only local adapter models with legacy rules preserved", async () => {
+test("interactive models --exclude ignores latest push exclusions and preserves them unchanged", async () => {
   const fixture = makeCliFixture(["agy/gemini-3.8-flash", "qoder-cn/"]);
   try {
-    const config = { ...fixture.config, agy: true };
+    const latestPushExcludedModels = ["agy/gemini-3.5-flash"];
+    const config = { ...fixture.config, agy: true, latestPushExcludedModels };
     const agyDeps: ExcludeModelsDependencies["agy"] = {
       cacheDirectory: path.join(fixture.home, "agy-cache"),
       refreshCatalogOnStart: false,
@@ -595,8 +596,8 @@ test("interactive models --exclude lists only local adapter models with legacy r
     });
     // excludeModels 先收集目录再挂按键监听：等它挂好再发按键。
     await new Promise((resolve) => setTimeout(resolve, 20));
-    // 勾选列表只含本地适配器模型（上游 cliproxy/* 不出现），已排序：
-    // agy/gemini-3.5-flash、agy/gemini-3.8-flash（后者来自存量精确规则，预勾选）。
+    // push 排除项不影响此列表：两个本地模型都存在；原 excludedModels 精确项预勾选。
+    // 这次再勾选 gemini-3.5-flash、取消 gemini-3.8-flash。
     (input as EventEmitter).emit("keypress", " ", { name: "space" }); // 勾选排除 gemini-3.5-flash
     (input as EventEmitter).emit("keypress", "", { name: "down" });
     (input as EventEmitter).emit("keypress", " ", { name: "space" }); // 取消勾选 gemini-3.8-flash
@@ -605,6 +606,7 @@ test("interactive models --exclude lists only local adapter models with legacy r
     const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
     // 精确规则由勾选结果替换；qoder-cn/ 无法用勾选表达，原样保留。
     assert.deepEqual(saved.excludedModels, ["qoder-cn/", "agy/gemini-3.5-flash"]);
+    assert.deepEqual(saved.latestPushExcludedModels, latestPushExcludedModels);
   } finally {
     fixture.cleanup();
   }

@@ -1,7 +1,5 @@
 import fs from "node:fs";
 import type { GatewayConfig, ModelEntry } from "./types.ts";
-import { filterExcludedModels } from "./catalog.ts";
-import { isInstalledPluginModel } from "./gateway-composition.ts";
 import { atomicWrite } from "./toml.ts";
 
 /** 推送备份文件的时间戳（YYYYMMDDhhmmss，与 install 的 config.toml 备份同格式）。 */
@@ -109,8 +107,8 @@ export interface ModelPushOptions {
 }
 
 /**
- * `models --push` 的统一落地：应用 excludedModels（作用域限本地插件模型）后把
- * 清单逐目标写入。推送镜像的是"网关当前实际可用"：某插件目录不可用（如本机登录
+ * `models --push` 的统一落地：仅应用 latestPushExcludedModels 后把
+ * 清单逐目标写入，与 excludedModels 独立。某插件目录不可用（如本机登录
  * 缺失）时其模型本就调不通，降级为警告后继续（与 models 无参视图口径一致）；
  * 清单为空仍中止。单目标失败不影响其余目标，全部执行完后若有失败再以非零退出汇总。
  */
@@ -118,11 +116,8 @@ export async function pushModelsToTargets(options: ModelPushOptions): Promise<vo
   for (const failure of options.failures) {
     console.log(`WARNING: ${failure}; its models are not included in this push.`);
   }
-  const scoped = filterExcludedModels(
-    { models: [...options.entries] },
-    options.config.excludedModels,
-    isInstalledPluginModel,
-  ).models;
+  const excluded = new Set(options.config.latestPushExcludedModels ?? []);
+  const scoped = options.entries.filter((model) => !excluded.has(model.slug));
   if (scoped.length === 0) {
     throw new Error(
       "model push aborted; no local adapter models to push"

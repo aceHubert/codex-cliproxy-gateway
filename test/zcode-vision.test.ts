@@ -9,6 +9,7 @@ import {
   gatewayToolResultNarration,
   imageIdentifier,
   matchZcodeAnalyzeImage,
+  serverToolResultFailed,
   ZcodeVisionError,
   type ZcodeRequestImage,
 } from "@agent-proxy/zcode/vision";
@@ -115,6 +116,67 @@ test("executeZcodeAnalyzeImage 上游非 2xx 时按尝试次数失败", async ()
     ZcodeVisionError,
   );
   assert.equal(attempts, 2);
+});
+
+const MCP_FAILURE_TEXT = "[{\"text\": \"MCP error 400: 400 Bad Request: \\\"{\\\"error\\\""
+  + ":{\\\"code\\\":\\\"1210\\\",\\\"message\\\":\\\"图片输入格式/解析错误\\\"}}\\\"\", \"type\": \"text\"}]";
+
+function executorFrames(resultText: string): Array<Record<string, unknown>> {
+  return [
+    { type: "message_start" },
+    { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    { type: "content_block_start", index: 1, content_block: { type: "server_tool_use", id: "call_1", name: ANALYZE_IMAGE_TOOL_NAME, input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `公告 Output: analyze_image_result_summary: ${resultText}` } },
+    { type: "content_block_stop", index: 1 },
+    { type: "content_block_stop", index: 0 },
+    { type: "message_delta", delta: { stop_reason: "end_turn" } },
+    { type: "message_stop" },
+  ];
+}
+
+test("serverToolResultFailed 识别服务端 MCP 错误结果，不误伤普通识别内容", () => {
+  assert.ok(serverToolResultFailed(MCP_FAILURE_TEXT));
+  assert.ok(serverToolResultFailed(`普通说明 analyze_image_result_summary: ${MCP_FAILURE_TEXT}`));
+  const lateMention = `${"识别成功：这是一张终端管理软件的截图，包含侧边栏与主区域。".repeat(8)}后文才提到 MCP error 400 报错文案`;
+  assert.ok(lateMention.indexOf("MCP error") > 200, "测试文本的 MCP 字样必须落在检测窗口之外");
+  assert.equal(serverToolResultFailed(lateMention), false);
+  assert.equal(serverToolResultFailed("识别结果：表格内容"), false);
+});
+
+test("executeZcodeAnalyzeImage 服务端 MCP 错误结果触发重试并在成功后返回", async () => {
+  const image = imageOf(Buffer.from("a").toString("base64"));
+  const headers = () => new Headers();
+  const attempts: unknown[] = [];
+  let calls = 0;
+  const summaries: string[] = [];
+  const result = await executeZcodeAnalyzeImage({
+    url: "https://zcode.example/messages", model: "GLM-5.3", image, prompt: "识别", headers,
+    fetchImpl: (_url, init) => {
+      calls++;
+      attempts.push(JSON.parse(String(init.body)));
+      return Promise.resolve(sse(executorFrames(calls === 1 ? MCP_FAILURE_TEXT : "识别成功的内容")));
+    },
+    maxAttempts: 3,
+    onAttempt: (summary) => { summaries.push(`${summary.attempt}:${summary.ok ? "ok" : "failed"}`); },
+  });
+  assert.equal(result, "识别成功的内容");
+  assert.equal(calls, 2, "首次服务端失败后应重试");
+  assert.deepEqual(summaries, ["1:failed", "2:ok"]);
+});
+
+test("executeZcodeAnalyzeImage 全部尝试均为 MCP 错误结果时以服务端失败告终", async () => {
+  const image = imageOf(Buffer.from("a").toString("base64"));
+  const headers = () => new Headers();
+  let calls = 0;
+  await assert.rejects(
+    executeZcodeAnalyzeImage({
+      url: "https://zcode.example/messages", model: "GLM-5.3", image, prompt: "识别", headers,
+      fetchImpl: () => { calls++; return Promise.resolve(sse(executorFrames(MCP_FAILURE_TEXT))); },
+      maxAttempts: 2,
+    }),
+    (error: unknown) => error instanceof ZcodeVisionError && /MCP error 400/.test(error.message) && /2 次尝试/.test(error.message),
+  );
+  assert.equal(calls, 2);
 });
 
 test("gatewayToolCallNarration 复刻 z.ai 内置工具的 Input 旁白形状", () => {

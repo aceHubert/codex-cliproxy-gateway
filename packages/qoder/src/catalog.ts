@@ -12,13 +12,12 @@ export const QODER_INTL_PREFIX = "qoder-intl/";
 export const QODER_CN_PREFIX = "qoder-cn/";
 export const QODER_CATALOG_TTL_MS = 100_000;
 const FAILURE_COOLDOWN_MS = 30_000;
-// 4：聚合档位不再进入目录，含旧档位的缓存随修订号失效重建。
-const CACHE_REVISION = 4;
-/** Qoder 聚合档位（Auto/Ultimate/Performance/Efficient/Sonus/Cantus）：服务端按档位动态
- * 选型并按倍率计费，不是可固定调用的具体模型。目录字段上与具体模型无可靠区分
- * （strategies/is_sensitive 也出现在 Kimi/GLM 等具体模型上，inline 分组两地区语义
- * 不一致），因此以 key 名单判定；服务端新增档位时在此补一行。 */
-const QODER_TIER_MODEL_KEYS = new Set(["auto", "ultimate", "performance", "efficient", "smodel", "cmodel"]);
+// 5：极致/快速/经济/Sonus/Cantus 档位进入目录，含旧名单的缓存随修订号失效重建。
+const CACHE_REVISION = 5;
+/** Qoder 聚合档位（Auto）：服务端按档位动态选型并按倍率计费，不是可固定调用的具体
+ * 模型。其余档位的可选性由服务端目录 enable 开关控制，仅 Auto 仍以 key 名单排除；
+ * 服务端新增需排除的档位时在此补一行。 */
+const QODER_TIER_MODEL_KEYS = new Set(["auto"]);
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /** 国内版前缀也属于本地模型族，未实现的地域必须在网关内明确拒绝。 */

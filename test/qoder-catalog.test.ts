@@ -67,15 +67,19 @@ test("Qoder 手动目录只读当前账号缓存，显式刷新及磁盘重载�
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("Qoder 目录只展示当前账号启用的具体模型，并使用国际版路由", () => {
+test("Qoder 目录只展示当前账号启用的模型，计费档位放行仅排除 Auto，并使用国际版路由", () => {
   const parsed = parseQoderCatalogData({ chat: [
     model(), model("off", { enable: false }), model("missing-enable", { enable: undefined }),
     model("disabled", { disabled: true }),
-    model("auto"), model("ultimate"), model("performance"), model("efficient"),
-    model("smodel"), model("cmodel"),
+    model("auto"),
+    model("ultimate", { display_name: "极致" }), model("fast", { display_name: "快速" }),
+    model("efficient", { display_name: "经济" }), model("smodel", { display_name: "Sonus" }),
+    model("cmodel", { display_name: "Cantus" }),
   ], byok_teams: [model("team-only")] });
   const catalog = buildQoderCatalog(parsed);
-  assert.deepEqual(catalog.models.map((entry) => entry.slug), ["qoder-intl/qfmodel"]);
+  assert.deepEqual(catalog.models.map((entry) => entry.slug),
+    ["qoder-intl/qfmodel", "qoder-intl/ultimate", "qoder-intl/fast", "qoder-intl/efficient",
+      "qoder-intl/smodel", "qoder-intl/cmodel"]);
   const entry = catalog.models[0]!;
   assert.equal(entry.display_name, "Qoder-INTL/Qwen3.8-Flash");
   assert.equal(entry.prefer_websockets, false);

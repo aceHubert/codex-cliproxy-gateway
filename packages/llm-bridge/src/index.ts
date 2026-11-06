@@ -40,6 +40,7 @@ export {
   createClientResponse,
   createGeminiClientOutput,
   createResponsesClientOutput,
+  remapUndeclaredToolName,
 } from "./output.ts";
 export type {
   ClientOutputOptions,

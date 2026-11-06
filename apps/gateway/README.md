@@ -175,7 +175,7 @@ agent-proxy models --exclude none
 
 ### 推送模型到客户端工具（--push）
 
-把网关本地 agent 插件的模型清单（应用排除规则）写入本机客户端工具的受管供应商；
+把本地 agent 插件的模型清单写入本机客户端工具的受管供应商；
 上游 cliproxy/newapi 与官方模型**不推送**（授权原因），zcode 插件自身的模型也不会
 推送给 zcode（它本就直连自家上游）：
 

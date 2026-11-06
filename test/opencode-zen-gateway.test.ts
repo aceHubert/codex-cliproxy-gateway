@@ -986,7 +986,7 @@ for (const stream of [true, false]) {
     ]));
   });
 
-  test(`Responses 入口：不在客户端或门禁合并中的名称仍然失败（stream=${stream}）`, TIMEOUT, async () => {
+  test(`Responses 入口：不在客户端或门禁合并中的名称被忽略并以提示收尾（stream=${stream}）`, TIMEOUT, async () => {
     await fixture(async ({ create }) => {
       const response = await create()(new Request("http://127.0.0.1:8327/v1/responses", {
         method: "POST", headers: { "content-type": "application/json" },
@@ -994,18 +994,22 @@ for (const stream of [true, false]) {
           tools: [{ type: "custom", name: "apply_patch", format: { type: "text" } }],
         }),
       }));
+      assert.equal(response.status, 200);
+      let result: Json;
       if (stream) {
-        assert.equal(response.status, 200);
         const events = (await response.text()).split("\n")
           .filter((line) => line.startsWith("data:") && line.slice(5).trim() !== "[DONE]")
           .map((line) => JSON.parse(line.slice(5)) as Json);
-        assert.ok(events.some((event) => event.type === "response.failed"));
-        assert.equal(events.some((event) => event.type === "response.completed"), false);
+        assert.ok(!events.some((event) => event.type === "response.failed"), "未声明调用不得让整条响应失败");
+        const completed = events.findLast((event) => event.type === "response.completed");
+        assert.ok(completed, "流应以 response.completed 正常收尾");
+        result = completed.response;
       } else {
-        assert.equal(response.status, 502);
-        const result = await response.json() as Json;
-        assert.equal(result.status, "failed");
+        result = await response.json() as Json;
+        assert.equal(result.status, "completed");
       }
+      assert.ok(!result.output.some((item: Json) => item.type === "function_call"), "被忽略的调用不得产出工具条目");
+      assert.match(JSON.stringify(result.output), /未声明的工具 not_an_injected_tool/);
     }, () => sse([
       chunkFrame({ tool_calls: [{ index: 0, id: "call_unknown", type: "function", function: { name: "not_an_injected_tool", arguments: "{}" } }] }),
       chunkFrame({}, "tool_calls"),

@@ -35,6 +35,8 @@ export interface GatewayConfig extends AgentConfig {
   upstreamOnly?: boolean;
   modelMergeJson?: string;
   selectedModels?: string[];
+  /** 上次确认的推送排除 ID；缺失时首次使用 excludedModels，确认后独立保存，[] 表示不排除。 */
+  latestPushExcludedModels?: string[];
   /**
    * 排除模型规则（默认 []）：网关在所有适配器与上游目录合并后统一过滤，命中
    * （精确 ID、以 / 结尾的前缀族、含 * 的轻量 glob，大小写不敏感，如
