@@ -1,0 +1,27 @@
+docs/histories/2026-11/20261106-1123-qoder-open-ultimate-performance-efficient-tiers.md
+  s_40326aa44c0ae8::t_b9fddd79265ebc 2-10,12-16,19,21-22,25-30,32-36,38-45
+  s_40326aa44c0ae8::t_6eceb5884fc9dd 1,11,17-18,20,23-24,31,37,46-47
+test/qoder-catalog.test.ts
+  s_40326aa44c0ae8::t_9f17da79e298f4 80
+  s_40326aa44c0ae8::t_7f348410922c80 75
+  s_40326aa44c0ae8::t_294f268da992b8 70,74,76-77,81-82
+packages/qoder/src/catalog.ts
+  s_40326aa44c0ae8::t_055ea1f52aad16 15,17-20
+  s_40326aa44c0ae8::t_6cb60e23734803 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "3169231aca9a31c85f456f57e6c1376a8f2f3a02",
+  "prompts": {},
+  "sessions": {
+    "s_40326aa44c0ae8": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_4302139b-1d00-44c7-98e2-ed116c0ba90c",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
