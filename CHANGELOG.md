@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.21.0 (2026-11-06)
+
+#### :rocket: New Feature
+* `codebuddy`, `llm-bridge`, `qoder`, `zcode`
+  * [#35](https://github.com/aceHubert/codex-cliproxy-gateway/pull/35) fix(qoder): 适配 CLI 1.1.83 协议，放开计费档位并加固凭据缓存 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.20.4 (2026-11-03)
 
 #### :rocket: New Feature
