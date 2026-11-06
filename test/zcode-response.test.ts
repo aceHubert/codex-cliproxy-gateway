@@ -150,7 +150,6 @@ for (const [label, frames] of [
   ["open block at stop", [start, textStart(), ...end()]],
   ["missing stop reason", [start, { type: "message_stop" }]],
   ["unterminated SSE frame", wire([start]) + 'data: {"type":"message_stop"}'],
-  ["unknown tool", [start, toolStart(0, "unknown", "c"), stop(0), ...end("tool_use")]],
 ] as [string, Json[] | string][]) {
   test(`ZCode rejects ${label} in streaming and JSON modes`, async () => {
     const events = await streamEvents(frames);
@@ -307,6 +306,39 @@ test("ZCode unknown content block types are ignored without failing the stream",
   const output = events.at(-1)!.response.output;
   assert.equal(output.length, 1);
   assert.equal(output[0].content[0].text, "正常");
+});
+
+test("ZCode 未声明的幻觉工具名按未知块忽略，不再整条断流", async () => {
+  const frames = [start, textStart(0, "尝试调用"), stop(0),
+    toolStart(1, "tool_functions__.exec_command__1c9f81b6a094", "call_ghost"),
+    delta(1, "input_json_delta", "{\"cmd\":\"ls\"}"),
+    stop(1), ...end("tool_use")];
+  const events = await streamEvents(frames);
+  const final = events.at(-1)!;
+  assert.equal(final.type, "response.completed");
+  const output = final.response.output;
+  assert.ok(!output.some((item: Json) => item.type === "function_call"), "幻觉调用不得产出工具条目");
+  assert.equal(output.filter((item: Json) => item.type === "message").length, 1);
+});
+
+test("ZCode 上游改写过的折叠名按骨架唯一映射回声明工具", async () => {
+  const foldedTools: ZcodeToolMap = new Map([
+    ["tool_functions___exec___add2bac04685", { name: "exec", custom: false, namespace: "functions" }],
+  ]);
+  const frames = [start,
+    toolStart(0, "tool_functions__.exec__beef0000beef", "call_rewritten"),
+    delta(0, "input_json_delta", "{\"cmd\":\"ls\"}"),
+    stop(0), ...end("tool_use")];
+  const response = await createZcodeResponse(source(frames), { model, tools: foldedTools, stream: true });
+  assert.equal(response.status, 200);
+  const text = await response.text();
+  const events: Json[] = text.trim().split("\n\n").filter(Boolean).map((chunk) => JSON.parse(chunk.split("\n").find((line) => line.startsWith("data: "))!.slice(6)));
+  const final = events.findLast((item) => item.type === "response.completed")!;
+  const call = final.response.output.find((item: Json) => item.type === "function_call");
+  assert.ok(call, "改写名应映射回声明工具并产出调用条目");
+  assert.equal(call.name, "exec");
+  assert.equal(call.namespace, "functions");
+  assert.equal(call.arguments, "{\"cmd\":\"ls\"}");
 });
 
 const gatewayVisionTools = new Map<string, { name: string; custom: boolean; gateway?: string }>([

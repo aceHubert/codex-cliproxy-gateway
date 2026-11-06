@@ -1,4 +1,4 @@
-import { createClientResponse } from "@agent-proxy/llm-bridge";
+import { createClientResponse, remapUndeclaredToolName } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { encodeZcodeThinking, isZcodeRecord, type ZcodeToolMap } from "./wire.ts";
 import { gatewayToolCallNarration, gatewayToolResultNarration, type ZcodeGatewayCall } from "./vision.ts";
@@ -454,8 +454,17 @@ export async function createZcodeResponse(upstream: Response, options: ZcodeResp
         const tool = normalized.find((value) => value.type === "tool_call_start");
         const call = record(tool?.tool_call, "tool call");
         const name = requiredString(call.name, "tool name");
-        const mapped = options.tools.get(name);
-        if (!mapped) throw new Error(`ZCode 返回了未声明的工具：${name}`);
+        let mapped = options.tools.get(name);
+        if (!mapped) {
+          // 上游可能回吐与折叠声明名仅分隔符/哈希不同的调用名：骨架唯一匹配时
+          // 对回声明名；完全无法对应的调用按未知块忽略，不再整条断流。
+          const remapped = remapUndeclaredToolName(name, options.tools);
+          if (remapped !== undefined) mapped = options.tools.get(remapped);
+        }
+        if (!mapped) {
+          ignoredBlocks.add(index!);
+          return result;
+        }
         if (mapped.gateway) {
           if (!options.gatewayTools) throw new Error(`ZCode 网关工具 ${name} 缺少执行钩子`);
           // 网关代执行：只跟踪参数，不产出客户端事件，也不进入输出条目。
