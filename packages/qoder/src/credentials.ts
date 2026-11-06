@@ -164,15 +164,18 @@ MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 XcW+ML9FoCI6AOvOzwIDAQAB
 -----END PUBLIC KEY-----`;
 
-function runtimeFields(credential: Pick<QoderCredentials, "accountUid" | "organizationId" | "organizationTags" | "dataPolicyAgreed">): { encryptUserInfo: string; key: string } {
-  // 运行时认证只加密身份与组织信息，不把设备 OAuth/refresh token 放进推理签名。
+function runtimeFields(credential: Pick<QoderCredentials, "accountUid" | "organizationId" | "organizationTags" | "dataPolicyAgreed" | "accessToken">): { encryptUserInfo: string; key: string } {
+  // 运行时认证加密身份、组织信息与当前 oauth token（CLI 1.1.83 起 regenerateRuntimeFields 把
+  // security_oauth_token 一并封入信封，服务端解封后校验 token；token 轮换后旧信封即 403
+  // Login expired）。refresh token 不进签名。
   const bytes = randomBytes(16).reverse();
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const aesKey = Buffer.from(bytes.toString("hex").slice(0, 16), "ascii");
   const cipher = createCipheriv("aes-128-cbc", aesKey, aesKey);
-  const raw = JSON.stringify({ uid: credential.accountUid, organization_id: credential.organizationId,
-    organization_tags: credential.organizationTags, data_policy_agreed: credential.dataPolicyAgreed });
+  const raw = JSON.stringify({ uid: credential.accountUid, security_oauth_token: credential.accessToken,
+    organization_id: credential.organizationId, organization_tags: credential.organizationTags,
+    data_policy_agreed: credential.dataPolicyAgreed });
   return {
     encryptUserInfo: Buffer.concat([cipher.update(raw, "utf8"), cipher.final()]).toString("base64"),
     key: publicEncrypt({ key: RUNTIME_PUBLIC_KEY, padding: constants.RSA_PKCS1_PADDING }, aesKey).toString("base64"),
@@ -268,6 +271,22 @@ export function qoderForceDesktop(env: NodeJS.ProcessEnv = process.env): boolean
   return /^(1|true)$/i.test(env.QODER_FORCE_DESKTOP?.trim() ?? "");
 }
 
+/** CLI 登录的解密与信封重铸结果缓存（键为 region:.auth 目录，值含 user/machine_id 双文件戳记）：
+ * 文件未变时复用上次结果（推理路径每请求最多加载 3 次凭据），令牌轮换必然重写文件、缓存自然失效。
+ * 戳记含 dev/ino/ctime：同长度且保留 mtime 的文件替换（恢复、同步场景）也会换 inode/ctime，
+ * 仅比 mtime+size 会漏判并继续用旧令牌。桌面版路径另有 desktopCredentialCache，语义相同。 */
+interface FileStamp { dev: number; ino: number; mtimeMs: number; ctimeMs: number; size: number }
+interface CliCacheEntry { user: FileStamp; machine: FileStamp; credential: QoderCredentials }
+const cliCredentialCache = new Map<string, CliCacheEntry>();
+
+function stampFile(stat: fs.Stats): FileStamp {
+  return { dev: stat.dev, ino: stat.ino, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, size: stat.size };
+}
+
+function sameStamp(a: FileStamp, b: FileStamp): boolean {
+  return a.dev === b.dev && a.ino === b.ino && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs && a.size === b.size;
+}
+
 export async function loadQoderCredentials(options: QoderCredentialOptions = {}): Promise<QoderCredentials | null> {
   const region = options.region ?? "intl";
   const label = QODER_REGION_LABELS[region];
@@ -275,17 +294,33 @@ export async function loadQoderCredentials(options: QoderCredentialOptions = {})
     return loadDesktopQoderCredentials({ ...options, region, label });
   }
   const directory = path.join(options.configDir ?? defaultQoderConfigDir(region, options.home, options.env), ".auth");
+  // 缓存键含地域：同一目录按不同地域加载（测试场景）不得互串身份。
+  const cacheKey = `${region}:${directory}`;
   const userFile = path.join(directory, "user");
-  try { fs.lstatSync(userFile); }
+  const machineFile = path.join(directory, "machine_id");
+  let userStat: fs.Stats;
+  try { userStat = fs.lstatSync(userFile); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return loadDesktopQoderCredentials({ ...options, region, label });
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      cliCredentialCache.delete(cacheKey);
+      return loadDesktopQoderCredentials({ ...options, region, label });
+    }
     invalid(directory, label, "目录不可读");
+  }
+  let machineStat: fs.Stats;
+  try { machineStat = fs.lstatSync(machineFile); }
+  catch { invalid(directory, label, "文件损坏或格式不受支持"); }
+  const cached = cliCredentialCache.get(cacheKey);
+  if (cached && sameStamp(cached.user, stampFile(userStat)) && sameStamp(cached.machine, stampFile(machineStat))) {
+    // 文件未变不代表令牌仍有效，缓存命中也必须检查到期时间。
+    if (cached.credential.expireTime * 1000 <= (options.now ?? Date.now())) invalid(directory, label, "已过期");
+    return cached.credential;
   }
   let machineId: string;
   let user: Record<string, unknown>;
   try {
-    machineId = readFile(path.join(directory, "machine_id"));
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(machineId)) throw new Error("invalid machine id");
+    machineId = readFile(machineFile);
+    if (!/^[0-9a-f]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(machineId)) throw new Error("invalid machine id");
     const content = readFile(userFile);
     let raw = content;
     if (!content.startsWith("{")) {
@@ -314,13 +349,11 @@ export async function loadQoderCredentials(options: QoderCredentialOptions = {})
     identity: createHash("sha256").update(JSON.stringify([region, accountUid, organizationId])).digest("hex"),
     machineId, organizationId, organizationTags, dataPolicyAgreed: user.data_policy_agreed === true,
     accessToken, expireTime, encryptUserInfo: "", key: "" };
-  if (typeof user.encrypt_user_info === "string" && user.encrypt_user_info && typeof user.key === "string" && user.key) {
-    if (/[\r\n]/.test(user.key) || /[\r\n]/.test(user.encrypt_user_info)) invalid(directory, label, "运行时认证字段不合法");
-    credential.encryptUserInfo = user.encrypt_user_info;
-    credential.key = user.key;
-  } else {
-    try { Object.assign(credential, runtimeFields(credential)); }
-    catch { invalid(directory, label, "运行时认证生成失败"); }
-  }
+  // 运行时认证字段按当前 token 本地重铸：CLI 每次以 regenerateRuntimeFields 重新生成并只在内存
+  // 使用，.auth/user 落盘值绑定写盘时刻的旧 token，token 轮换后即被服务端拒绝（403 Login
+  // expired），因此不采信存盘的 encrypt_user_info/key；文件重写（令牌轮换）触发缓存失效重铸。
+  try { Object.assign(credential, runtimeFields(credential)); }
+  catch { invalid(directory, label, "运行时认证生成失败"); }
+  cliCredentialCache.set(cacheKey, { user: stampFile(userStat), machine: stampFile(machineStat), credential });
   return credential;
 }

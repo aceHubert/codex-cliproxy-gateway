@@ -116,20 +116,33 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 
 ## qoder
 
-- **source**：`qodercli-1.1.65`（`~/.qoder/bin/qodercli/qodercli-1.1.65`，commit `a0fb135`）
-  二进制常量表与内嵌提示词提取。
+- **source**：`qodercli-1.1.83`（`~/.qoder/bin/qodercli/qodercli-1.1.83`；二进制不再内嵌
+  commit 短哈希，`commit` 记 `unknown`）二进制常量表、内嵌提示词与 auth WASM 行为分析提取。
 - **notes**：
   - cli profile 与二进制身份常量一致：`client_type=5`、`business_product=cli`、
     `session_type=qodercli`；`business_type=agent`、`scene=assistant`。
-  - CLI 内置提示词以 `# Explanatory Style Active` 段头结尾，段体运行时注入，JSON 保存模板原文。
+  - CLI 内置提示词以 `# Explanatory Style Active` 段头结尾，段体运行时注入，JSON 保存模板原文
+    （1.1.83 标记段头仍在，模板未换代，沿用 1.1.65 快照）。
   - desktop profile 沿用实测 COSY 签名可接受的 `app/10/app`；二进制中 IDE 真实身份为
     `client_type=6`、`business_product=qoder_work`、`session_type=qoder_work`（配套桌面提示词
     `desktopAgentSystemPrompt` 已一并提取），待桌面凭据实流验证后切换。
+  - **运行时认证（2026-11-06 定案）**：CLI 1.1.83 把请求签名搬进内嵌 auth WASM
+    （`qoder_auth_wasm_bg.wasm`，`QoderContext.prepareRequest`），但 `auth` 模式对外的
+    `Authorization: Bearer COSY.<payload>.<md5>` 信封与 1.1.65 逐字节同构（payload 仍为
+    `{version:"v1", requestId, info, cosyVersion, ideVersion:""}`，签名仍为
+    `md5([payload, key, date, body, path].join("\n"))`，两地区真机 200 验证）。差异有二：
+    ① `cosyVersion` 服务端按最低版本门禁，CLI 升 1.1.83 后 1.1.65 签名一律 403；② CLI 每次启动
+    以 `regenerateRuntimeFields`（wasm `generate_runtime_auth_fields`）按**当前 oauth token**
+    重铸 `encrypt_user_info`/`key`（AES-128-CBC 随机密钥 + RSA 公钥封密钥，载荷
+    `{uid, security_oauth_token, organization_id, organization_tags, data_policy_agreed}`），
+    落盘值绑定旧 token、token 轮换后即 403 code 105 Login expired——网关照此在
+    `credentials.ts` 每次加载时本地重铸，不采信 `.auth/user` 存盘值。
   - 端点（国际版 `api2.qoder.sh` / 国内版 `gateway.qoder.com.cn`）不在本数据文件内，见
     `src/qoder/transport.ts` 的 `QODER_REGIONS`。
 - **更新方法**：`qoder --version` 或 `~/.qoder/bin/qodercli/version.txt` 取新版本改 `version`
-  与 `commit`；身份常量变化时按二进制 `Rt()` 函数（`client_type`/`business_product`/
-  `business_type`/`scene` 四元组）重新提取并同步 `profiles`。
+  与 `commit`（新版二进制若无短哈希则记 `unknown`）；身份常量变化时按二进制
+  `getClientMetadata()`（`client_type`/`business_product`/`business_type`/`scene` 四元组）
+  重新提取并同步 `profiles`。若再遇批量 403，优先怀疑最低版本门禁与 token 信封轮换。
 
 ## agy
 
@@ -301,3 +314,4 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 | 2026-10-23 | zcode/codebuddy/qoder/agy | 提示词注入从 catalog 合成期下移到请求转换层：llm-bridge 新增 `stripClientSystemPrompt`（四协议剥离客户端系统级内容，非变更式），各适配器 `request.ts` 把 `agentSystemPrompt` 种入上游系统槽唯一基底（整体替换语义，任何客户端协议进入均生效）；目录条目停发改写提示词（zcode 保持 vendor 空串、其余保持 gpt 基线基底），plugin-api 契约移除 `withAgentSystemPrompt`；旧缓存注入值与转换层注入同一文本，替换幂等无需失效（解决 tech-debt 17-① 双路径不一致） |
 | 2026-10-30 | opencode-zen | 工具名黑名单对门禁发现与适配：确认三对（ZCode `CreateWorkflow`+`GetWorkflowRun`、`AmendWorkflow`+`FillWorkflowHole`；Codex `spawn_agent`+`wait_agent`）同场声明即 429（子串包含、大小写不敏感、与配额同文案）；新增 `breakOpencodeZenBlockedToolNamePairs` 在适配出口对命中对 B 侧确定性子串打断（身份映射还原原名），配单元+网关测试；ZCode 186 工具与 Codex 544KB 信封原请求真机 200；另实测 GA 2.2.1 未滚模板校验（快照不换）、会话新鲜度窗口 ≥24h、家宽池可被测试打空（~50 分钟自愈） |
 | 2026-11-01 | zcode | 快照升 3.17.1 并统一数据源：① `userAgentTemplate` 更新为 `ZCode/{version} ai-sdk/anthropic/3.0.81`——官方 3.16+ 的 AI SDK 客户端工厂（zcode.cjs `pD`）对所有 anthropic 请求（coding plan 与 start-plan 中继同一路径）统一把 ai-sdk 后缀追加到 UA，10-09「无后缀」为 3.14.5 时代实流（api.z.ai 对 UA 宽容，带后缀实测同样 200）；② `agentSystemPrompt` 更新为新开场句 "You are ZCode, an interactive agent"（`buildCliPrefixSection`，与 start-plan 的 cli_prefix 同一文本单一来源）；③ 新增 `startPlanPrompt`（start-plan 中继校验的官方段落：identity/desktopContext/dynamicBehavior/contextManagement/environment 模板，程序化提取自 zcode.cjs，各段 SHA-256 进测试）——与既有指纹数据同文件同节奏维护，不再单设 `start-plan-prompt.json`；④ 中继拒绝 Bun fetch 的 h2 画像（HTTP/1.1 200 / h2 405），start-plan 传输走 `createStartPlanFetch()`（node:https 恒 h1）。实验记录见 [调研文档](zcode-start-plan-research.md) 2026-11-01 节 |
+| 2026-11-06 | qoder | CLI 自动更新 1.1.65→1.1.83 后目录与推理批量 403 的协议适配：`version` 升 1.1.83（服务端最低版本门禁，旧版本签名一律 403）；分析内嵌 auth WASM 确认 `auth` 模式 COSY 信封与签名公式同构未变，但运行时认证信封载荷须含当前 `security_oauth_token`（CLI 每次启动 `regenerateRuntimeFields` 重铸，落盘值绑定旧 token 即 403 code 105 Login expired），`credentials.ts` 改为每次加载本地重铸、不采信 `.auth/user` 落盘的 `encrypt_user_info`/`key`；两地区真机 200 验证；档位目录（仅排除 Auto、其余档位放行）同步落地，2026-11 起两地区 `performance` 档位更名 `fast` |

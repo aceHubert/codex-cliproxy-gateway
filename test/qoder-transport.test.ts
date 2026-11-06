@@ -12,7 +12,7 @@ const CREDENTIAL: QoderCredentials = { region: "intl", clientProfile: "cli", acc
 function signature(headers: Headers, body: string, path: string): void {
   const parts = headers.get("Authorization")!.slice("Bearer COSY.".length).split(".");
   assert.equal(parts[1], createHash("md5").update([parts[0], CREDENTIAL.key, "1000", body, path].join("\n")).digest("hex"));
-  assert.deepEqual(JSON.parse(Buffer.from(parts[0], "base64").toString("utf8")), { version: "v1", requestId: "synthetic-request", info: CREDENTIAL.encryptUserInfo, cosyVersion: "1.1.65", ideVersion: "" });
+  assert.deepEqual(JSON.parse(Buffer.from(parts[0], "base64").toString("utf8")), { version: "v1", requestId: "synthetic-request", info: CREDENTIAL.encryptUserInfo, cosyVersion: "1.1.83", ideVersion: "" });
   const headerValues: string[] = [];
   headers.forEach((value) => headerValues.push(value));
   assert.ok(!JSON.stringify(headerValues).includes(CREDENTIAL.accessToken));

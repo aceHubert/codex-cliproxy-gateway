@@ -5,7 +5,7 @@ import type { QoderCredentials, QoderRegion } from "./credentials.ts";
 export type { QoderRegion } from "./credentials.ts";
 
 /**
- * Qoder 客户端指纹（`fingerprint-data.json`，按本机 qodercli-1.1.65 二进制
+ * Qoder 客户端指纹（`fingerprint-data.json`，按本机 qodercli-1.1.83 二进制
  * 常量表与内嵌提示词分析提取）：协议版本与产品身份随 CLI 发行轮换；
  * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
  */

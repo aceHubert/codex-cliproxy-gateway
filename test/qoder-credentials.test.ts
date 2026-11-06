@@ -72,7 +72,6 @@ test("Qoder 只读解密官方登录并随下次读取跟随账号切换", async
     assert.equal(credential?.region, "intl");
     assert.equal(credential?.accountUid, USER.uid);
     assert.equal(credential?.accessToken, USER.security_oauth_token);
-    assert.equal(credential?.key, USER.key);
     assert.equal(credential?.authDirectory, fixtureDir.auth);
     assert.equal(fs.readFileSync(file, "utf8"), content);
     assert.equal(fs.statSync(file).mtimeMs, stat.mtimeMs);
@@ -83,16 +82,54 @@ test("Qoder 只读解密官方登录并随下次读取跟随账号切换", async
   } finally { fixtureDir.dispose(); }
 });
 
-test("缺失运行时认证字段时只在内存生成 AES 和 RSA 认证，不写回登录", async () => {
+test("运行时认证字段本地重铸且随文件重写失效，文件未变时复用缓存", async () => {
   const fixtureDir = fixture();
   try {
     const file = path.join(fixtureDir.auth, "user");
-    const content = encrypted({ ...USER, encrypt_user_info: undefined, key: undefined });
+    const content = encrypted(USER);
     fs.writeFileSync(file, content);
-    const credential = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
-    assert.equal(Buffer.from(credential!.key, "base64").length, 128);
-    assert.equal(Buffer.from(credential!.encryptUserInfo, "base64").length % 16, 0);
-    assert.equal(fs.readFileSync(file, "utf8"), content);
+    const first = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    const second = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    // 存盘的 encrypt_user_info/key 绑定写盘时刻的旧 token，CLI 轮换 token 后即被服务端拒绝，
+    // 因此信封必须本地重铸（RSA 128 字节、AES 分块对齐），且不等于落盘值。
+    assert.notEqual(first!.key, USER.key);
+    assert.notEqual(first!.encryptUserInfo, USER.encrypt_user_info);
+    assert.equal(Buffer.from(first!.key, "base64").length, 128);
+    assert.equal(Buffer.from(first!.encryptUserInfo, "base64").length % 16, 0);
+    // 文件未变时命中缓存复用同一凭据（推理路径每请求最多加载 3 次，避免重复解密与重铸）。
+    assert.equal(second, first);
+    // 令牌轮换必然重写 .auth/user：缓存失效、按新 token 重铸新信封。
+    fs.writeFileSync(file, encrypted({ ...USER, security_oauth_token: "rotated-token" }));
+    const third = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    assert.notEqual(third!.key, first!.key);
+    assert.equal(third!.accessToken, "rotated-token");
+    assert.equal(fs.readFileSync(file, "utf8"), encrypted({ ...USER, security_oauth_token: "rotated-token" }));
+  } finally { fixtureDir.dispose(); }
+});
+
+test("同长度同 mtime 的凭据文件替换（换 inode）不得复用旧令牌缓存", async () => {
+  const fixtureDir = fixture();
+  try {
+    const file = path.join(fixtureDir.auth, "user");
+    fs.writeFileSync(file, encrypted(USER));
+    const first = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    const stat = fs.statSync(file);
+    // 备份/同步场景：新令牌等长（密文与文件大小不变），经临时文件原子替换（inode 变化），
+    // 并保留原 mtime —— 仅比 mtime+size 的缓存会误判未变，继续返回旧令牌与旧信封。
+    const replacement = encrypted({ ...USER, security_oauth_token: "rotated-security-secret" });
+    assert.equal(replacement.length, fs.statSync(file).size, "替换内容须与原文件等长");
+    const temp = `${file}.restore-test`;
+    fs.writeFileSync(temp, replacement);
+    fs.renameSync(temp, file);
+    fs.utimesSync(file, stat.atime, stat.mtime);
+    const second = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    assert.equal(second!.accessToken, "rotated-security-secret");
+    assert.notEqual(second!.key, first!.key, "换 inode 的等长替换必须重铸信封");
+    // uid 未轮换，identity 保持稳定（账号未切换，目录缓存键不失效属预期）。
+    assert.equal(second!.identity, first!.identity);
+    // 缓存修正后，未再变化时继续命中新条目。
+    const third = await loadQoderCredentials({ configDir: fixtureDir.directory, desktopDir: null, now: 1000000000000 });
+    assert.equal(third, second);
   } finally { fixtureDir.dispose(); }
 });
 
