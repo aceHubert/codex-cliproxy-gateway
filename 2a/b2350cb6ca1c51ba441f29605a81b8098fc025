@@ -1,0 +1,85 @@
+apps/gateway/src/cli.ts
+  s_a57e1a9aef95cb::t_d915d9ba66990a 1522
+  s_a57e1a9aef95cb::t_b90142b04249a8 1581
+  s_a57e1a9aef95cb::t_5180ab8a8ba969 30,1520-1521,1563-1567,1590
+  s_a57e1a9aef95cb::t_e430df59cc22c4 3,1539-1540,1561,1568,1584-1589,1592-1593,1596-1597
+  s_a57e1a9aef95cb::t_a4d54269a7db56 212,1553,1557-1559,1562,1583
+  s_a57e1a9aef95cb::t_5cb49942be4136 213,731,1519,1542,1556,1560,1570-1571,1578-1580,1582,1591,1594-1595,1600
+  s_a57e1a9aef95cb::t_44fc4564589cb7 625,630,1614-1615
+docs/histories/2026-11/20261106-1408-models-push-selection-cache.md
+  s_a57e1a9aef95cb::t_cedcaddfc69043 1,21,50
+  s_a57e1a9aef95cb::t_9ce180de3be784 17-19,27,30,32,41,43,52
+  s_a57e1a9aef95cb::t_33e31b73b5f5fc 57
+  s_a57e1a9aef95cb::t_d5ee1f2893803a 58-59
+  s_a57e1a9aef95cb::t_7a1b36f2b4c400 11,20,24,33-34,38-40,44,56
+  s_a57e1a9aef95cb::t_b46ca54db41e74 22-23,42,48,51
+  s_a57e1a9aef95cb::t_86db63e1ae15d0 2-10,12-16,25-26,28-29,31,35-37,45-47,49,53-55
+apps/gateway/src/models-push.ts
+  s_a57e1a9aef95cb::t_5cb49942be4136 110
+  s_a57e1a9aef95cb::t_18a419ad680925 111,119-120
+apps/gateway/README.md
+  s_a57e1a9aef95cb::t_5cb49942be4136 178
+test/models-push.test.ts
+  s_a57e1a9aef95cb::t_4fc7a3a5ee31b1 360,366-367,440-441,447,457-458,464,490,492-493,512
+  s_a57e1a9aef95cb::t_33964ed4b307dc 544,570,572,587-590,638,646
+  s_a57e1a9aef95cb::t_36500138886fd4 522
+  s_a57e1a9aef95cb::t_b6a7128ef52c44 525,528-534,536-543,545-547,549-553,555-564,609-626,628-636,639-645,647-648,650-655
+  s_a57e1a9aef95cb::t_a7e7f453e97f95 370,471,475-476,513
+  s_a57e1a9aef95cb::t_ab8d3e713d8e76 379-434
+  s_a57e1a9aef95cb::t_65b2d6d56be034 51,65-71,75,80,82,85,110,343,355,357-358,371-372,435,438,442-446,456,474,477,483,491,494,496,511,514-515,521,523-524,526-527,535,548,554,571,602,627,637,649,741,744
+  s_a57e1a9aef95cb::t_9964b0011f3df7 72-74,76-79,81,83-84
+  s_a57e1a9aef95cb::t_c48368a5b749b4 359,373
+  s_a57e1a9aef95cb::t_1f58d8a90fcfd2 566-569,573-586,591-601,603-608
+  s_a57e1a9aef95cb::t_b3426aa0a37e26 344-354,356,361-365,368-369,374-378,436-437,439,448-455,459-463,465-470,472-473,478-482,484-489,495,497-510,516-520
+  s_a57e1a9aef95cb::t_8d79dd5fabcd89 11
+  s_a57e1a9aef95cb::t_a1489173edc8ce 10,291
+  s_a57e1a9aef95cb::t_7e1987644b52c7 565
+test/opencode-zen-gateway.test.ts
+  s_81af5aa269dddd::t_3e450355cc2aa8 989,997-998,1003-1006,1008-1009,1011-1012
+docs/exec-plans/completed/undeclared-tool-tolerance-and-vision-observability.md
+  s_81af5aa269dddd::t_ae1ab9deacda63 1-63
+packages/llm-bridge/src/index.ts
+  s_81af5aa269dddd::t_7d4a6820278c3f 43
+apps/gateway/config.schema.json
+  s_a57e1a9aef95cb::t_5cb49942be4136 89
+  s_a57e1a9aef95cb::t_5180ab8a8ba969 90,96
+  s_a57e1a9aef95cb::t_e430df59cc22c4 91-95,97
+test/model-exclude.test.ts
+  s_a57e1a9aef95cb::t_41fe0f862527c7 566,569-570,599-600,609
+apps/gateway/src/types.ts
+  s_a57e1a9aef95cb::t_5cb49942be4136 39
+  s_a57e1a9aef95cb::t_5180ab8a8ba969 38
+packages/llm-bridge/src/output.ts
+  s_81af5aa269dddd::t_4d31fec2c6c856 404-483
+  s_81af5aa269dddd::t_a2d7d951777e3d 757,983,1214
+  s_81af5aa269dddd::t_9067ecd3e516a8 604
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2ab2350cb6ca1c51ba441f29605a81b8098fc025",
+  "prompts": {},
+  "humans": {
+    "h_e8eb00b1da99ae": {
+      "author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  },
+  "sessions": {
+    "s_81af5aa269dddd": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_cb6b6552-a58b-4bbe-bc59-f442a1b1c357",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_a57e1a9aef95cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1af73-3a40-7f80-8cb4-a07d69232d79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
