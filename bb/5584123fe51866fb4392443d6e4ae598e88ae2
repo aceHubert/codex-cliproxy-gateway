@@ -1,0 +1,46 @@
+packages/zcode/src/index.ts
+  s_81af5aa269dddd::t_e348b17ca5dad9 526-532
+  s_81af5aa269dddd::t_9e26f748456210 627
+  s_81af5aa269dddd::t_f1034f44323309 341-345
+  s_81af5aa269dddd::t_435eb5d778f4b3 625
+  s_81af5aa269dddd::t_c72bbf3d972c97 1
+  s_81af5aa269dddd::t_178fbb7f5fd5ec 491,517-525,533
+  s_81af5aa269dddd::t_34a4024a4551c3 384-386,388-403
+docs/histories/2026-11/20261105-1035-undeclared-tool-tolerance-vision-observability.md
+  s_81af5aa269dddd::t_3acc7088a1c3ac 7
+  s_81af5aa269dddd::t_557e1b9fa5dbf4 1-6,8-61
+packages/zcode/src/response.ts
+  s_81af5aa269dddd::t_2f6714c7c241d0 1
+  s_81af5aa269dddd::t_89e79cb47c790a 457-467
+test/zcode-vision.test.ts
+  s_81af5aa269dddd::t_56b0b20b7734fc 140-142
+  s_81af5aa269dddd::t_ab49e7e8bd6d48 121-139,143-180
+  s_81af5aa269dddd::t_c578cb61398327 12
+  s_81af5aa269dddd::t_3f0b2dea8a58cc 181
+test/zcode-response.test.ts
+  s_81af5aa269dddd::t_24c28dc6d984ce 311-342
+  s_81af5aa269dddd::t_7aa5b35abb5894 343
+packages/zcode/src/vision.ts
+  s_81af5aa269dddd::t_364e630be57059 138-147
+  s_81af5aa269dddd::t_19b43701b28d00 253,255-269,272-275
+  s_81af5aa269dddd::t_498dd039f0a781 148,171-179
+  s_81af5aa269dddd::t_d5768c8b269b01 180
+  s_81af5aa269dddd::t_3de9e4f0c29bce 167-170,181-187
+  s_81af5aa269dddd::t_6d9241d386ee63 149
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "bb5584123fe51866fb4392443d6e4ae598e88ae2",
+  "prompts": {},
+  "sessions": {
+    "s_81af5aa269dddd": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_cb6b6552-a58b-4bbe-bc59-f442a1b1c357",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
