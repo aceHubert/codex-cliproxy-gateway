@@ -1,0 +1,37 @@
+test/codebuddy-response.test.ts
+  s_81af5aa269dddd::t_8a97bbe2b755d3 161,172-212
+  s_81af5aa269dddd::t_2018662527ed3d 9
+test/codebuddy-catalog.test.ts
+  s_a57e1a9aef95cb::t_5b0647eed64765 277,286-288,291,293-338
+packages/codebuddy/README.md
+  s_a57e1a9aef95cb::t_5b0647eed64765 25-28
+docs/histories/2026-11/20261106-1448-workbuddy-max-tier-filter.md
+  s_a57e1a9aef95cb::t_2db7b0d0acc54b 1-44,46
+  s_a57e1a9aef95cb::t_8cf7246690528b 45
+packages/codebuddy/src/catalog.ts
+  s_a57e1a9aef95cb::t_5b0647eed64765 144-145,147-149,455-456
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "aad6c4351641d74ac5d80aaea87395bc7dd6bc59",
+  "prompts": {},
+  "sessions": {
+    "s_81af5aa269dddd": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_cb6b6552-a58b-4bbe-bc59-f442a1b1c357",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_a57e1a9aef95cb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1af73-3a40-7f80-8cb4-a07d69232d79",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
