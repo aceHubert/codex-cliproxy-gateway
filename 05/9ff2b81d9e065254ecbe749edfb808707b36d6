@@ -1,0 +1,44 @@
+packages/qoder/src/credentials.ts
+  s_e01768367caeae::t_5cafe2d2667540 355-356
+  s_e01768367caeae::t_a43da08e859fd6 314
+  s_e01768367caeae::t_1b52cc794eafd9 280,289,300-302,304,306-307,310-312,315-318,322-323,352-354
+  s_e01768367caeae::t_05d78d210f1453 357
+  s_e01768367caeae::t_51c04f424ece02 297-298,305,313
+  s_e01768367caeae::t_08832253aeaede 167-170,176-178
+  s_e01768367caeae::t_526540ce57e830 274-279,281-288
+test/qoder-credentials.test.ts
+  s_e01768367caeae::t_4122ddb6d1819e 128-129
+  s_e01768367caeae::t_f8d59939586fd2 85,94-106
+  s_e01768367caeae::t_4f1587622a97c7 110-127,130-132
+  s_e01768367caeae::t_d32722fb687dd2 89,91-93
+  s_e01768367caeae::t_704864a9ddf1bc 107-109
+packages/qoder/src/transport.ts
+  s_e01768367caeae::t_016614fa32fac3 8
+docs/histories/2026-11/20261106-1151-qoder-1.1.83-protocol-auth-adaptation.md
+  s_e01768367caeae::t_368d93dcbe7e4d 1-18,21-30,32-33,36-39,41-42,44-54,56,58
+  s_e01768367caeae::t_c5b5817af34c0f 55,57
+  s_e01768367caeae::t_6aa2c9bea73ff4 31
+  s_e01768367caeae::t_35ae41868dd878 34-35,40,43
+  s_e01768367caeae::t_b0af18735cfe87 19-20
+docs/fingerprint-data.md
+  s_e01768367caeae::t_768c86a5ee88cc 317
+  s_e01768367caeae::t_d1807be3bfef4d 119-120,124-125,129-139,143-145
+test/qoder-transport.test.ts
+  s_e01768367caeae::t_3ba97159a31842 15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "059ff2b81d9e065254ecbe749edfb808707b36d6",
+  "prompts": {},
+  "sessions": {
+    "s_e01768367caeae": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_ec6a0008-b243-484a-a5ac-cbeea3d2f17c",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
