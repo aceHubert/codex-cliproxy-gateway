@@ -141,10 +141,12 @@ const CATALOG_FAILURE_COOLDOWN_MS = 30 * 1000;
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /**
- * 服务端档位模型（Auto/auto/Fast/Balanced/Primary/Deep）：只做 Codex 模型选择框展示用，
- * 后端由服务端解析；从网关目录中过滤，避免与具体模型并列出现。
+ * 服务端自动选模档位由上游解析具体模型；CodeBuddy/WorkBuddy 目录统一过滤，
+ * 避免与具体模型并列出现。
  */
-const TIER_MODEL_IDS = new Set(["default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model"]);
+const TIER_MODEL_IDS = new Set([
+  "default-model", "auto", "fast-model", "balanced-model", "primary-model", "deep-model", "max-model",
+]);
 
 type ScopeModel = Record<string, unknown>;
 
@@ -450,7 +452,8 @@ export function createCodebuddyCatalogStore(options: CodebuddyCatalogStoreOption
       if (parsed.cache_key !== key || typeof parsed.fetched_at !== "number" || !Array.isArray(parsed.models)) return;
       const models = parsed.models as ModelEntry[];
       if (parsed.content_hash !== digest(models)) return;
-      return { key, fetchedAt: parsed.fetched_at, models };
+      // 校验原始指纹后再应用当前过滤规则，离线读取和失败回退也不复活旧档位条目。
+      return { key, fetchedAt: parsed.fetched_at, models: models.filter((model) => !TIER_MODEL_IDS.has(model.slug.toLowerCase())) };
     } catch { /* 缺失或损坏的缓存按未命中处理。 */ }
   }
 

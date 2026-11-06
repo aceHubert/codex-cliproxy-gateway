@@ -6,7 +6,7 @@ import { decodeCodebuddyReasoning } from "@agent-proxy/codebuddy/wire";
 
 type Json = Record<string, any>;
 
-function toolsMap(entries: Array<[string, { name: string; custom: boolean }]> = []): CodebuddyToolMap {
+function toolsMap(entries: Array<[string, { name: string; custom: boolean; namespace?: string }]> = []): CodebuddyToolMap {
   return new Map(entries);
 }
 
@@ -158,7 +158,7 @@ test("finish_reason length/content_filter 映射为 incomplete", async () => {
   }
 });
 
-test("上游 error 帧转 failed，未声明的工具报错", async () => {
+test("上游 error 帧转 failed，未声明的工具不再断流而是提示后正常收尾", async () => {
   const errorFrame = `data: ${JSON.stringify({ error: { message: "quota exceeded", code: 429 } })}\n\n`;
   const failed = await createCodebuddyResponse("responses", new Response(errorFrame, { headers: { "content-type": "text/event-stream" } }), {
     model: "m", tools: toolsMap(), stream: false,
@@ -169,9 +169,47 @@ test("上游 error 帧转 failed，未声明的工具报错", async () => {
 
   const undeclared = sse([chunk({ tool_calls: [{ index: 0, id: "c", type: "function", function: { name: "ghost", arguments: "{}" } }] }), chunk({}, "tool_calls")]);
   const response = await createCodebuddyResponse("responses", undeclared, { model: "m", tools: toolsMap(), stream: false });
-  const rejected = await response.json() as Json;
-  assert.equal(rejected.status, "failed");
-  assert.match(rejected.error.message, /未声明的工具/);
+  const tolerated = await response.json() as Json;
+  assert.equal(tolerated.status, "completed");
+  assert.ok(!tolerated.output.some((item: Json) => item.type === "function_call"), "被忽略的调用不得产出工具条目");
+  const text = JSON.stringify(tolerated.output);
+  assert.match(text, /未声明的工具 ghost/, "忽略提示要进入输出文本供模型自纠");
+});
+
+test("上游改写过的折叠工具名按骨架唯一映射回声明工具", async () => {
+  const tools = toolsMap([
+    // 声明侧折叠名（llm-bridge defaultSafeToolName(JSON.stringify(["functions","exec_command"])) 的实际产出）
+    ["tool_functions___exec_command___09e59a0e69fd", { name: "exec_command", custom: false, namespace: "functions" }],
+  ]);
+  // DeepSeek 腿实测：上游把折叠名改写为 `__.` 分隔并替换哈希后回吐
+  const rewritten = sse([
+    chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "tool_functions__.exec_command__1c9f81b6a094", arguments: "{\"cmd\":\"ls\"}" } }] }),
+    chunk({}, "tool_calls"),
+  ]);
+  const response = await createCodebuddyResponse("responses", rewritten, { model: "m", tools, stream: false });
+  const result = await response.json() as Json;
+  assert.equal(result.status, "completed");
+  const call = result.output.find((item: Json) => item.type === "function_call");
+  assert.ok(call, "改写名应映射回已声明工具并产出调用条目");
+  assert.equal(call.name, "exec_command");
+  assert.equal(call.namespace, "functions");
+  assert.equal(call.arguments, "{\"cmd\":\"ls\"}");
+});
+
+test("骨架匹配歧义时不猜测，调用被忽略且流正常完成", async () => {
+  const tools = toolsMap([
+    ["fn_a", { name: "dup", custom: false }],
+    ["fn_a__0123456789ab", { name: "dup", custom: false }],
+  ]);
+  const ambiguous = sse([
+    chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "fn_a__deadbeefdead", arguments: "{}" } }] }),
+    chunk({}, "tool_calls"),
+  ]);
+  const response = await createCodebuddyResponse("responses", ambiguous, { model: "m", tools, stream: false });
+  const result = await response.json() as Json;
+  assert.equal(result.status, "completed");
+  assert.ok(!result.output.some((item: Json) => item.type === "function_call"), "歧义名不得映射到任何工具");
+  assert.match(JSON.stringify(result.output), /未声明的工具/);
 });
 
 test("整包 JSON 上游重放为同一事件序列", async () => {
