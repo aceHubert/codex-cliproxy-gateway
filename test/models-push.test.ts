@@ -7,8 +7,8 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { pushModelsToTargets, type ModelPushTarget } from "../apps/gateway/src/models-push.ts";
 import { runCli, runModelsPush, type PushModelsDependencies } from "../apps/gateway/src/cli.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL } from "../apps/gateway/src/config.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
 import type { GatewayConfig, ModelEntry, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function silenceConsole(): () => string[] {
@@ -48,7 +48,7 @@ function stubTarget(id: string, behavior: { installed?: () => void; push?: (mode
   };
 }
 
-test("pushModelsToTargets applies excludedModels scoped to local plugin models", async () => {
+test("pushModelsToTargets 推送清单不受 excludedModels 影响", async () => {
   const restore = silenceConsole();
   try {
     const target = stubTarget("stub");
@@ -62,7 +62,27 @@ test("pushModelsToTargets applies excludedModels scoped to local plugin models",
       config: { ...baseConfig, excludedModels: ["agy/gamma", "cliproxy/alpha"] },
       targets: [target],
     });
-    assert.deepEqual(target.seen.map((model) => model.slug), ["qoder-cn/qoder-code", "zcode/glm-5.3"]);
+    assert.deepEqual(target.seen.map((model) => model.slug), ["agy/gamma", "qoder-cn/qoder-code", "zcode/glm-5.3"]);
+  } finally {
+    restore();
+  }
+});
+
+test("pushModelsToTargets 最终清单只减去 latestPushExcludedModels", async () => {
+  const restore = silenceConsole();
+  try {
+    const target = stubTarget("stub");
+    const config = { ...baseConfig, excludedModels: ["agy/global-*"], latestPushExcludedModels: ["agy/push-only"] };
+    await pushModelsToTargets({
+      entries: [{ slug: "agy/global-hidden" }, { slug: "agy/push-only" }, { slug: "agy/available" }],
+      failures: [], config, targets: [target],
+    });
+    assert.deepEqual(target.seen.map((model) => model.slug), ["agy/global-hidden", "agy/available"]);
+    await assert.rejects(pushModelsToTargets({
+      entries: [{ slug: "agy/push-only" }],
+      failures: [], config, targets: [target],
+    }), /no local adapter models to push/);
+    assert.deepEqual(target.seen.map((model) => model.slug), ["agy/global-hidden", "agy/available"], "排除后为空时不得再调用目标");
   } finally {
     restore();
   }
@@ -87,7 +107,7 @@ test("pushModelsToTargets warns on failed catalog sources and aborts only on an 
       pushModelsToTargets({
         entries: [{ slug: "agy/gamma" }],
         failures: [],
-        config: { ...baseConfig, excludedModels: ["agy/"] },
+        config: { ...baseConfig, latestPushExcludedModels: ["agy/gamma"] },
         targets: [target],
       }),
       /model push aborted; no local adapter models to push/,
@@ -268,7 +288,7 @@ function fakeTty(): { input: EventEmitter; output: unknown } {
 async function pushWithKeys(
   targetOption: string | undefined,
   config: GatewayConfig,
-  keys: Array<[string, { name: string }]>,
+  keys: Array<[string, { name: string; ctrl?: boolean }]>,
 ): Promise<void> {
   const { input, output } = fakeTty();
   const pushing = runModelsPush(targetOption, config, {
@@ -316,6 +336,319 @@ test("models --push 交互勾选可取消个别模型后确认", async () => {
     const rule = saved.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy");
     assert.deepEqual(rule.config.modelOrder, ["opencode-zen/muse-free"]);
   } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 保留暂时失效的排除偏好，并默认推送新模型", async () => {
+  const fixture = makeCliFixture();
+  try {
+    const catalogFile = path.join(fixture.paths.runtimeHome, "opencode-zen-catalog.json");
+    const ids = ["grok-code-free", "muse-free"];
+    fs.writeFileSync(catalogFile, JSON.stringify({
+      fetched_at: Date.now(), ids,
+      content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
+    }));
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    const configBefore = fs.readFileSync(fixture.paths.gatewayConfig, "utf8");
+    await pushWithKeys("zcode", fixture.config, [[" ", { name: "space" }], ["", { name: "enter" }]]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")).latestPushExcludedModels, ["opencode-zen/grok-code-free"]);
+
+    // 暂时失效的推送排除项继续保留，网关排除规则不影响新模型默认推送。
+    fixture.config.latestPushExcludedModels = ["opencode-zen/grok-code-free", "opencode-zen/removed"];
+    fixture.config.excludedModels = ["opencode-zen/grok-code-free"];
+    fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(fixture.config));
+    ids.push("new-free");
+    fs.writeFileSync(catalogFile, JSON.stringify({
+      fetched_at: Date.now(), ids,
+      content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
+    }));
+    const reloadedConfig = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
+    await pushWithKeys("zcode", reloadedConfig, [["", { name: "enter" }]]);
+    const saved = JSON.parse(fs.readFileSync(providerConfigFile, "utf8"));
+    const rule = saved.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy");
+    assert.deepEqual(rule.config.modelOrder, ["opencode-zen/muse-free", "opencode-zen/new-free"]);
+    const { latestPushExcludedModels, ...preservedConfig } = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"));
+    assert.deepEqual(latestPushExcludedModels.sort(), ["opencode-zen/grok-code-free", "opencode-zen/removed"]);
+    assert.deepEqual(preservedConfig, { ...JSON.parse(configBefore), excludedModels: ["opencode-zen/grok-code-free"] });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+for (const rule of ["opencode-zen/grok-code-free", "OPENCODE-ZEN/GROK-*"]) {
+  test(`models --push 首次使用 excludedModels 默认规则 ${rule}，确认后保持独立`, async () => {
+    const fixture = makeCliFixture();
+    try {
+      const ids = ["grok-code-free", "muse-free"];
+      fs.writeFileSync(path.join(fixture.paths.runtimeHome, "opencode-zen-catalog.json"), JSON.stringify({
+        fetched_at: Date.now(), ids,
+        content_hash: createHash("sha256").update(JSON.stringify(ids)).digest("hex"),
+      }));
+      fixture.config.excludedModels = [rule];
+      fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(fixture.config));
+      const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+      const before = fs.readFileSync(fixture.paths.gatewayConfig, "utf8");
+      await assert.rejects(pushWithKeys("zcode", fixture.config, [["", { name: "c", ctrl: true }]]), /selection cancelled/);
+      assert.equal(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"), before, "取消首次选择不初始化配置字段");
+
+      await pushWithKeys("zcode", fixture.config, [["", { name: "enter" }]]);
+      const savedConfig = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
+      assert.deepEqual(savedConfig.latestPushExcludedModels, ["opencode-zen/grok-code-free"]);
+      assert.deepEqual(savedConfig.excludedModels, [rule]);
+      const saved = JSON.parse(fs.readFileSync(providerConfigFile, "utf8"));
+      assert.deepEqual(saved.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy").config.modelOrder,
+        ["opencode-zen/muse-free"]);
+
+      // 改网关排除规则不再改变已经初始化的推送排除偏好。
+      savedConfig.excludedModels = ["opencode-zen/muse-free"];
+      fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(savedConfig));
+      await pushWithKeys("zcode", savedConfig, [["", { name: "enter" }]]);
+      const pushedAgain = JSON.parse(fs.readFileSync(providerConfigFile, "utf8"));
+      assert.deepEqual(pushedAgain.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy").config.modelOrder,
+        ["opencode-zen/muse-free"]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+}
+
+test("models --push 首次全选也保存空数组，后续不重复继承 excludedModels", async () => {
+  const fixture = makeCliFixture();
+  try {
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    await pushWithKeys("zcode", fixture.config, [["", { name: "enter" }]]);
+    const savedConfig = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")) as GatewayConfig;
+    assert.deepEqual(savedConfig.latestPushExcludedModels, [], "显式保存 [] 标识首次选择已经确认");
+    savedConfig.excludedModels = ["opencode-zen/grok-code-free"];
+    fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(savedConfig));
+    await pushWithKeys("zcode", savedConfig, [["", { name: "enter" }]]);
+    const saved = JSON.parse(fs.readFileSync(providerConfigFile, "utf8"));
+    assert.deepEqual(saved.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy").config.modelOrder,
+      ["opencode-zen/grok-code-free"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")).latestPushExcludedModels, []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 从全部模型选择，excludedModels 中的模型仍可勾选并推送", async () => {
+  const fixture = makeCliFixture();
+  try {
+    fixture.config.latestPushExcludedModels = [];
+    fixture.config.excludedModels = ["opencode-zen/grok-code-free"];
+    const before = JSON.stringify(fixture.config);
+    fs.writeFileSync(fixture.paths.gatewayConfig, before);
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    await pushWithKeys("zcode", fixture.config, [["", { name: "enter" }]]);
+    const saved = JSON.parse(fs.readFileSync(providerConfigFile, "utf8"));
+    const rule = saved.config.providerConfigRules.providerRules.find((item: any) => item.providerName === "AgentProxy");
+    assert.deepEqual(rule.config.modelOrder, ["opencode-zen/grok-code-free"]);
+    assert.equal(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"), before);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 取消不覆盖缓存和客户端配置", async () => {
+  const fixture = makeCliFixture();
+  try {
+    fixture.config.latestPushExcludedModels = ["opencode-zen/grok-code-free"];
+    const before = JSON.stringify(fixture.config);
+    fs.writeFileSync(fixture.paths.gatewayConfig, before);
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    const clientBefore = fs.readFileSync(providerConfigFile, "utf8");
+    await assert.rejects(pushWithKeys("zcode", fixture.config, [
+      [" ", { name: "space" }], ["", { name: "c", ctrl: true }],
+    ]), /Model selection cancelled/);
+    assert.equal(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"), before);
+    assert.equal(fs.readFileSync(providerConfigFile, "utf8"), clientBefore);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 确认后即保存排除偏好，目标失败也可复用", async () => {
+  const fixture = makeCliFixture();
+  try {
+    fixture.config.latestPushExcludedModels = ["opencode-zen/grok-code-free"];
+    fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(fixture.config));
+    await assert.rejects(pushWithKeys("zcode", fixture.config, [[" ", { name: "space" }], ["", { name: "enter" }]]), /model push failed for: zcode/);
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")).latestPushExcludedModels, []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 格式错误的 latestPushExcludedModels 提示后恢复首次全选", async () => {
+  const fixture = makeCliFixture();
+  const previousWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (message?: unknown) => { warnings.push(String(message)); };
+  try {
+    writeZcodeFixture(process.env.ZCODE_HOME!);
+    for (const value of [null, { selectedModels: [] }, [42], [" "]]) {
+      const config = { ...fixture.config, latestPushExcludedModels: value } as unknown as GatewayConfig;
+      fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(config));
+      await pushWithKeys("zcode", config, [["", { name: "enter" }]]);
+      assert.deepEqual(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")).latestPushExcludedModels, []);
+    }
+    assert.equal(warnings.filter((line) => line.includes("Invalid latestPushExcludedModels")).length, 4);
+  } finally {
+    console.warn = previousWarn;
+    fixture.cleanup();
+  }
+});
+
+test("models --push 缓存遵循当前实例目录", async () => {
+  const fixture = makeCliFixture();
+  try {
+    writeZcodeFixture(process.env.ZCODE_HOME!);
+    const otherPaths = resolvePaths(process.env, path.join(fixture.home, "other-instance"));
+    fs.mkdirSync(otherPaths.runtimeHome, { recursive: true });
+    fs.copyFileSync(path.join(fixture.paths.runtimeHome, "opencode-zen-catalog.json"),
+      path.join(otherPaths.runtimeHome, "opencode-zen-catalog.json"));
+    const otherConfig = { ...fixture.config, latestPushExcludedModels: ["opencode-zen/grok-code-free"] };
+    fs.writeFileSync(otherPaths.gatewayConfig, JSON.stringify(otherConfig));
+    await runWithInstancePaths(otherPaths, () => pushWithKeys("zcode", otherConfig, [[" ", { name: "space" }], ["", { name: "enter" }]]));
+    assert.equal(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")).latestPushExcludedModels, undefined);
+    assert.deepEqual(JSON.parse(fs.readFileSync(otherPaths.gatewayConfig, "utf8")).latestPushExcludedModels, []);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("latestPushExcludedModels 的配置规范约束数组、非空 ID 和唯一性", () => {
+  const config = { ...baseConfig, configVersion: "0.0.0-test" };
+  for (const latestPushExcludedModels of [undefined, [], ["agy/gamma"]]) {
+    assert.deepEqual(gatewayConfigWarnings({ ...config, ...(latestPushExcludedModels === undefined ? {} : { latestPushExcludedModels }) }), []);
+  }
+  for (const latestPushExcludedModels of [null, "agy/gamma", [42], [""], [" "], ["agy/gamma", "agy/gamma"]]) {
+    assert.ok(gatewayConfigWarnings({ ...config, latestPushExcludedModels }).some((warning) => warning.includes("latestPushExcludedModels")));
+  }
+});
+
+test("models --push 复用已加载的配置，保存时备份且保留排除和扩展字段", async () => {
+  const fixture = makeCliFixture();
+  const readFileSync = fs.readFileSync;
+  try {
+    const config = { ...fixture.config, excludedModels: ["agy/unused"], latestPushExcludedModels: ["opencode-zen/grok-code-free"], customSetting: { value: "保留" } };
+    const before = JSON.stringify(config);
+    fs.writeFileSync(fixture.paths.gatewayConfig, before);
+    writeZcodeFixture(process.env.ZCODE_HOME!);
+    let configReads = 0;
+    fs.readFileSync = ((file: Parameters<typeof fs.readFileSync>[0], ...args: unknown[]) => {
+      if (String(file) === fixture.paths.gatewayConfig) configReads += 1;
+      return Reflect.apply(readFileSync, fs, [file, ...args]);
+    }) as typeof fs.readFileSync;
+    await pushWithKeys("zcode", config, [[" ", { name: "space" }], ["", { name: "enter" }]]);
+    assert.equal(configReads, 0, "选择和保存应复用已加载配置，不额外读取配置或独立缓存");
+    fs.readFileSync = readFileSync;
+    const saved = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"));
+    assert.deepEqual(saved, { ...config, latestPushExcludedModels: [] });
+    const backups = fs.readdirSync(fixture.paths.runtimeHome).filter((name) => name.startsWith("config.json.bak-agent-proxy-"));
+    assert.equal(backups.length, 1);
+    assert.equal(fs.readFileSync(path.join(fixture.paths.runtimeHome, backups[0]), "utf8"), before);
+    assert.equal(fs.existsSync(path.join(fixture.paths.runtimeHome, "models-push-selection.json")), false);
+    const audit = fs.readFileSync(fixture.paths.stdoutLog, "utf8");
+    assert.match(audit, /latestPushExcludedModels/);
+    assert.match(audit, /models --push/);
+
+    await pushWithKeys("zcode", config, [["", { name: "enter" }]]);
+    assert.deepEqual(fs.readdirSync(fixture.paths.runtimeHome).filter((name) => name.startsWith("config.json.bak-agent-proxy-")), backups,
+      "选择未变化时不重复写配置和备份");
+  } finally {
+    fs.readFileSync = readFileSync;
+    fixture.cleanup();
+  }
+});
+
+test("models --push 的 CLI 保存不会写入原配置缺失的 agent 默认开关", () => {
+  const fixture = makeCliFixture();
+  try {
+    writeZcodeFixture(process.env.ZCODE_HOME!);
+    const config: GatewayConfig & { catalogPath?: string } = {
+      ...fixture.config, configVersion: GATEWAY_CONFIG_VERSION, latestPushExcludedModels: ["opencode-zen/grok-code-free"],
+    };
+    delete config.opencodeZen;
+    delete config.catalogPath;
+    fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(config));
+    const result = Bun.spawnSync([process.execPath, "--eval", `
+      import { runCli } from "./apps/gateway/src/cli.ts";
+      Object.defineProperty(process.stdin, "isTTY", { value: true });
+      Object.defineProperty(process.stdout, "isTTY", { value: true });
+      process.stdin.setRawMode = () => process.stdin;
+      process.stdin.resume = () => process.stdin;
+      process.stdin.pause = () => process.stdin;
+      process.stdout.write = () => true;
+      console.log = () => {};
+      // 等待真实选择器挂好监听后确认，避免固定延迟丢按键。
+      const timer = setInterval(() => {
+        if (process.stdin.listenerCount("keypress")) {
+          process.stdin.emit("keypress", " ", { name: "space" });
+          process.stdin.emit("keypress", "", { name: "enter" });
+        }
+      }, 5);
+      try { await runCli(["models", "--push", "zcode"]); } finally { clearInterval(timer); }
+    `], {
+      cwd: path.resolve(import.meta.dir, ".."),
+      env: { ...process.env, CODEX_CLIPROXY_HOME: fixture.paths.runtimeHome },
+      timeout: 5_000,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    assert.equal(result.exitCode, 0, new TextDecoder().decode(result.stderr));
+    assert.deepEqual(JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8")), {
+      ...config, latestPushExcludedModels: [],
+    });
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 选择期间配置变化时拒绝覆盖或推送", async () => {
+  const fixture = makeCliFixture();
+  try {
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    const clientBefore = fs.readFileSync(providerConfigFile, "utf8");
+    const { input, output } = fakeTty();
+    const pushing = runModelsPush("zcode", fixture.config, {
+      input: input as unknown as PushModelsDependencies["input"],
+      output: output as PushModelsDependencies["output"],
+    });
+    const rejected = assert.rejects(pushing, /config changed during model selection.*rerun models --push/);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const updated = JSON.stringify({ ...fixture.config, excludedModels: ["agy/changed"] });
+    fs.writeFileSync(fixture.paths.gatewayConfig, updated);
+    input.emit("keypress", "", { name: "enter" });
+    await rejected;
+    assert.equal(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"), updated);
+    assert.equal(fs.readFileSync(providerConfigFile, "utf8"), clientBefore);
+    assert.equal(fixture.config.latestPushExcludedModels, undefined);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("models --push 配置原子替换失败时保留原文件和客户端配置", async () => {
+  const fixture = makeCliFixture();
+  const renameSync = fs.renameSync;
+  try {
+    fixture.config.latestPushExcludedModels = ["opencode-zen/grok-code-free"];
+    fs.writeFileSync(fixture.paths.gatewayConfig, JSON.stringify(fixture.config));
+    const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
+    const clientBefore = fs.readFileSync(providerConfigFile, "utf8");
+    const before = fs.readFileSync(fixture.paths.gatewayConfig, "utf8");
+    fs.renameSync = (source, destination) => {
+      if (String(destination) === fixture.paths.gatewayConfig) throw new Error("模拟配置原子替换失败");
+      renameSync(source, destination);
+    };
+    await assert.rejects(pushWithKeys("zcode", fixture.config, [[" ", { name: "space" }], ["", { name: "enter" }]]), /模拟配置原子替换失败/);
+    assert.equal(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"), before);
+    assert.equal(fs.readFileSync(providerConfigFile, "utf8"), clientBefore);
+    assert.deepEqual(fixture.config.latestPushExcludedModels, ["opencode-zen/grok-code-free"]);
+  } finally {
+    fs.renameSync = renameSync;
     fixture.cleanup();
   }
 });
@@ -405,10 +738,10 @@ test("models --exclude 与 --push 组合时先落盘排除规则再推送（推�
   try {
     const { providerConfigFile } = writeZcodeFixture(process.env.ZCODE_HOME!);
     const before = fs.readFileSync(providerConfigFile, "utf8");
-    // 唯一的插件模型被排除 → 清单为空，推送中止；但排除规则已经落盘。
+    // 网关排除规则已保存；独立推送清单仍非空，继续进入选择器（本测试无 TTY）。
     await assert.rejects(
       runCli(["models", "--exclude", "opencode-zen/grok-code-free", "--push", "zcode"]),
-      /model push aborted; no local adapter models to push/,
+      /models --push requires an interactive terminal/,
     );
     const savedConfig = JSON.parse(fs.readFileSync(fixture.paths.gatewayConfig, "utf8"));
     assert.deepEqual(savedConfig.excludedModels, ["opencode-zen/grok-code-free"]);

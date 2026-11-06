@@ -401,6 +401,86 @@ export class ResponsesOutputShell {
 
 /* ============================= 事件 → 客户端输出 ============================= */
 
+/**
+ * 折叠安全名的结构骨架：剥离声明侧生成的确定性哈希后缀，并把分隔符（含上游
+ * 改写引入的点号等）归一为单下划线。用于把上游改写/幻觉后相近的调用名对回
+ * 已声明工具，仅在骨架唯一匹配时采用。
+ */
+function toolNameSkeleton(name: string): string {
+  return name
+    .replace(/_{2,}[0-9a-f]{8,32}$/i, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+/**
+ * 未声明工具名的容错解析：上游（或模型模仿折叠名格式）可能回吐与声明名仅
+ * 分隔符/哈希不同的调用名（实测 DeepSeek 腿：`tool_functions___x___<hash>` 被
+ * 改写为 `tool_functions__.x__<另一 hash>`）。骨架与唯一声明名一致时返回该
+ * 声明名（映射表 key），零个或多个匹配返回 undefined，由调用方降级处理。
+ */
+export function remapUndeclaredToolName(name: string, identities: ToolIdentityMap): string | undefined {
+  const skeleton = toolNameSkeleton(name);
+  if (!skeleton) return undefined;
+  let matched: string | undefined;
+  for (const key of identities.keys()) {
+    if (toolNameSkeleton(key) !== skeleton) continue;
+    if (matched !== undefined) return undefined;
+    matched = key;
+  }
+  return matched;
+}
+
+/** 上游调用了完全无法对应的工具时，注入流内的可见提示；模型下一轮可据此自纠。 */
+function undeclaredToolNotice(name: string): string {
+  return `\n[网关] 上游调用了未声明的工具 ${name}，已忽略该调用；请仅使用已声明的工具。\n`;
+}
+
+/**
+ * 未声明工具调用容错：四个客户端输出共用的事件预处理。骨架唯一匹配的调用名
+ * 改写回声明名；无法对应的调用整体忽略并注入文本提示，而不是抛错断流（实测
+ * 会把整条 SSE 以「stream disconnected」终结，用户丢失整轮回复）。全部调用被
+ * 忽略时把 stop_reason 降级为 stop，避免客户端收到没有任何工具调用的
+ * tool_calls 终态。toolIdentities 未提供（直通）时不做任何处理。
+ */
+async function* tolerateUndeclaredToolCalls(
+  events: AsyncIterable<BridgeStreamEvent>,
+  identities: ToolIdentityMap | undefined,
+): AsyncGenerator<BridgeStreamEvent> {
+  if (identities === undefined) {
+    yield* events;
+    return;
+  }
+  const suppressed = new Set<string>();
+  let passedToolCall = false;
+  for await (const event of events) {
+    if (event.type === "tool_call_start") {
+      if (identities.has(event.tool_call.name)) {
+        passedToolCall = true;
+        yield event;
+        continue;
+      }
+      const remapped = remapUndeclaredToolName(event.tool_call.name, identities);
+      if (remapped !== undefined) {
+        passedToolCall = true;
+        yield { ...event, tool_call: { ...event.tool_call, name: remapped } };
+        continue;
+      }
+      suppressed.add(event.tool_call.id);
+      yield { type: "content_delta", delta: { text: undeclaredToolNotice(event.tool_call.name) } };
+      continue;
+    }
+    if (event.type === "tool_call_delta" || event.type === "tool_call_end") {
+      if (suppressed.has(event.tool_call.id)) continue;
+    } else if (event.type === "message_end" && event.stop_reason === "tool_calls" && !passedToolCall) {
+      yield { ...event, stop_reason: "stop" };
+      continue;
+    }
+    yield event;
+  }
+}
+
 export interface ClientOutputOptions {
   /** 客户端展示的模型名（回填到响应）。 */
   model: string;
@@ -521,7 +601,7 @@ export async function createResponsesClientOutput(events: AsyncIterable<BridgeSt
   let incompleteReason: string | undefined;
 
   async function* frames(): AsyncGenerator<Json> {
-    const iterator = (options.transform ? options.transform(events) : events)[Symbol.asyncIterator]();
+    const iterator = tolerateUndeclaredToolCalls(options.transform ? options.transform(events) : events, options.toolIdentities)[Symbol.asyncIterator]();
     try {
       if (canceled) return;
       // 同协议上游的身份（response.created 的 id/created_at）随首个事件到达；先采纳
@@ -674,7 +754,7 @@ export async function createChatCompletionsClientOutput(events: AsyncIterable<Br
     try {
       if (canceled) return;
       yield { ...chunkBase(), choices: [{ index: 0, delta: { role: "assistant", content: "" }, finish_reason: null }] };
-      const source = options.transform ? options.transform(events) : events;
+      const source = tolerateUndeclaredToolCalls(options.transform ? options.transform(events) : events, options.toolIdentities);
       for await (const event of source) {
         if (canceled) return;
         switch (event.type) {
@@ -900,7 +980,7 @@ export async function createAnthropicClientOutput(events: AsyncIterable<BridgeSt
       if (canceled) return;
       yield `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id, type: "message", role: "assistant", model: options.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`;
       yield "event: ping\ndata: {\"type\": \"ping\"}\n\n";
-      const source = options.transform ? options.transform(events) : events;
+      const source = tolerateUndeclaredToolCalls(options.transform ? options.transform(events) : events, options.toolIdentities);
       for await (const event of source) {
         if (canceled) return;
         switch (event.type) {
@@ -1131,7 +1211,7 @@ export async function createGeminiClientOutput(events: AsyncIterable<BridgeStrea
   async function* frames(): AsyncGenerator<Frame> {
     try {
       if (canceled) return;
-      const source = options.transform ? options.transform(events) : events;
+      const source = tolerateUndeclaredToolCalls(options.transform ? options.transform(events) : events, options.toolIdentities);
       for await (const event of source) {
         if (canceled) return;
         switch (event.type) {
