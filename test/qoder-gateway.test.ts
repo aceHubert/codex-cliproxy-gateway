@@ -13,6 +13,7 @@ import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/t
 import type { QoderInferPayload } from "@agent-proxy/qoder/transport";
 import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 import { matchesPluginUpgrade, routingPluginFamily } from "./plugin-routing-fixture.ts";
 
@@ -117,7 +118,7 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
     await run({ directory, config, calls, fetched: () => fetches,
       create(overrides = {}, dependencies = {}) {
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
           { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined,
           { credentials: async () => credential(), cacheDirectory: directory, refreshCatalogOnStart: false,
             transport: {

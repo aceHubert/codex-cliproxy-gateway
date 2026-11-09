@@ -17,6 +17,7 @@ import { OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
 import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
 import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 
@@ -100,7 +101,7 @@ async function fixture(
           throw new Error(`未模拟的 zen 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
           { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined, undefined,
           {
             cacheDirectory: directory,

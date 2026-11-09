@@ -12,6 +12,7 @@ import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUD
 import { CodebuddyCredentialError } from "@agent-proxy/codebuddy/credentials";
 import type { CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
 
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
@@ -229,7 +230,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
           { ...config, ...options.config },
           "fake-cpa-key",
           "invalid",
-          new Set<string>(), new Set<string>(),
+          new ThreadRoutingState(), new Set<string>(),
           path.join(directory, "models-cache.json"),
           undefined,
           undefined,
@@ -440,7 +441,7 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
         officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
         catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
       },
-      "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+      "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
       path.join(directory, "models-cache.json"), undefined, undefined,
       {
         credentialCache: {
@@ -616,7 +617,7 @@ async function retryFixture(
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
       catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
     },
-    "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+    "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
     path.join(directory, "models-cache.json"), undefined, undefined,
     {
       authDirectory: authDir,

@@ -8,6 +8,7 @@ import { createConfiguredPluginRegistry, isInstalledPluginModel, type ModelCatal
 import { createPluginGatewayHandler } from "../apps/gateway/src/gateway.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -73,7 +74,7 @@ for (const upstreamOnly of [false, true]) {
     globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-native" }] })) as unknown as typeof fetch;
     const registry = createConfiguredPluginRegistry(config, dependencies, undefined, paths, "fake-key");
     const handler = createPluginGatewayHandler(config, registry, "fake-key", "invalid",
-      new Set(), new Set(), undefined, undefined, paths, isInstalledPluginModel);
+      new ThreadRoutingState(), new Set(), undefined, undefined, paths, isInstalledPluginModel);
     try {
       assert.deepEqual(registry.plugins.map((plugin) => plugin.id),
         ["zcode", "codebuddy", "qoder", "agy", "opencode-zen"]);
@@ -122,7 +123,7 @@ test("静态启动保留健康插件与默认目录，失败插件使用缓存�
   });
   const registry = new PluginRegistry([stub("healthy", true, true), stub("cached", true, false), stub("unavailable", false, false)]);
   const handler = createPluginGatewayHandler(config, registry, "fake-key", "invalid",
-    new Set(), new Set(), undefined, { file: paths.stdoutLog, maxBytes: 0 }, paths);
+    new ThreadRoutingState(), new Set(), undefined, { file: paths.stdoutLog, maxBytes: 0 }, paths);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => { throw new Error("静态目录请求不得访问外网"); }) as unknown as typeof fetch;
   try {

@@ -15,6 +15,7 @@ import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
 import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { createAgyCatalogStore } from "@agent-proxy/agy/catalog";
 
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
@@ -180,7 +181,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
           throw new Error(`未模拟的 agy 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
           { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined,
           {
             cacheDirectory: directory,

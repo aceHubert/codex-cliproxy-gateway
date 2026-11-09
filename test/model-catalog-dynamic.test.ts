@@ -13,6 +13,7 @@ import {
   invalidateModelsCache,
 } from "../apps/gateway/src/catalog.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 test("dynamic /models refreshes official catalog and merges only CLIProxy rows", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-response-"));
@@ -42,7 +43,7 @@ test("dynamic /models refreshes official catalog and merges only CLIProxy rows",
   }) as unknown as typeof fetch;
   try {
     const clientVersionFile = path.join(directory, "models-cache.json");
-    const handler = createGatewayHandler(config, "test-key", "invalid", new Set<string>(), new Set<string>(), clientVersionFile);
+    const handler = createGatewayHandler(config, "test-key", "invalid", new ThreadRoutingState(), new Set<string>(), clientVersionFile);
     const codex = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=1.2.3", {
       headers: {
         authorization: "Bearer oauth-token",
@@ -136,7 +137,7 @@ test("official refresh failure serves the last-good cached catalog and preserves
       officialBaseUrl: "https://official.example/codex",
       upstreamBaseUrl: "https://proxy.example/v1",
       catalogPath,
-    }, "test-key", "invalid", new Set<string>(), new Set<string>(), clientVersionFile);
+    }, "test-key", "invalid", new ThreadRoutingState(), new Set<string>(), clientVersionFile);
     const response = await handler(new Request("http://127.0.0.1:8320/v1/models?client_version=2.0.0"));
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { models: [

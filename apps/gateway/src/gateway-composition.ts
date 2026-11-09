@@ -19,6 +19,7 @@ import { readApiKey } from "./keychain.ts";
 import { managedCatalogFiles, resolvePaths } from "./paths.ts";
 import type { RealtimeProviderMode } from "./realtime.ts";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
+import { ThreadRoutingState } from "./thread-routing.ts";
 
 export { decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "./gateway.ts";
 
@@ -131,7 +132,7 @@ export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
   realtimeProviderMode: RealtimeProviderMode = "invalid",
-  cpaThreads = new Set<string>(),
+  threadRoutes = new ThreadRoutingState(),
   cpaTurns = new Set<string>(),
   clientVersionFile?: string,
   zcodeDependencies?: ZcodeDependencies,
@@ -146,7 +147,7 @@ export function createGatewayHandler(
     zcode: zcodeDependencies, codebuddy: codebuddyDependencies, qoder: qoderDependencies,
     agy: agyDependencies, opencodeZen: opencodeZenDependencies,
   }, processLog, runtimePaths, apiKey);
-  return createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, cpaThreads,
+  return createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, threadRoutes,
     cpaTurns, clientVersionFile, processLog, runtimePaths, isInstalledPluginModel);
 }
 

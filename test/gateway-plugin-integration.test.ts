@@ -9,6 +9,7 @@ import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -106,7 +107,7 @@ test("HTTP-only 插件握手本地 426，回落后仍由同一插件处理", TIM
     });
     assert.equal((await handler(upgrade)).status, 426);
     assert.equal(pluginCalls, 0); assert.equal(upstreamCalls, 0);
-    assert.equal(responsesWebSocketTarget(upgrade, config, "key", new Set(), new Set(), registry), null);
+    assert.equal(responsesWebSocketTarget(upgrade, config, "key", new ThreadRoutingState(), new Set(), registry), null);
     assert.equal((await handler(request("example/model"))).status, 200);
     assert.equal(pluginCalls, 1); assert.equal(upstreamCalls, 0);
     assert.equal(checkFrameRouting('{"type":"response.create","model":"example/model"}', "cliproxy", "cliproxy/",
@@ -127,7 +128,7 @@ test("静态目录使用插件就绪、刷新与纯磁盘重载，关闭幂等",
     close: () => { calls.push("close"); },
   })]);
   const handler = createPluginGatewayHandler({ ...config, upstreamOnly: true }, registry, "key", "invalid",
-    new Set(), new Set(), undefined, undefined, paths);
+    new ThreadRoutingState(), new Set(), undefined, undefined, paths);
   try {
     await Promise.all([handler.modelsReady(), handler.modelsReady()]);
     assert.deepEqual(calls, ["ready", "refresh"]);

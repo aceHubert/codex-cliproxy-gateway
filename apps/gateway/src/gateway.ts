@@ -38,6 +38,8 @@ import type { ProcessLogTarget } from "./types.ts";
 import type { GatewayConfig, ModelCatalog, ResolvedPaths } from "./types.ts";
 import { MOUNT_PATH, OFFICIAL_BASE_URL } from "./types.ts";
 import { configuredCatalogFile, configuredModelPrefix } from "./upstream-catalog.ts";
+import { ThreadRoutingError, ThreadRoutingState } from "./thread-routing.ts";
+import type { ThreadRouteKind } from "./thread-routing.ts";
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",
@@ -577,11 +579,6 @@ function requestThreadId(request: Request, header = "thread-id"): string | undef
   return threadId && threadId.length <= 128 ? threadId : undefined;
 }
 
-function rememberCpaThread(cpaThreads: Set<string>, threadId: string): void {
-  // ponytail: 仅保留进程内 thread UUID；实测内存成为问题时再加持久化清理策略。
-  cpaThreads.add(threadId);
-}
-
 /** turn 每条消息产生一个，比 thread 增长快，超限按插入序淘汰：图片请求距触发 turn 仅数秒。 */
 const MAX_REMEMBERED_CPA_TURNS = 4096;
 
@@ -612,29 +609,34 @@ function decideThreadRoute(
   request: Request,
   model: unknown,
   prefix: string,
-  cpaThreads: Set<string>,
+  threadRoutes: ThreadRoutingState,
   cpaTurns: Set<string>,
+  confirmModel = true,
 ): Route {
   const route = decideRoute(model, prefix);
-  const threadId = requestThreadId(request);
-  if (route.kind === "cliproxy") {
-    if (threadId) rememberCpaThread(cpaThreads, threadId);
+  const imageTurnId = requestThreadId(request, "x-codex-image-turn-id");
+  // 图片关联触发时的 turn，不随主线程之后的模型切换改变归属。
+  if (imageTurnId) {
+    return cpaTurns.has(imageTurnId)
+      ? { kind: "cliproxy", upstreamModel: route.kind === "cliproxy" ? route.upstreamModel : typeof model === "string" ? model : "" }
+      : route;
+  }
+  const pathname = new URL(request.url).pathname;
+  const responses = pathname === `${MOUNT_PATH}/responses` || pathname === `${MOUNT_PATH}/responses/compact`;
+  let prewarm = false;
+  try {
+    const metadata: unknown = JSON.parse(request.headers.get("x-codex-turn-metadata") ?? "{}");
+    prewarm = isRecord(metadata) && metadata.request_kind === "prewarm";
+  } catch { /* 缺失或损坏的元数据不改变正常模型路由。 */ }
+  const kind = threadRoutes.resolve(requestThreadId(request), requestThreadId(request, "x-codex-parent-thread-id"),
+    responses && typeof model === "string" && model ? route.kind : undefined,
+    responses && request.method !== "GET" && !prewarm && confirmModel) ?? route.kind;
+  if (kind === "cliproxy") {
     const turnId = turnIdFromMetadataHeader(request.headers.get("x-codex-turn-metadata"));
     if (turnId) rememberCpaTurn(cpaTurns, turnId);
-    return route;
+    return { kind, upstreamModel: route.kind === "cliproxy" ? route.upstreamModel : typeof model === "string" ? model : "" };
   }
-  const parentThreadId = requestThreadId(request, "x-codex-parent-thread-id");
-  // 图片请求（/v1/images/generations）不带 thread-id，只有 x-codex-image-turn-id——
-  // 它等于触发图片的那个 turn 的 turn_id，且先于图片请求到达本网关，可作同源粘性键。
-  const imageTurnId = requestThreadId(request, "x-codex-image-turn-id");
-  const inherited = (threadId && cpaThreads.has(threadId))
-    || (parentThreadId && cpaThreads.has(parentThreadId))
-    || (imageTurnId && cpaTurns.has(imageTurnId));
-  if (!inherited) {
-    return route;
-  }
-  if (threadId) rememberCpaThread(cpaThreads, threadId);
-  return { kind: "cliproxy", upstreamModel: typeof model === "string" ? model : "" };
+  return { kind, upstreamModel: route.upstreamModel };
 }
 
 function stripRoutingHintPrefix(value: string, prefix: string): string {
@@ -646,9 +648,9 @@ function copyRequestHeaders(request: Request, route: Route, apiKey: string, pref
   const headers = new Headers(request.headers);
   for (const name of HOP_BY_HOP_HEADERS) headers.delete(name);
   headers.delete("accept-encoding");
+  const routingHint = headers.get("x-codex-routing-hint");
+  if (routingHint) headers.set("x-codex-routing-hint", stripRoutingHintPrefix(routingHint, prefix));
   if (route.kind === "cliproxy") {
-    const routingHint = headers.get("x-codex-routing-hint");
-    if (routingHint) headers.set("x-codex-routing-hint", stripRoutingHintPrefix(routingHint, prefix));
     headers.delete("authorization");
     headers.delete("chatgpt-account-id");
     headers.delete("x-api-key");
@@ -714,7 +716,7 @@ export function responsesWebSocketTarget(
   request: Request,
   config: GatewayConfig,
   apiKey?: string,
-  cpaThreads = new Set<string>(),
+  threadRoutes = new ThreadRoutingState(),
   cpaTurns = new Set<string>(),
   registry = new PluginRegistry([]),
 ): { url: string; headers: Record<string, string>; routeKind: "cliproxy" | "official" } | null {
@@ -727,12 +729,14 @@ export function responsesWebSocketTarget(
   if (hintedModel && identifyClientEndpoint(new URL(request.url).pathname, mountPath) && registry.match(hintedModel)) return null;
   const route = config.upstreamOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
-    : decideThreadRoute(request, hintedModel, prefix, cpaThreads, cpaTurns);
+    : decideThreadRoute(request, hintedModel, prefix, threadRoutes, cpaTurns);
   // 不做任何网关侧门控：CPA WebSocket 升级一律桥接 CLIProxy，由上游按请求决定
   // 走 ws 还是 HTTP/SSE；上游不支持时握手失败，拨号失败路径回 426 令客户端降级。
   const baseUrl = route.kind === "cliproxy" ? config.upstreamBaseUrl : OFFICIAL_BASE_URL;
   const url = websocketUrl(new URL(joinUpstreamUrl(baseUrl, request.url, mountPath))).href;
   const headers = forwardedHeaders(request.headers, false);
+  // 重连可能沿用旧预热 hint，不能把错误上游命名空间送入当前已确定的认证域。
+  if (hintedModel && decideRoute(hintedModel, prefix).kind !== route.kind) delete headers["x-codex-routing-hint"];
   if (route.kind === "cliproxy") {
     const routingHint = headers["x-codex-routing-hint"];
     if (routingHint) headers["x-codex-routing-hint"] = stripRoutingHintPrefix(routingHint, prefix);
@@ -752,8 +756,8 @@ async function readBodyBytes(request: Request): Promise<ArrayBuffer | undefined>
 }
 
 /**
- * 解压并解析请求体。仅在确实需要 payload 时调用——拿得到 routing hint 且路由是 official 时，
- * 请求原样透传，没必要为了判路由而解压几十 KB，也就不会因解码失败误拒一个本可透传的请求。
+ * 解压并解析请求体，以实际模型覆盖可能过时的握手 hint。
+ * 官方 hint 的透明透传请求在调用处保留解码失败回退。
  */
 function decodeJsonBody(
   bytes: ArrayBuffer | undefined,
@@ -1005,7 +1009,7 @@ export function createPluginGatewayHandler(
   registry: PluginRegistry,
   apiKey = readApiKey(),
   realtimeProviderMode: RealtimeProviderMode = "invalid",
-  cpaThreads = new Set<string>(),
+  threadRoutes = new ThreadRoutingState(),
   cpaTurns = new Set<string>(),
   clientVersionFile?: string,
   processLog?: ProcessLogTarget,
@@ -1202,34 +1206,33 @@ export function createPluginGatewayHandler(
       }
     }
 
-    // routing hint 能直接定路由；只有拿不到 hint、或路由是 cliproxy（需改写 body）才解码。
+    // 实际模型优先于旧预热 hint，缺失模型时才回落到 hint。
     const hinted = modelFromRoutingHint(request);
-    let route = config.upstreamOnly === true || hinted === undefined
-      ? undefined
-      : decideThreadRoute(request, hinted, prefix, cpaThreads, cpaTurns);
+    let route: Route | undefined;
     let bytes: ArrayBuffer | undefined;
     let json: Record<string, unknown> | undefined;
     try {
       bytes = preparedBodies.get(request)?.bytes ?? await readBodyBytes(request);
-      if (route === undefined || route.kind === "cliproxy") {
+      try {
         json = preparedBodies.get(request)?.json ?? decodeJsonBody(bytes, request.headers);
-        route ??= config.upstreamOnly === true
-          ? {
-              kind: "cliproxy",
-              upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
-            }
-          : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+      } catch (error) {
+        // 保留已有官方 hint 透明透传能力；CPA 必须能解码以移除模型前缀。
+        if (config.upstreamOnly === true || hinted === undefined || decideRoute(hinted, prefix).kind !== "official") throw error;
+        route = decideThreadRoute(request, hinted, prefix, threadRoutes, cpaTurns, false);
+        if (route.kind !== "official") throw error;
       }
+      const model = typeof json?.model === "string" && json.model ? json.model : hinted;
       route ??= config.upstreamOnly === true
         ? {
             kind: "cliproxy",
-            upstreamModel: typeof json?.model === "string" ? json.model : hinted ?? "",
+            upstreamModel: model ?? "",
           }
-        : decideThreadRoute(request, json?.model, prefix, cpaThreads, cpaTurns);
+        : decideThreadRoute(request, model, prefix, threadRoutes, cpaTurns, json?.generate !== false);
     } catch (error) {
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
-        { status: 400 },
+        { status: error instanceof ThreadRoutingError ? 503 : 400,
+          headers: error instanceof ThreadRoutingError ? { "retry-after": "1" } : undefined },
       );
     }
     // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
@@ -1246,8 +1249,15 @@ export function createPluginGatewayHandler(
     let upstreamUrl = joinUpstreamUrl(upstreamBase, request.url, mountPath);
     upstreams.set(request, upstreamUrl);
     const headers = copyRequestHeaders(request, route, apiKey, prefix);
+    if (hinted && typeof json?.model === "string" && json.model !== hinted) headers.delete("x-codex-routing-hint");
 
     let body: ArrayBuffer | string | undefined = bytes;
+    if (route.kind === "official" && json && typeof json.model === "string" && json.model.startsWith(prefix)) {
+      json.model = json.model.slice(prefix.length);
+      body = JSON.stringify(json);
+      headers.delete("content-encoding");
+      headers.set("content-type", "application/json");
+    }
     if (route.kind === "cliproxy" && json && typeof json === "object") {
       json.model = route.upstreamModel;
       if (!isGptModel(route.upstreamModel) && !hasCompactionTrigger(json.input)) {
@@ -1438,7 +1448,8 @@ async function bridgeUpstreamWebSocket(
     headers: Record<string, string>;
     routeKind?: "cliproxy" | "official";
     prefix?: string;
-    pinCpaThread?: () => void;
+    resolveFrameRoute?: (model: string, confirmed: boolean, parentThreadId?: string) => ThreadRouteKind;
+    routeIsCurrent?: () => boolean;
     noteTurnId?: (turnId: string) => void;
     handleResponseFrame?: (frame: string) => Promise<ResponseFrameAction | null>;
     pluginModelFamily?: (model: string) => string | undefined;
@@ -1464,7 +1475,7 @@ async function bridgeUpstreamWebSocket(
     releaseLog,
     routeKind: target.routeKind,
     prefix: target.prefix,
-    pinCpaThread: target.pinCpaThread,
+    resolveFrameRoute: target.resolveFrameRoute,
     noteTurnId: target.noteTurnId,
     handleResponseFrame: target.handleResponseFrame,
     pluginModelFamily: target.pluginModelFamily,
@@ -1495,6 +1506,11 @@ async function bridgeUpstreamWebSocket(
     url: target.url,
     detail: { durationMs: Date.now() - startedAt, headers: maskedHeaders(target.headers) },
   });
+  if (target.routeIsCurrent && !target.routeIsCurrent()) {
+    upstream.close(1000, "Model routing changed during handshake");
+    releaseLog?.();
+    return Response.json({ error: { message: "会话路由已切换，请重新建立连接。" } }, { status: 503, headers: { "retry-after": "1" } });
+  }
   if (server.upgrade(request, { data: { ...socket, upstream } })) return undefined;
   upstream.close(1000, "Client upgrade failed");
   releaseLog?.();
@@ -1513,10 +1529,10 @@ export function startPluginGateway(
     throw new Error("The gateway server must run with Bun");
   }
   const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
-  const cpaThreads = new Set<string>();
+  const threadRoutes = new ThreadRoutingState();
   const cpaTurns = new Set<string>();
   const paths = resolvePaths();
-  const handler = createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, cpaThreads, cpaTurns, clientVersionFile, processLog, paths, ownsLocalModel);
+  const handler = createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, threadRoutes, cpaTurns, clientVersionFile, processLog, paths, ownsLocalModel);
   const ready = handler.modelsReady();
   // 服务启动保留一次 agent 刷新，健康探测也等待静态目录发布完毕。
   void ready.catch(() => {
@@ -1586,9 +1602,19 @@ export function startPluginGateway(
           });
         }
         // Responses over WebSocket：按 hint + thread 粘性选上游；拨号失败回 426 降级 HTTPS/SSE。
-        const wsTarget = responsesWebSocketTarget(request, config, apiKey, cpaThreads, cpaTurns, registry);
+        let wsTarget: ReturnType<typeof responsesWebSocketTarget>;
+        try {
+          wsTarget = responsesWebSocketTarget(request, config, apiKey, threadRoutes, cpaTurns, registry);
+        } catch (error) {
+          if (!(error instanceof ThreadRoutingError)) throw error;
+          logGatewayError(processLog, { requestTime: localTime(), method: request.method,
+            url: incoming.pathname, status: 503, message: error.message });
+          return Response.json({ error: { message: error.message } }, { status: 503, headers: { "retry-after": "1" } });
+        }
         if (wsTarget) {
           const threadId = requestThreadId(request);
+          const handshakeParent = requestThreadId(request, "x-codex-parent-thread-id");
+          const routeThreadId = threadId ?? handshakeParent;
           return bridgeUpstreamWebSocket(
             request,
             server,
@@ -1596,12 +1622,16 @@ export function startPluginGateway(
               ...wsTarget,
               pluginModelFamily: (model) => registry.match(model)?.plugin.id ?? (ownsLocalModel(model) ? "plugin" : undefined),
               prefix: config.upstreamOnly === true ? "" : configuredModelPrefix(config),
-              pinCpaThread: threadId ? () => rememberCpaThread(cpaThreads, threadId) : undefined,
+              resolveFrameRoute: config.upstreamOnly === true ? undefined : (model, confirmed, parentThreadId) =>
+                threadRoutes.resolve(threadId, parentThreadId ?? handshakeParent, decideRoute(model, configuredModelPrefix(config)).kind, confirmed)
+                  ?? decideRoute(model, configuredModelPrefix(config)).kind,
+              routeIsCurrent: config.upstreamOnly === true || !routeThreadId ? undefined
+                : () => (threadRoutes.get(routeThreadId) ?? "official") === wsTarget.routeKind,
               handleResponseFrame: wsTarget.routeKind === "cliproxy"
                 ? (frame) => handleResponsesWebSocketFrame(frame, wsTarget)
                 : undefined,
               // official 连接不记 turn：官方会话的图片请求本就该走官方；若该连接后续
-              // 迁移到 cliproxy（pinCpaThread 重连），turn 帧会在新连接上重新发送并被记录。
+              // 迁移到 cliproxy 后，turn 帧会在新连接上重新发送并被记录。
               noteTurnId: wsTarget.routeKind === "cliproxy"
                 ? (turnId) => rememberCpaTurn(cpaTurns, turnId)
                 : undefined,

@@ -14,6 +14,7 @@ import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts
 import type { ZcodeProviderSnapshot, ZcodeFamily, ZcodeSelection } from "@agent-proxy/zcode/config";
 import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 const API_KEY_ID = "testkeyid7f3a";
 const API_KEY_SECRET = "test-secret-4d51";
@@ -250,7 +251,7 @@ async function withGateway(
   const handshakes: { body: Record<string, unknown>; authorization: string }[] = [];
   const modelCalls: Headers[] = [];
   const currentCache = { get: async () => snapshot(), close: () => {} };
-  const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+  const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
     path.join(directory, "models-cache.json"), {
       planCaches: { "api-key": currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>>,
       identity: IDENTITY,

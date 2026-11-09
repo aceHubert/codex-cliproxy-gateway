@@ -19,6 +19,7 @@ import {
 import { readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 import { routingPluginFamily } from "./plugin-routing-fixture.ts";
+import { ThreadRoutingError, ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 function config(officialBaseUrl: string): GatewayConfig {
   return {
@@ -449,8 +450,8 @@ test("frame routing guards against Codex reusing one socket across upstreams", (
   );
   assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"gpt-5.6-luna"}', "cliproxy", "cliproxy/", routingPluginFamily),
-    { kind: "forward", frame: '{"type":"response.create","model":"gpt-5.6-luna"}' },
-    "an unprefixed title model stays on the established CPA route",
+    { kind: "reconnect" },
+    "an independent root choosing an official model leaves the CPA connection",
   );
 
   // 前缀是网关加的，CLIProxy 模型表里没有，必须与 HTTP 路径一样剥掉。
@@ -516,8 +517,8 @@ test("HTTP-only model families are refused locally on every bridged socket", () 
   );
   assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}', "cliproxy", "cliproxy/", routingPluginFamily),
-    { kind: "forward", frame: '{"type":"response.create","model":"OPENCODE-ZEN/exo-free"}' },
-    "插件模式区分大小写，大写模型不属于已注册命名空间",
+    { kind: "reconnect" },
+    "插件模式区分大小写，大写裸模型按独立根的官方路由处理",
   );
   assert.deepEqual(
     checkFrameRouting('{"type":"response.create","model":"codebuddy/deepseek-v4.1-flash"}', "official", "cliproxy/", routingPluginFamily),
@@ -646,6 +647,7 @@ test("bridged cliproxy sockets record turn ids for image request routing", () =>
       queuedBytes: 0,
       routeKind: "cliproxy" as const,
       prefix: "cliproxy/",
+      resolveFrameRoute: () => "cliproxy" as const,
       noteTurnId: (turnId: string) => noted.push(turnId),
     },
   } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
@@ -663,7 +665,7 @@ test("bridged cliproxy sockets record turn ids for image request routing", () =>
     model: "gpt-5.6-luna",
     client_metadata: { turn_id: "turn-official-thread" },
   }));
-  // 已建立 CPA 路由的连接上，无前缀帧也属于该 thread，turn 一并记录。
+  // 继承 CPA 的子线程裸模型帧仍走 CPA，turn 一并记录。
   assert.deepEqual(noted, ["turn-image", "turn-official-thread"]);
 
   realtimeWebSocketHandler.message?.(socket, JSON.stringify({ type: "response.cancel" }));
@@ -753,7 +755,7 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
       queuedBytes: 0,
       routeKind: "official",
       prefix: "cliproxy/",
-      pinCpaThread() { pinned += 1; },
+      resolveFrameRoute() { pinned += 1; return "cliproxy"; },
     },
     close(code: number, reason: string) { downstreamClosed.push({ code, reason }); },
   } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
@@ -769,7 +771,7 @@ test("route mismatch closes downstream 1012 without sending the frame upstream",
   assert.deepEqual(upstreamClosed, { code: 1000, reason: "Model routing changed" });
 });
 
-test("CPA route keeps an unprefixed Luna title frame on the CPA upstream", () => {
+test("CPA 子线程的裸模型帧继续跟随父会话上游", () => {
   const sent: unknown[] = [];
   const upstream = {
     readyState: WebSocket.OPEN,
@@ -785,6 +787,7 @@ test("CPA route keeps an unprefixed Luna title frame on the CPA upstream", () =>
       queuedBytes: 0,
       routeKind: "cliproxy",
       prefix: "cliproxy/",
+      resolveFrameRoute() { return "cliproxy"; },
     },
     close() { throw new Error("CPA title frame must not close the downstream"); },
   } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
@@ -793,6 +796,183 @@ test("CPA route keeps an unprefixed Luna title frame on the CPA upstream", () =>
   realtimeWebSocketHandler.message?.(socket, frame);
 
   assert.deepEqual(sent, [frame]);
+});
+
+test("根会话反向切换只关闭一次，不向旧上游发送任何冲突帧", () => {
+  const state = new ThreadRoutingState(["root"]);
+  const sent: unknown[] = [];
+  const downstreamClosed: number[] = [];
+  const upstreamClosed: number[] = [];
+  const socket = {
+    data: {
+      url: "wss://proxy.invalid/v1/responses", headers: {}, queue: [], queuedBytes: 0,
+      routeKind: "cliproxy", prefix: "cliproxy/",
+      upstream: { readyState: WebSocket.OPEN, send: (frame: unknown) => sent.push(frame),
+        close: (code: number) => upstreamClosed.push(code) },
+      resolveFrameRoute(model: string, confirmed: boolean) {
+        return state.resolve("root", undefined, model.startsWith("cliproxy/") ? "cliproxy" : "official", confirmed)!;
+      },
+    },
+    close: (code: number) => downstreamClosed.push(code),
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
+  const frame = JSON.stringify({ type: "response.create", model: "gpt-official" });
+  realtimeWebSocketHandler.message?.(socket, frame);
+  realtimeWebSocketHandler.message?.(socket, frame);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(downstreamClosed, [1012]);
+  assert.deepEqual(upstreamClosed, [1000]);
+  assert.equal(state.get("root"), "official");
+});
+
+test("动态子线程在父路由变化后重连，预热帧与控制帧不修改根选择", () => {
+  const state = new ThreadRoutingState(["root"]);
+  state.resolve("child", "root", "official", false);
+  const resolve = (model: string, confirmed: boolean) => state.resolve(
+    "child", undefined, model.startsWith("cliproxy/") ? "cliproxy" : "official", confirmed,
+  )!;
+  const frame = '{"type":"response.create","model":"gpt-helper"}';
+  assert.deepEqual(checkFrameRouting(frame, "cliproxy", "cliproxy/", routingPluginFamily, resolve), { kind: "forward", frame });
+  assert.equal(state.get("root"), "cliproxy");
+  state.resolve("root", undefined, "official", true);
+  assert.deepEqual(checkFrameRouting(frame, "cliproxy", "cliproxy/", routingPluginFamily, resolve), { kind: "reconnect" });
+  state.resolve("root", undefined, "cliproxy", true);
+  assert.deepEqual(checkFrameRouting(frame, "official", "cliproxy/", routingPluginFamily, resolve), { kind: "reconnect" });
+
+  const rootResolve = (model: string, confirmed: boolean) => state.resolve(
+    "root", undefined, model.startsWith("cliproxy/") ? "cliproxy" : "official", confirmed,
+  )!;
+  const prewarm = '{"type":"response.create","model":"gpt-old-default","generate":false}';
+  assert.deepEqual(checkFrameRouting(prewarm, "cliproxy", "cliproxy/", routingPluginFamily, rootResolve),
+    { kind: "forward", frame: prewarm });
+  const control = '{"type":"response.cancel","model":"gpt-old-default"}';
+  assert.deepEqual(checkFrameRouting(control, "cliproxy", "cliproxy/", routingPluginFamily,
+    () => { throw new Error("控制帧不得重新选路"); }), { kind: "forward", frame: control });
+  assert.equal(state.get("root"), "cliproxy");
+});
+
+test("父路由暂不可用时 WS 不转发请求并要求客户端重试", () => {
+  const sent: unknown[] = [];
+  const closed: number[] = [];
+  const socket = {
+    data: {
+      url: "wss://proxy.invalid/v1/responses", headers: {}, queue: [], queuedBytes: 0,
+      routeKind: "cliproxy", prefix: "cliproxy/",
+      upstream: { readyState: WebSocket.OPEN, send: (frame: unknown) => sent.push(frame), close() {} },
+      resolveFrameRoute() { throw new ThreadRoutingError("父路由尚未就绪"); },
+    },
+    close: (code: number) => closed.push(code),
+  } as unknown as Bun.ServerWebSocket<import("../apps/gateway/src/realtime.ts").RealtimeSocketData>;
+  realtimeWebSocketHandler.message?.(socket, '{"type":"response.create","model":"gpt-helper"}');
+  assert.deepEqual(sent, []);
+  assert.deepEqual(closed, [1012]);
+});
+
+test("真实 WS 桥双向重连并让已有子线程跟随根路由，旧握手 hint 不覆盖新选择", { timeout: 15_000 }, async () => {
+  const OriginalWebSocket = globalThis.WebSocket;
+  const connections: Array<{ kind: string; headers: Headers }> = [];
+  const received: Array<{ kind: string; model: string }> = [];
+  const upstream = (kind: string) => Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request, server) {
+      connections.push({ kind, headers: request.headers });
+      if (server.upgrade(request)) return;
+      return new Response("upgrade failed", { status: 400 });
+    },
+    websocket: { message(ws, message) {
+      const frame = String(message);
+      received.push({ kind, model: (JSON.parse(frame) as { model: string }).model });
+      ws.send(frame);
+    } },
+  });
+  const official = upstream("official");
+  const cpa = upstream("cliproxy");
+  // 将生产固定官方地址映射到本地替身，测试不发起任何真实官方请求。
+  globalThis.WebSocket = new Proxy(OriginalWebSocket, {
+    construct(target, argumentsList) {
+      const address = new URL(String(argumentsList[0]));
+      if (address.hostname === "chatgpt.com") {
+        address.protocol = "ws:";
+        address.host = new URL(official.url).host;
+      } else if (address.hostname !== "127.0.0.1") {
+        throw new Error("集成测试只允许本地 WebSocket");
+      }
+      return Reflect.construct(target, [address.href, ...argumentsList.slice(1)]);
+    },
+  });
+  const gateway = startGateway({ ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${cpa.url}v1` }, "builtin");
+  const address = new URL("/v1/responses", gateway.url);
+  address.protocol = "ws:";
+  const Client = OriginalWebSocket as unknown as new (url: URL, options: Bun.WebSocketOptions) => WebSocket;
+  const clients: WebSocket[] = [];
+  const connect = async (thread: string | undefined, model: string | undefined, parent?: string) => {
+    const headers: Record<string, string> = { authorization: "Bearer official-oauth", "chatgpt-account-id": "test-account" };
+    if (thread) headers["thread-id"] = thread;
+    if (model) headers["x-codex-routing-hint"] = `model=${model}`;
+    if (parent) headers["x-codex-parent-thread-id"] = parent;
+    const client = new Client(address, { headers });
+    clients.push(client);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("本地客户端握手超时")), 2_000);
+      client.onopen = () => { clearTimeout(timer); resolve(); };
+      client.onerror = () => { clearTimeout(timer); reject(new Error("本地客户端握手失败")); };
+    });
+    return client;
+  };
+  const exchange = (client: WebSocket, model: string, closed: boolean) => new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("本地客户端响应超时")), 2_000);
+    const finish = (error?: Error) => { clearTimeout(timer); if (error) reject(error); else resolve(); };
+    client.onmessage = () => finish(closed ? new Error("冲突帧被旧上游接收") : undefined);
+    client.onclose = (event) => finish(closed && event.code === 1012 ? undefined : new Error(`意外关闭 ${event.code}`));
+    client.onerror = () => finish(new Error("本地客户端通信失败"));
+    client.send(JSON.stringify({ type: "response.create", model, input: [] }));
+  });
+  try {
+    const unknownRoot = await connect("new-root-without-hint", undefined);
+    assert.equal(connections.at(-1)?.kind, "official");
+    unknownRoot.close();
+    let root = await connect("root-local", "cliproxy/model");
+    let child = await connect("child-local", "gpt-helper", "root-local");
+    const anonymousChild = await connect(undefined, "gpt-helper", "root-local");
+    await exchange(child, "gpt-helper", false);
+    await exchange(root, "gpt-official", true);
+    assert.equal(received.some((frame) => frame.kind === "cliproxy" && frame.model === "gpt-official"), false);
+    root = await connect("root-local", "cliproxy/old-default");
+    assert.equal(connections.at(-1)?.kind, "official");
+    assert.equal(connections.at(-1)?.headers.get("authorization"), "Bearer official-oauth");
+    assert.equal(connections.at(-1)?.headers.get("chatgpt-account-id"), "test-account");
+    await exchange(root, "gpt-official", false);
+    await exchange(anonymousChild, "gpt-helper", true);
+    const noHint = await connect("root-local", undefined);
+    assert.equal(connections.at(-1)?.kind, "official");
+    noHint.close();
+    await exchange(child, "gpt-helper", true);
+    child = await connect("child-local", "gpt-helper");
+    assert.equal(connections.at(-1)?.kind, "official");
+    await exchange(child, "gpt-helper", false);
+
+    await exchange(root, "cliproxy/next-model", true);
+    root = await connect("root-local", "gpt-old-official");
+    assert.equal(connections.at(-1)?.kind, "cliproxy");
+    assert.notEqual(connections.at(-1)?.headers.get("authorization"), "Bearer official-oauth");
+    assert.equal(connections.at(-1)?.headers.get("chatgpt-account-id"), null);
+    await exchange(root, "cliproxy/next-model", false);
+    await exchange(child, "gpt-helper", true);
+    child = await connect("child-local", "gpt-helper");
+    await exchange(child, "gpt-helper", false);
+    assert.deepEqual(received, [
+      { kind: "cliproxy", model: "gpt-helper" },
+      { kind: "official", model: "gpt-official" },
+      { kind: "official", model: "gpt-helper" },
+      { kind: "cliproxy", model: "next-model" },
+      { kind: "cliproxy", model: "gpt-helper" },
+    ]);
+  } finally {
+    for (const client of clients) client.close();
+    gateway.stop(true);
+    official.stop(true);
+    cpa.stop(true);
+    globalThis.WebSocket = OriginalWebSocket;
+  }
 });
 
 // 升级转发的前提：拨号上游是异步的，必须确认 Bun 允许在 fetch 内 await 之后再
