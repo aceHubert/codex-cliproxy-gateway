@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.22.0 (2026-11-09)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `models`, `opencode-zen`, `plugin-api`, `qoder`, `zcode`
+  * [#36](https://github.com/aceHubert/codex-cliproxy-gateway/pull/36) feat(gateway): 实现会话线程树的双向上游切换 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.21.0 (2026-11-06)
 
 #### :rocket: New Feature
