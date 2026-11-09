@@ -345,3 +345,72 @@ test("agy anthropic 请求回挂：签名 thinking 块的 agn1 信封挂回 func
   // 签名 thinking 块的私有思考文本不回放。
   assert.ok(!flatParts.some((part) => typeof part.text === "string" && part.text.includes("模型私有思考")));
 });
+
+const toleranceClients = [
+  {
+    protocol: "responses",
+    tool: /"type":"function_call"/,
+    stopped: /"status":"completed"/,
+    usingTool: /"status":"completed"/,
+    streamEnd: /^event: response.completed\n/,
+  },
+  {
+    protocol: "chat-completions",
+    tool: /"tool_calls":\[/,
+    stopped: /"finish_reason":"stop"/,
+    usingTool: /"finish_reason":"tool_calls"/,
+    streamEnd: /^data: \[DONE\]$/,
+  },
+  {
+    protocol: "anthropic",
+    tool: /"type":"tool_use"/,
+    stopped: /"stop_reason":"end_turn"/,
+    usingTool: /"stop_reason":"tool_use"/,
+    streamEnd: /^event: message_stop\n/,
+  },
+  {
+    protocol: "gemini",
+    tool: /"functionCall":\{/,
+    stopped: /"finishReason":"STOP"/,
+    usingTool: /"finishReason":"STOP"/,
+    streamEnd: /"finishReason":"STOP"/,
+  },
+] as const;
+
+for (const client of toleranceClients) {
+  for (const stream of [true, false]) {
+    test(`agy ${client.protocol} ${stream ? "流式" : "非流式"} 输出保留合法工具并正常结束`, TIMEOUT, async () => {
+      const tools = new Map([["lookup_site__00112233", { name: "lookup_site", custom: false }]]);
+      for (const withKnownCall of [false, true]) {
+        const calls = [
+          { functionCall: { name: "unknown_tool", args: { value: "忽略参数" } } },
+          ...(withKnownCall ? [{ functionCall: { name: "lookup.site__aabbccdd", args: { query: "北京" } } }] : []),
+        ];
+        const response = await createAgyClientResponse(client.protocol, sse([
+          ...(withKnownCall ? [textFrame("前文")] : []),
+          { response: { candidates: [{ content: { parts: calls } }] } },
+          textFrame(withKnownCall ? "后文" : "", "STOP"),
+        ]), { model: "agy/gemini-3.8-flash", tools, stream });
+        assert.equal(response.status, 200);
+        const wire = await response.text();
+        assert.match(wire, /未声明工具/);
+        assert.doesNotMatch(wire, /unknown_tool|忽略参数|lookup\.site__aabbccdd/);
+        const terminal = stream ? wire.trim().split("\n\n").at(-1)! : wire;
+        if (stream) assert.match(terminal, client.streamEnd);
+        // Chat 的 [DONE] 和 Anthropic 的 message_stop 紧接在停止原因事件之后。
+        const finish = stream && (client.protocol === "chat-completions" || client.protocol === "anthropic")
+          ? wire.trim().split("\n\n").at(-2)! : terminal;
+        if (withKnownCall) {
+          assert.match(wire, client.tool);
+          assert.match(wire, /"name":"lookup_site"/);
+          assert.match(wire, /北京/);
+          assert.match(wire, /前文[\s\S]*未声明工具[\s\S]*后文/);
+          assert.match(finish, client.usingTool);
+        } else {
+          assert.doesNotMatch(wire, client.tool);
+          assert.match(finish, client.stopped);
+        }
+      }
+    });
+  }
+}

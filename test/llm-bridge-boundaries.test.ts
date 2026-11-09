@@ -2,10 +2,11 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
+import ts from "typescript";
 
 /**
- * 边界静态检查：AGY 的请求/响应转换在自身包内独立封装，不得依赖或调用
- * @agent-proxy/llm-bridge；四类标准桥接 agent 的请求一律走公共 convertRequest；
+ * 边界静态检查：AGY 独立转换请求与响应，仅复用桥接的工具名匹配函数；
+ * 四类标准桥接 agent 的请求一律走公共 convertRequest；
  * 已停更的 npm llm-bridge 不再进入任何依赖；只有 llm-bridge 包允许依赖
  * @ai-sdk/*（协议引擎）。
  */
@@ -19,11 +20,23 @@ function* walk(directory: string): Generator<string> {
   }
 }
 
-test("AGY 包不依赖、不调用 llm-bridge", () => {
+test("AGY 仅在响应层复用桥接工具名匹配，协议转换保持独立", () => {
+  const bridge = "@agent-proxy/llm-bridge";
   for (const file of walk("packages/agy/src")) {
-    const text = readFileSync(file, "utf8");
-    assert.ok(!text.includes("llm-bridge"), `${file} 引用了 llm-bridge`);
-    assert.ok(!text.includes("convertRequest"), `${file} 引用了桥接 convertRequest`);
+    const code = readFileSync(file, "utf8");
+    const imports = ts.preProcessFile(code, true, true).importedFiles
+      .filter(({ fileName }) => fileName === bridge || fileName.startsWith(`${bridge}/`));
+    if (!imports.length) continue;
+    assert.equal(file, join("packages", "agy", "src", "response.ts"));
+    assert.deepEqual(imports.map(({ fileName }) => fileName), [bridge]);
+    const source = ts.createSourceFile(file, code, ts.ScriptTarget.Latest);
+    const declaration = source.statements.find(statement => ts.isImportDeclaration(statement)
+      && ts.isStringLiteral(statement.moduleSpecifier) && statement.moduleSpecifier.text === bridge);
+    assert.ok(declaration && ts.isImportDeclaration(declaration), "仅允许静态导入匹配函数");
+    const clause = declaration.importClause;
+    assert.ok(clause && !clause.name && clause.namedBindings && ts.isNamedImports(clause.namedBindings));
+    assert.deepEqual(clause.namedBindings.elements.map(element => (element.propertyName ?? element.name).text),
+      ["remapUndeclaredToolName"]);
   }
 });
 

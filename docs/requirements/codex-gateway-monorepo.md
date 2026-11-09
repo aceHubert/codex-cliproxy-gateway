@@ -6,6 +6,10 @@
 后续变更（2026-10-14）：桥接底座与插件调用形态已由 [llm-bridge-aisdk-rebase 计划](../exec-plans/completed/llm-bridge-aisdk-rebase.md) 变更——npm `llm-bridge@2.0.1` 底座替换为 `@ai-sdk/*` 引擎离线捕获，四类标准桥接插件统一调用异步 `convertRequest(from, to, body)`，协议面扩展 ClientProtocol 四值（含 gemini 客户端入口）。本需求文中涉及外部 llm-bridge 封装、「不得直接依赖外部 llm-bridge」等表述均按需求时点（2026-10-10）理解，现行状态以该计划为准；其余目录、插件契约与装配边界未变。
 实施基线：`main` 的 `a20587d9da3e375219dca7199c892ddb639d4d64`（v0.10.0）。
 
+后续变更（2026-11-09）：下文零桥接依赖为迁移时的约束。AGY 仍独立完成
+CloudCodeAssist 请求、响应转换和四种客户端输出；响应层复用
+`@agent-proxy/llm-bridge` 的公开函数 `remapUndeclaredToolName`，仅用于未声明工具名的唯一匹配。
+
 ## 1. 目标与已确认要求
 
 2026-10-11 实施澄清：本轮结构迁移保留 main 的现有协议转换实现，以 Responses endpoint 到各 agent 的行为一致、打包后可由 Codex 正常调用为验收目标；不新增或重写转换算法。下文统一 `convertRequest` 与转换兼容要求由独立转换计划后续交付，不作为迁包前置条件。现有 CodeBuddy/Qoder 转换复用和外部 llm-bridge 调用可通过显式包依赖保持原行为。

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { translateAgyRequest } from "@agent-proxy/agy/request";
 import { createAgyResponse } from "@agent-proxy/agy/response";
 import test from "./host-test.ts";
 
 const TIMEOUT = { timeout: 30_000 };
+type Json = Record<string, unknown>;
 const TOOLS = new Map([
   ["shell", { name: "shell", custom: false }],
   ["apply_patch", { name: "apply_patch", custom: true }],
@@ -164,4 +166,154 @@ test("agy 响应：函数调用的 thoughtSignature 以 agn1 信封随 reasoning
   assert.ok(sigIndex >= 0, "必须下发携带签名的 reasoning 项");
   assert.ok(callIndex === sigIndex + 1, "签名 reasoning 项必须紧邻其函数调用");
   assert.equal(items[sigIndex]!.encrypted_content, `agn1:${signature}`);
+});
+
+test("agy Responses 保留有效内容，唯一映射的工具保留命名空间与签名并可回放", TIMEOUT, async () => {
+  const declarations = [
+    { type: "function", name: "shell", parameters: { type: "object" } },
+    { type: "namespace", name: "workspace", tools: [{ type: "custom", name: "apply_patch" }] },
+  ];
+  const model = "agy/gemini-3.8-flash";
+  const { tools } = translateAgyRequest({ model, input: "开始", tools: declarations }, "gemini-3.8-flash");
+  const customKey = [...tools.keys()].find((key) => key !== "shell")!;
+  const variant = "tool.workspace.apply.patch__ffeeddcc";
+  const frames = [
+    textFrame("已有内容"),
+    { response: { candidates: [{ content: { parts: [
+      { thoughtSignature: "discarded-detached" },
+      { functionCall: { name: "unknown", args: { secret: "discarded-args" } } },
+      { functionCall: { name: "shell", args: { command: "pwd" } } },
+      { functionCall: { name: "other_unknown", args: {} }, thoughtSignature: "discarded-attached" },
+    ] } }] } },
+    { response: { candidates: [{ content: { parts: [{ thoughtSignature: "keep-detached" }] } }] } },
+    { response: { candidates: [{ content: { parts: [
+      { functionCall: { name: variant, args: { input: "*** patch ***" } } },
+      { functionCall: { name: "shell", args: { command: "ls" } }, thoughtSignature: "keep-attached" },
+      { text: "后续内容" },
+    ] }, finishReason: "STOP" }] } },
+  ];
+  for (const stream of [true, false]) {
+    const response = await createAgyResponse(sse(frames), { model, tools, stream });
+    assert.equal(response.status, 200);
+    const parsed = stream ? await events(response) : undefined;
+    if (parsed) assert.equal(parsed.at(-1)!.type, "response.completed");
+    const final = parsed ? finalResponse(parsed) : await response.json() as Json;
+    assert.equal(final.status, "completed");
+    assert.doesNotMatch(JSON.stringify(parsed ?? final), /discarded-/);
+    const output = final.output as Json[];
+    assert.deepEqual(output.map((item) => item.type), ["message", "function_call", "reasoning", "custom_tool_call", "reasoning", "function_call"]);
+    assert.match(String((output[0]!.content as Json[])[0]!.text), /已有内容[\s\S]*未声明工具[\s\S]*后续内容/);
+    assert.equal(output[1]!.name, "shell");
+    assert.equal(output[2]!.encrypted_content, "agn1:keep-detached");
+    assert.equal(output[3]!.name, "apply_patch");
+    assert.equal(output[3]!.namespace, "workspace");
+    assert.equal(output[3]!.input, "*** patch ***");
+    assert.equal(output[4]!.encrypted_content, "agn1:keep-attached");
+    assert.equal(output[5]!.name, "shell");
+    if (parsed) {
+      for (const type of ["response.output_item.added", "response.output_item.done"]) {
+        const items: [unknown, unknown][] = parsed.filter((event) => event.type === type)
+          .map((event) => [event.output_index, (event.item as Json).id]);
+        assert.deepEqual(items, output.map((item, index) => [index, item.id]));
+      }
+    }
+
+    const { wrapper } = translateAgyRequest({
+      model, tools: declarations, input: [
+        { role: "user", content: "开始" },
+        ...output,
+        ...[output[1]!, output[3]!, output[5]!].map((item) => ({
+          type: item.type === "custom_tool_call" ? "custom_tool_call_output" : "function_call_output",
+          call_id: item.call_id, output: "完成",
+        })),
+      ],
+    }, "gemini-3.8-flash");
+    const contents = (wrapper.request as Json).contents as Json[];
+    const calls = contents.flatMap((content) => content.parts as Json[]).filter((part) => part.functionCall);
+    assert.deepEqual(calls, [
+      { functionCall: { name: "shell", args: { command: "pwd" } } },
+      { functionCall: { name: customKey, args: { input: "*** patch ***" } }, thoughtSignature: "keep-detached" },
+      { functionCall: { name: "shell", args: { command: "ls" } }, thoughtSignature: "keep-attached" },
+    ]);
+  }
+});
+
+test("agy Responses 歧义工具被忽略，精确匹配优先于骨架匹配", TIMEOUT, async () => {
+  const tools = new Map([
+    ["lookup_site__00112233", { name: "lookup_a", custom: false }],
+    ["lookup_site__44556677", { name: "lookup_b", custom: false }],
+  ]);
+  const response = await createAgyResponse(sse([
+    { response: { candidates: [{ content: { parts: [
+      { functionCall: { name: "lookup.site__deadbeef", args: {} } },
+      { functionCall: { name: "lookup_site__44556677", args: {} } },
+    ] }, finishReason: "STOP" }] } },
+  ]), { model: "agy/gemini-3.8-flash", tools, stream: false });
+  assert.equal(response.status, 200);
+  const final = await response.json() as Json;
+  const output = final.output as Json[];
+  assert.deepEqual(output.map((item) => item.type), ["message", "function_call"]);
+  assert.match(String((output[0]!.content as Json[])[0]!.text), /未声明工具/);
+  assert.equal(output[1]!.name, "lookup_b");
+});
+
+test("agy Responses 的未声明工具容错不吞掉无效调用、上游错误或截断", TIMEOUT, async () => {
+  const options = { model: "agy/gemini-3.8-flash", tools: TOOLS, stream: true };
+  const unknown = { response: { candidates: [{ content: { parts: [{ functionCall: { name: "unknown", args: {} } }] } }] } };
+  for (const functionCall of [
+    { args: {} },
+    { name: " " },
+    { name: "unknown", args: [] },
+    { name: "unknown", args: "not-json" },
+  ]) {
+    const response = await createAgyResponse(sse([
+      { response: { candidates: [{ content: { parts: [{ functionCall }] }, finishReason: "STOP" }] } },
+    ]), { ...options, stream: false });
+    assert.equal(response.status, 502);
+    const final = await response.json() as Json;
+    assert.equal(final.status, "failed");
+    assert.equal((final.error as Json).code, "upstream_protocol_error");
+    assert.deepEqual(final.output, []);
+  }
+
+  const failed = finalResponse(await events(await createAgyResponse(sse([
+    unknown, { error: { code: "REMOTE_ERROR", message: "上游报错" } },
+  ]), options)));
+  assert.equal(failed.status, "failed");
+  assert.equal((failed.error as Json).code, "REMOTE_ERROR");
+
+  const incomplete = finalResponse(await events(await createAgyResponse(sse([
+    unknown, textFrame("截断", "MAX_TOKENS"),
+  ]), options)));
+  assert.equal(incomplete.status, "incomplete");
+  assert.deepEqual(incomplete.incomplete_details, { reason: "max_output_tokens" });
+});
+
+test("agy Responses 发出未声明工具提示后仍能取消响应", TIMEOUT, async () => {
+  const controller = new AbortController();
+  let aborts = 0;
+  let terminal: Json | undefined;
+  const response = await createAgyResponse(sse([
+    { response: { candidates: [{ content: { parts: [{ functionCall: { name: "unknown" } }] } }] } },
+    textFrame("取消后不应再输出", "STOP"),
+  ]), {
+    model: "agy/gemini-3.8-flash", tools: TOOLS, stream: true,
+    signal: controller.signal, abort: () => { aborts += 1; }, onComplete: (payload) => { terminal = payload; },
+  });
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false);
+      if (decoder.decode(chunk.value).includes("未声明工具")) break;
+    }
+    controller.abort();
+    assert.equal((await reader.read()).done, true);
+    assert.equal(terminal?.status, "failed");
+    assert.equal((terminal?.error as Json).code, "response_cancelled");
+    assert.equal(aborts, 1);
+  } finally {
+    await reader.cancel();
+  }
 });

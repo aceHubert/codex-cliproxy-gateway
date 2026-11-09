@@ -2101,7 +2101,7 @@ test("healthz 携带实例标记，waitForHealth 拒绝别的实例顶包", asyn
   }
 
   // 网关自身的 healthz 输出本进程实例标记（运行主目录哈希）。
-  const handler = createGatewayHandler(logTestConfig("/tmp/ccp-healthz-logs"));
+  const handler = createGatewayHandler(logTestConfig("/tmp/ccp-healthz-logs"), "");
   try {
     const response = await handler(new Request("http://127.0.0.1:8320/healthz"));
     assert.equal(response.headers.get("x-ccp-instance"), instanceMarker(resolvePaths().runtimeHome));

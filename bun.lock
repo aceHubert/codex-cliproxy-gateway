@@ -70,6 +70,7 @@
       "name": "@agent-proxy/agy",
       "version": "0.22.0",
       "dependencies": {
+        "@agent-proxy/llm-bridge": "workspace:*",
         "@agent-proxy/plugin-api": "workspace:*",
       },
       "devDependencies": {

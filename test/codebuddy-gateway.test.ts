@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { test as testOutsideHostScope } from "node:test";
 import { createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
 import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
 import { CodebuddyCredentialError, type CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
 import fingerprintData from "@agent-proxy/codebuddy/fingerprint-data.json";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "@agent-proxy/codebuddy/request-context";
+import { getHostServices, withHostServices } from "@agent-proxy/plugin-api";
 import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import test from "./host-test.ts";
@@ -730,6 +734,74 @@ test("请求日志不落 token 明文", async () => {
       assert.ok(!text.includes(ACCESS_TOKEN), `accessToken 不得出现在请求日志 ${name}`);
       assert.ok(!text.includes(REFRESH_TOKEN), `refreshToken 不得出现在请求日志 ${name}`);
       assert.ok(!text.includes(INBOUND_OAUTH), "入站 OAuth 不得出现在请求日志");
+    }
+  });
+});
+
+testOutsideHostScope("CodeBuddy 在宿主作用域外交错消费两个实例的响应时写入各自日志", { timeout: 60_000 }, async () => {
+  await fixture(async ({ config, directory }) => {
+    const enabled = { ...config, requestLogging: true };
+    const model = "codebuddy-intl/gpt-5.6-luna";
+    let aborts = 0;
+    const instances = ["甲", "乙", "关闭请求日志", "上游失败", "取消响应"].map((marker, index) => {
+      const home = path.join(directory, marker);
+      const paths = resolvePaths({}, home);
+      const instanceConfig = { ...enabled, requestLogging: index !== 2 };
+      const processLog = { file: path.join(home, "gateway.log"), maxBytes: 100_000 };
+      const host = createGatewayHostServices(instanceConfig, processLog, paths);
+      const adapter = withHostServices(host, () => createCodebuddyAdapter(instanceConfig, {
+        processLog, cacheDirectory: home, refreshCatalogOnStart: false,
+        credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
+        fetch: async (_url, init) => {
+          if (index === 4) init?.signal?.addEventListener("abort", () => { aborts++; }, { once: true });
+          if (index === 3) {
+            return new Response(`data: ${JSON.stringify({ error: { message: `${marker}: ${ACCESS_TOKEN}` } })}\n\n`,
+              { headers: { "content-type": "text/event-stream" } });
+          }
+          return chatUpstream(marker);
+        },
+      }));
+      return { adapter, marker, paths, processLog };
+    });
+    try {
+      // 使用原生 node:test，避免测试宿主掩盖适配器回调丢失上下文。
+      assert.throws(getHostServices, /插件主机上下文未初始化/);
+      const responses = await Promise.all(instances.map(({ adapter }) =>
+        adapter.forward(request(model), { model, stream: true, input: "你好" }),
+      ));
+      assert.throws(getHostServices, /插件主机上下文未初始化/);
+      const results = await Promise.all(responses.map((response, index) =>
+        index === 4 ? response.body!.cancel() : index === 3 ? response.text() : decoded(response),
+      ));
+      assert.equal(aborts, 1);
+      for (const [index, { marker, paths, processLog }] of instances.entries()) {
+        if (index === 3) {
+          assert.match(results[index] as string, /event: response.failed/);
+          assert.ok(!(results[index] as string).includes(ACCESS_TOKEN));
+        } else if (index !== 4) {
+          assert.equal((results[index] as Json).output[0].content[0].text, marker);
+        }
+        if (index === 2) {
+          assert.equal(fs.existsSync(paths.logDir), false);
+          assert.equal(fs.existsSync(processLog.file), false);
+          continue;
+        }
+        const files = fs.readdirSync(paths.logDir);
+        assert.equal(files.length, 1);
+        assert.match(files[0]!, /^codebuddy-v1-responses-http-\d{14}\.log$/);
+        const log = fs.readFileSync(path.join(paths.logDir, files[0]!), "utf8");
+        assert.equal(log.match(/--- response status: /g)?.length, 1);
+        assert.match(log, index === 4 ? /--- response status: 499/ : /--- response status: 200/);
+        assert.ok(log.includes(index === 4 ? "response_cancelled" : marker));
+        for (const other of instances) if (other.marker !== marker) assert.ok(!log.includes(other.marker));
+        for (const token of [ACCESS_TOKEN, REFRESH_TOKEN, INBOUND_OAUTH, "private-account"]) assert.ok(!log.includes(token));
+        const summary = fs.readFileSync(processLog.file, "utf8");
+        assert.equal(summary.match(/POST \/v1\/responses -> \d{3}/g)?.length, 1);
+        assert.ok(summary.includes(`POST /v1/responses -> ${index === 4 ? 499 : index === 3 ? 502 : 200}`));
+        assert.ok(!summary.includes(ACCESS_TOKEN));
+      }
+    } finally {
+      for (const { adapter } of instances) adapter.close();
     }
   });
 });

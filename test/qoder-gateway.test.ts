@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { test as testOutsideHostScope } from "node:test";
+import { getHostServices } from "@agent-proxy/plugin-api";
 import { createQoderAdapter, safeQoderUpstreamError, validateQoderConfig, type QoderDependencies } from "@agent-proxy/qoder";
 import { QoderCredentialError, type QoderCredentials } from "@agent-proxy/qoder/credentials";
 import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT, type QoderInferPayload } from "@agent-proxy/qoder/transport";
@@ -519,10 +521,11 @@ test("Qoder 上游认证失败和错误信封不回显凭据且日志不记录�
   });
 });
 
-test("Qoder 成功请求日志使用专属文件名且清理上游不会将成功抢先记录为 499", TIMEOUT, async () => {
+testOutsideHostScope("Qoder 在宿主作用域外消费时写入专属日志且清理上游不会将成功抢先记录为 499", TIMEOUT, async () => {
   await fixture(async ({ create, directory }) => {
     const handler = create({ requestLogging: true });
     const response = await handler(request(MODEL, { stream: true, input: "私有请求内容" }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
     assert.equal((await decode(response)).status, "completed");
     const processLog = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
     assert.equal(processLog.split("\n").filter((line) => line.includes("POST /v1/responses ->")).length, 1);
@@ -594,7 +597,7 @@ test("Qoder 等待上游响应头期间无数据超时返回 504 并中止推理
   });
 });
 
-test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记录 504", TIMEOUT, async () => {
+testOutsideHostScope("Qoder 在宿主作用域外消费时报告超时失败并在专属日志中记录 504", TIMEOUT, async () => {
   await fixture(async ({ create, directory }) => {
     const encoder = new TextEncoder();
     const handler = create({ requestLogging: true }, { idleTimeoutMs: 40, transport: {
@@ -606,6 +609,7 @@ test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记�
       }), { headers: { "content-type": "text/event-stream" } }),
     } });
     const response = await handler(request(MODEL, { stream: true }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
     assert.equal(response.status, 200, "流式头已发送后用终态事件报告失败");
     const body = await response.text();
     assert.match(body, /event: response.failed/);
@@ -621,6 +625,39 @@ test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记�
     assert.ok(!content.includes("部分输出"));
     const processLog = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
     assert.match(processLog, /POST \/v1\/responses -> 504/);
+  });
+});
+
+testOutsideHostScope("Qoder 在宿主作用域外取消响应时中止上游且只记录一次 499", TIMEOUT, async () => {
+  await fixture(async ({ create, directory }) => {
+    const encoder = new TextEncoder();
+    let cancellations = 0;
+    let upstreamSignal: AbortSignal | undefined;
+    const handler = create({ requestLogging: true }, { transport: {
+      fetchCatalog: async () => catalogData(),
+      infer: async (_credential, _payload, signal) => {
+        upstreamSignal = signal;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(envelope({ choices: [{ index: 0, delta: { content: "部分输出" }, finish_reason: null }] })));
+          },
+          cancel() { cancellations++; },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    } });
+    const response = await handler(request(MODEL, { stream: true }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
+    await response.body!.cancel();
+    assert.equal(upstreamSignal?.aborted, true);
+    assert.equal(cancellations, 1);
+    const files = fs.readdirSync(path.join(directory, "logs"));
+    assert.equal(files.length, 1);
+    const exchange = fs.readFileSync(path.join(directory, "logs", files[0]!), "utf8");
+    assert.equal(exchange.match(/--- response status: /g)?.length, 1);
+    assert.match(exchange, /--- response status: 499/);
+    const summary = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
+    assert.equal(summary.match(/POST \/v1\/responses -> \d{3}/g)?.length, 1);
+    assert.match(summary, /POST \/v1\/responses -> 499/);
   });
 });
 
