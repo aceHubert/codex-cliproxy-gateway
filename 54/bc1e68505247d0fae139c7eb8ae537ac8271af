@@ -1,0 +1,65 @@
+docs/plugin-contract.md
+  s_0448f07ed4206b::t_118c1e43061833 131-133
+packages/qoder/src/index.ts
+  s_0448f07ed4206b::t_069be4a17ee879 3,193,200-207,209,219,222-239,278,280-281,284-289
+test/agy-protocol.test.ts
+  s_0448f07ed4206b::t_fd61410698f108 348-416
+packages/codebuddy/src/index.ts
+  s_0448f07ed4206b::t_e25cb871237522 357,362-368
+  s_0448f07ed4206b::t_8c398ad98ac10b 3,186,233-251,253,374
+docs/exec-plans/completed/plugin-stream-logging-and-agy-tool-tolerance.md
+  s_0448f07ed4206b::t_bb86c256895f8e 141
+  s_0448f07ed4206b::t_92887a801b8f8b 1-140,142-153
+docs/histories/2026-11/20261109-1048-plugin-stream-logging-and-agy-tool-tolerance.md
+  s_0448f07ed4206b::t_bb86c256895f8e 1-53
+docs/requirements/codex-gateway-monorepo.md
+  s_0448f07ed4206b::t_118c1e43061833 9-12
+test/llm-bridge-boundaries.test.ts
+  s_0448f07ed4206b::t_118c1e43061833 5,8-9,23-24,26-39
+packages/agy/package.json
+  s_0448f07ed4206b::t_c4ca74f251a514 41
+test/codebuddy-gateway.test.ts
+  s_0448f07ed4206b::t_211e4dac1ce3b7 5,11,14,746-755,760,767-775,780,785-787,790
+  s_0448f07ed4206b::t_f320052079f73b 741-745,756-759,764,776-778,783
+  s_0448f07ed4206b::t_e34f36d88b7788 761-763,765-766,779,781-782,784
+  s_0448f07ed4206b::t_7854279c500212 15
+  s_0448f07ed4206b::t_6cb99d3751067d 788-789
+  s_0448f07ed4206b::t_b9e877ec52e28b 791-793
+packages/agy/src/response.ts
+  s_0448f07ed4206b::t_02c2f141688f57 1,156,251,503,648-655,720-721,757,759
+test/qoder-gateway.test.ts
+  s_0448f07ed4206b::t_29e153582246f8 612,631-650
+  s_0448f07ed4206b::t_0c53953d367093 5-6
+  s_0448f07ed4206b::t_aa2c13175b02c0 651-653
+test/agy-response.test.ts
+  s_0448f07ed4206b::t_b83870a90927d0 2,7,170-178,180-204,206-214,217-255,257
+  s_0448f07ed4206b::t_f320052079f73b 215-216
+  s_0448f07ed4206b::t_4ef5e25808f355 179,205,256
+  s_0448f07ed4206b::t_d474f79e736363 258-319
+bun.lock
+  s_80b3cea0c911f1::t_dc70df2850683d 73
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "54bc1e68505247d0fae139c7eb8ae537ac8271af",
+  "prompts": {},
+  "sessions": {
+    "s_0448f07ed4206b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be2a-dcfd-7d02-8fad-e1fdd4e836fb",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_80b3cea0c911f1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1be2b-6453-7f91-a879-4b8a69e5e776",
+        "model": "unknown"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
