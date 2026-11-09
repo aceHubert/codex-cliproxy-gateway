@@ -1,0 +1,127 @@
+docs/exec-plans/tech-debt-tracker.md
+  s_be0721c1f390fb::t_2048a15f137e1f 10
+  s_be0721c1f390fb::t_2ea5c9b74a1188 9,40-41
+test/codebuddy-gateway.test.ts
+  s_be0721c1f390fb::t_2de000330f7c22 233
+  s_be0721c1f390fb::t_2f29931628b5d6 15,444,620
+apps/gateway/src/thread-routing.ts
+  s_be0721c1f390fb::t_f42192673f7d4f 1-7,9-11,13-21,23-60,62,64-65
+  s_be0721c1f390fb::t_046e8b7d4f0311 8,12,22,61,63
+test/zcode-gateway.test.ts
+  s_be0721c1f390fb::t_e8b9903ef0018a 15,86,737
+test/zcode-signing.test.ts
+  s_be0721c1f390fb::t_2f29931628b5d6 17,254
+test/gateway-plugin-integration.test.ts
+  s_be0721c1f390fb::t_e8b9903ef0018a 12,110,131
+apps/gateway/src/gateway-composition.ts
+  s_be0721c1f390fb::t_4195175b170d20 22,135,150
+test/realtime.test.ts
+  s_be0721c1f390fb::t_c756b96d6dd587 520-521,650,668
+  s_be0721c1f390fb::t_23f182e67a326b 801-906,911-929,933-934,936-943,948-977
+  s_be0721c1f390fb::t_96e52c9e9d34d6 930-932
+  s_be0721c1f390fb::t_2f29931628b5d6 22,453-454,758,774,790
+  s_be0721c1f390fb::t_2beaede1ee5d69 907-910,935,944-947
+test/opencode-zen-gateway.test.ts
+  s_be0721c1f390fb::t_2de000330f7c22 20,104
+docs/histories/2026-11/20261106-1750-responses-thread-route-switch.md
+  s_be0721c1f390fb::t_4f0ad2f0f268df 1-77
+  s_be0721c1f390fb::t_f7fdfc9a62c2a2 78-82
+  s_be0721c1f390fb::t_677b6e389fe696 83-90
+  s_be0721c1f390fb::t_14ba1d9df1589e 91-97
+test/gateway.test.ts
+  s_be0721c1f390fb::t_72e554f47c16fa 2248,2255,2259-2260,2262,2265
+  s_be0721c1f390fb::t_2beaede1ee5d69 2225,2239
+  s_be0721c1f390fb::t_c756b96d6dd587 2261
+  s_be0721c1f390fb::t_2de000330f7c22 1214,1348,1391,2171
+  s_be0721c1f390fb::t_e8b9903ef0018a 10,2222,2277,2346,2478,2513
+apps/gateway/src/realtime.ts
+  s_be0721c1f390fb::t_046e8b7d4f0311 732
+  s_be0721c1f390fb::t_de6d186b747991 606-607,610,654,657-658
+  s_be0721c1f390fb::t_4195175b170d20 8-9,69-72,103-104,111,131,133-138,602,608-609,611-613,618-621,623,635,663,665
+  s_be0721c1f390fb::t_1a436be84aa71e 614-617
+test/agy-gateway.test.ts
+  s_be0721c1f390fb::t_2de000330f7c22 18,184
+apps/gateway/src/gateway.ts
+  s_be0721c1f390fb::t_7c75bf654c9372 639,651-652,1234-1235,1255-1260,1512,1612,1616,1626
+  s_be0721c1f390fb::t_da53dbb0bca772 41-42,612,617-620,622-623,631,634,637,719,732,1012,1211,1451,1478,1532,1535,1605-1609,1613,1625,1627,1634
+  s_be0721c1f390fb::t_96225c5e4a7451 614,633,759-760,1209,1216,1218-1222,1224,1228,1230,1252
+  s_be0721c1f390fb::t_ab2f40c84f7246 738-739,1452,1509-1511,1513
+  s_be0721c1f390fb::t_1a436be84aa71e 1610-1611
+  s_be0721c1f390fb::t_de6d186b747991 1617,1628-1629
+  s_be0721c1f390fb::t_cf68aa48918799 621
+  s_be0721c1f390fb::t_046e8b7d4f0311 624-630,632
+docs/codex-tui-desktop-traffic-patterns.md
+  s_b93e2b83fd16d7::t_4ccbc380725313 1-46
+docs/exec-plans/active/responses-thread-tree-route-switch.md
+  s_be0721c1f390fb::t_d8b8ab82f36ad6 237-242,398-415
+  s_be0721c1f390fb::t_d65a23abd35339 248,251-252,388
+  s_be0721c1f390fb::t_dd11cd463085fc 384-387,389-397,416-417
+  s_3b63b170701189::t_95fdaf26d3df66 200,208-209,327-338
+  s_be0721c1f390fb::t_2c69d5b41f099f 1-2,5-11,14-26,36-49,55-76,81-90,92,94-108,111-141,143-159,163-176,253-257,260,365,418,435-439,442-443
+  s_be0721c1f390fb::t_0d5e4a14928629 142,259,428-429
+  s_be0721c1f390fb::t_677b6e389fe696 266,275,278-293
+  s_be0721c1f390fb::t_d3ccead66987ea 205-207,317-326
+  s_be0721c1f390fb::t_14ba1d9df1589e 267,294-303
+  s_be0721c1f390fb::t_4f0ad2f0f268df 261-265,268-272,276-277
+  s_be0721c1f390fb::t_9c554161581092 339-341,344-353
+  s_be0721c1f390fb::t_5fef256ed69e73 383
+  s_be0721c1f390fb::t_6c8aafff452cce 3,179-182,199,201-204,210,212-213,217,221-236,243-247,249-250,304-316
+  s_be0721c1f390fb::t_be09a2ecfc716d 77-78,430-434
+  s_be0721c1f390fb::t_07ecb5639a80f7 211,214-216,218-220,366-382
+  s_be0721c1f390fb::t_a5610ff935fabc 27-35,419-422
+  s_be0721c1f390fb::t_257e75abc60c58 12-13,50-54,79-80,91,93,109-110,160-162,258,440-441
+  s_be0721c1f390fb::t_17010847929dc2 177-178,183-198,342-343,354-364,423-425
+  s_be0721c1f390fb::t_f7fdfc9a62c2a2 4,273-274,426-427
+test/default-agent-readiness.test.ts
+  s_be0721c1f390fb::t_2f29931628b5d6 11,77,126
+test/model-catalog-dynamic.test.ts
+  s_be0721c1f390fb::t_2f29931628b5d6 16,46,140
+test/thread-routing.test.ts
+  s_be0721c1f390fb::t_6edd182260c940 129-130,132,137,139,146,150-153
+  s_be0721c1f390fb::t_72e554f47c16fa 1-79,82-106,113-119,154-162,164-176
+  s_be0721c1f390fb::t_2de000330f7c22 163
+  s_be0721c1f390fb::t_2beaede1ee5d69 80-81,107-112,120-128,131,133-136,138,140-145,147-149
+test/model-exclude-gateway.test.ts
+  s_be0721c1f390fb::t_2de000330f7c22 11,66,180,250
+test/gateway-model-reload.test.ts
+  s_be0721c1f390fb::t_e8b9903ef0018a 15,76,117,156,288,326
+test/qoder-gateway.test.ts
+  s_be0721c1f390fb::t_2de000330f7c22 16,121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "eb33474042ccb36f732999f080868e2d8d02f663",
+  "prompts": {},
+  "humans": {
+    "h_e8eb00b1da99ae": {
+      "author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  },
+  "sessions": {
+    "s_3b63b170701189": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1b055-f507-7c90-9bc8-28f4643f7222",
+        "model": "cliproxy/gpt-6.1-terra"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_b93e2b83fd16d7": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_8d19d553-6125-4e48-82ca-b56980a49015",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_be0721c1f390fb": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a19ba1-ffcf-7510-ba43-cd2121b91585",
+        "model": "cliproxy/gpt-6-astra"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
