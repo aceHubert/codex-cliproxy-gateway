@@ -1,10 +1,9 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "./host-test.ts";
-import assert from "node:assert/strict";
-import vendorModels from "@agent-proxy/models/vendor_models.json";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
+import vendorModels from "@agent-proxy/models/vendor_models.json";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -16,6 +15,7 @@ import {
   zcodeModelPlan,
   zcodeUpstreamModel,
 } from "@agent-proxy/zcode/catalog";
+import { test } from "./host-test.ts";
 import type { ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "@agent-proxy/zcode/config";
 
 const IDS = vendorModels["z.ai"].map((entry) => entry.name);

@@ -1,6 +1,6 @@
-import type { QoderCredentials } from "./credentials.ts";
-import type { QoderInferPayload, QoderFetch } from "./transport.ts";
 import { parseQueueStatus, type Frame, type QoderQueueStatus } from "./sse.ts";
+import type { QoderCredentials } from "./credentials.ts";
+import type { QoderFetch,QoderInferPayload } from "./transport.ts";
 
 /** 排队终态错误：服务持续繁忙，等待与恢复都没有换来推理机会。 */
 export class QoderQueueError extends Error {

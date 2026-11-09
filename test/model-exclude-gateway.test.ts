@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { handleWebUiRequest } from "../apps/gateway/src/webui.ts";
+import test from "./host-test.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
@@ -62,7 +63,7 @@ async function gatewayFixture(
       directory, config, upstreamCalls,
       create(extra = {}) {
         const handler = createGatewayHandler({ ...config, ...extra }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"),
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
           undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 });
         handlers.push(handler);
         return handler;
@@ -176,7 +177,7 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
       credentials: async () => agyCredential(),
     };
     const handler = createGatewayHandler(config, "fake-cpa-key", "invalid",
-      new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"),
+      new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
       undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
       undefined, undefined, agyDependencies);
     try {
@@ -246,7 +247,7 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
       }) as typeof fetch,
     };
     const handler = createGatewayHandler(config, "fake-cpa-key", "invalid",
-      new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"),
+      new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
       undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
       undefined, undefined, undefined, opencodeZenDependencies);
     try {

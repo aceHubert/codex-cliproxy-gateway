@@ -1,6 +1,6 @@
 import fs from "node:fs";
-import type { GatewayConfig, ModelEntry } from "./types.ts";
 import { atomicWrite } from "./toml.ts";
+import type { GatewayConfig, ModelEntry } from "./types.ts";
 
 /** 推送备份文件的时间戳（YYYYMMDDhhmmss，与 install 的 config.toml 备份同格式）。 */
 export function pushTimestamp(date = new Date()): string {

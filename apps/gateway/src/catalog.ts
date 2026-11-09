@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { codexBaselineEntry, CODEX_BASELINE_SLUG } from "@agent-proxy/models";
+import { CODEX_BASELINE_SLUG,codexBaselineEntry } from "@agent-proxy/models";
 import { atomicWrite } from "./toml.ts";
 import type { ModelOverrideRule } from "@agent-proxy/plugin-api";
 import type { ModelCatalog, ModelEntry, UpstreamType } from "./types.ts";

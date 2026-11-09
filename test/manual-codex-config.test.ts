@@ -1,9 +1,8 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import {
   resolveCodexConfigConflict,
   restoreManagedCodexToml,
@@ -11,6 +10,7 @@ import {
 } from "../apps/gateway/src/cli.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { readRootTomlString } from "../apps/gateway/src/toml.ts";
+import test from "./host-test.ts";
 
 function hash(contents: string): string {
   return createHash("sha256").update(contents).digest("hex");

@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-
-import type { ExchangeEntry, LogNamespace, RequestLogSink } from "@agent-proxy/plugin-api";
 import { resolvePaths } from "./paths.ts";
+import type { ExchangeEntry, LogNamespace, RequestLogSink } from "@agent-proxy/plugin-api";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
 
 /**

@@ -1,5 +1,5 @@
-import fs from "node:fs";
 import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 
 /**
  * 探测不到任何真实版本时的保守值。CLIProxy 会把它当作最老的客户端：目录里只下发

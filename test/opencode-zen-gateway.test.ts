@@ -3,22 +3,21 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
-import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
-import { collectCompatibleModels } from "../apps/gateway/src/cli.ts";
-import {
-  OPENCODE_ZEN_CLIENT_USER_AGENT,
-  OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
-} from "@agent-proxy/opencode-zen/fingerprint";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
+import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig, type OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
+import {
+  OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
+  OPENCODE_ZEN_CLIENT_USER_AGENT,
+} from "@agent-proxy/opencode-zen/fingerprint";
 import { OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
-import { createOpencodeZenAdapter, normalizeOpencodeZenUpstreamError, validateOpencodeZenConfig } from "@agent-proxy/opencode-zen";
-import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-
+import { collectCompatibleModels } from "../apps/gateway/src/cli.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -100,7 +99,7 @@ async function fixture(
           throw new Error(`未模拟的 zen 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
           { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined, undefined,
           {
             cacheDirectory: directory,

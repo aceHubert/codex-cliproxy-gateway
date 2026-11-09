@@ -1,8 +1,9 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
 import {
   instanceMarker,
   managedCatalogFiles,
@@ -10,7 +11,6 @@ import {
   resolvePaths,
   runWithInstancePaths,
 } from "../apps/gateway/src/paths.ts";
-import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
 import { requestLogDir } from "../apps/gateway/src/request-log.ts";
 
 test("受管目录清单只含网关自有文件，且遵循实例运行目录", () => {

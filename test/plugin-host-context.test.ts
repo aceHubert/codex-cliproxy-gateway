@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import { bindHostMethods, getHostServices, withHostServices, type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { getActiveAccount, withInstanceContext as withCodebuddyContext } from "@agent-proxy/codebuddy";
+import { bindHostMethods, getHostServices,withHostServices, type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { getActiveSources, withInstanceContext as withQoderContext } from "@agent-proxy/qoder";
 import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 function config(account = "auto"): GatewayConfig {

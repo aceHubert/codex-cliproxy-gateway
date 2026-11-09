@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import { runCli } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 function installedConfig(paths: ReturnType<typeof resolvePaths>) {
   return {

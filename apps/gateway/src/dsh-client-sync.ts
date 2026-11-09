@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import YAML, { isMap, isSeq, YAMLMap, YAMLSeq, type ParsedNode } from "yaml";
-import type { GatewayConfig, ModelEntry } from "./types.ts";
+import YAML, { isMap, isSeq, YAMLMap,YAMLSeq, type ParsedNode } from "yaml";
 import {
   modelContextWindow,
   modelInputModalities,
@@ -11,6 +10,7 @@ import {
   type ModelPushOutcome,
   type ModelPushTarget,
 } from "./models-push.ts";
+import type { GatewayConfig, ModelEntry } from "./types.ts";
 
 /** 本命令在 dsh 侧的唯一受管 provider；与用户自建 provider（cliproxy* 等）完全无关。 */
 const DSH_PROVIDER_KEY = "agent-proxy";

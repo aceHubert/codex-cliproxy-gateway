@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CodebuddyDependencies } from "@agent-proxy/codebuddy";
 import { collectAdapterModels } from "../apps/gateway/src/model-composition.ts";
 import { pushModelsToTargets } from "../apps/gateway/src/models-push.ts";
 import { createZcodePushTarget, resolveZcodeClientPaths } from "../apps/gateway/src/zcode-client-sync.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 import test from "./host-test.ts";
+import type { CodebuddyDependencies } from "@agent-proxy/codebuddy";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 const BOTH_REGION_SLUGS = [

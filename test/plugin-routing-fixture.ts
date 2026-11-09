@@ -1,6 +1,6 @@
-import { identifyClientEndpoint, PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
-import { MOUNT_PATH } from "../apps/gateway/src/types.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { identifyClientEndpoint,PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
+import { MOUNT_PATH, type GatewayConfig } from "../apps/gateway/src/types.ts";
+
 
 /** 只提供模式契约，帧路由测试不创建真实 agent 的凭据缓存和后台任务。 */
 export function routingRegistry(config: Partial<GatewayConfig> = {}): PluginRegistry {

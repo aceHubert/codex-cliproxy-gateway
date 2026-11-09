@@ -1,7 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
 
 /**
  * Antigravity CLI（agy）凭据的只读消费。

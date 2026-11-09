@@ -2,22 +2,21 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
-import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
-import { createAgyAdapter, safeAgyUpstreamError, validateAgyConfig } from "@agent-proxy/agy";
+import { createAgyAdapter, safeAgyUpstreamError, validateAgyConfig, type AgyDependencies } from "@agent-proxy/agy";
+import { createAgyCatalogStore } from "@agent-proxy/agy/catalog";
+import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
+import { AGY_AGENT_SYSTEM_PROMPT,AGY_USER_AGENT } from "@agent-proxy/agy/transport";
 import { withHostServices } from "@agent-proxy/plugin-api";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
-import type { AgyDependencies } from "@agent-proxy/agy";
-import fingerprintData from "@agent-proxy/agy/fingerprint-data.json";
-import { AGY_USER_AGENT, AGY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/agy/transport";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
+import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import { createAgyCatalogStore } from "@agent-proxy/agy/catalog";
-
-import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -180,7 +179,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
           throw new Error(`未模拟的 agy 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new Set<string>(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
+          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
           { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined,
           {
             cacheDirectory: directory,

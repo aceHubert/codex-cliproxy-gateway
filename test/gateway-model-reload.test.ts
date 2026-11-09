@@ -2,16 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
+import { PluginRegistry,type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { createGatewayHandler, responsesWebSocketTarget, startGateway } from "../apps/gateway/src/gateway-composition.ts";
-import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
-import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
-import { PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { createPluginGatewayHandler } from "../apps/gateway/src/gateway.ts";
+import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
+import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
 import { routingRegistry } from "./plugin-routing-fixture.ts";
+import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 
@@ -72,7 +73,7 @@ for (const upstreamOnly of [false, true]) {
     ]);
     globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-native" }] })) as unknown as typeof fetch;
     const handler = createPluginGatewayHandler({ ...config, upstreamOnly }, registry, "fake-key", "invalid",
-      new Set(), new Set(), undefined, { file: logFile, maxBytes: 1_000_000 }, paths);
+      new ThreadRoutingState(), new Set(), undefined, { file: logFile, maxBytes: 1_000_000 }, paths);
     const visibleModels = async (): Promise<string[]> => {
       const response = await handler(new Request("http://127.0.0.1/v1/models?client_version=test"));
       assert.equal(response.status, 200);
@@ -113,7 +114,7 @@ test("模型热加载更新本地目录和推理排除规则并保持适配器�
   let reloads = 0;
   let current = snapshot("glm-5.3");
   globalThis.fetch = (async () => Response.json({ models: [{ slug: "gpt-native" }] })) as unknown as typeof fetch;
-  const handler = createGatewayHandler({ ...config, zcode: true }, "fake-key", "invalid", new Set(), new Set(), undefined, {
+  const handler = createGatewayHandler({ ...config, zcode: true }, "fake-key", "invalid", new ThreadRoutingState(), new Set(), undefined, {
     cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
     configCache: { get: async () => current, reload: async () => { reloads++; return current; }, close: () => { closed++; } },
     fetch: async () => { throw new Error("被排除模型不得发送推理请求"); },
@@ -152,7 +153,7 @@ test("静态模式启动就绪合并 agent 且目录请求只消费已发布快�
   fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [] }));
   let current = snapshot("glm-5.3");
   let startupReads = 0;
-  const handler = createGatewayHandler(config, "fake-key", "invalid", new Set(), new Set(), undefined, {
+  const handler = createGatewayHandler(config, "fake-key", "invalid", new ThreadRoutingState(), new Set(), undefined, {
     cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
     configCache: { get: async () => { startupReads++; return current; }, close: () => {} },
   }, undefined, undefined, undefined, undefined, undefined, paths);
@@ -284,7 +285,7 @@ test("静态热加载在启动旧快照完成后重新发布当前排除规则",
   config.excludedModels = [agentModel];
   let resolveCatalog!: (value: ZcodeProviderSnapshot) => void;
   const catalogReady = new Promise<ZcodeProviderSnapshot>((resolve) => { resolveCatalog = resolve; });
-  const handler = createGatewayHandler(config, "fake-key", "invalid", new Set(), new Set(), undefined, {
+  const handler = createGatewayHandler(config, "fake-key", "invalid", new ThreadRoutingState(), new Set(), undefined, {
     cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
     configCache: { get: () => catalogReady, reload: () => catalogReady, close: () => {} },
   }, undefined, undefined, undefined, undefined, undefined, paths);
@@ -322,7 +323,7 @@ test("upstream-only 的所有 HTTP-only agent 握手都不能进入 default WebS
         headers: { upgrade: "websocket", "x-codex-routing-hint": `model=${model}` },
       });
       const enabledConfig = { ...config, upstreamOnly: true, [enabled]: true };
-      assert.equal(responsesWebSocketTarget(ws, enabledConfig, undefined, new Set(), new Set(), routingRegistry(enabledConfig)), null);
+      assert.equal(responsesWebSocketTarget(ws, enabledConfig, undefined, new ThreadRoutingState(), new Set(), routingRegistry(enabledConfig)), null);
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

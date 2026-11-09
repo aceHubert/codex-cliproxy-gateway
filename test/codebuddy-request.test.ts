@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import { CodebuddyRequestError, translateCodebuddyRequest } from "@agent-proxy/codebuddy/request";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/codebuddy/request-context";
 import { encodeCodebuddyReasoning } from "@agent-proxy/codebuddy/wire";
+import test from "./host-test.ts";
 
 type Json = Record<string, unknown>;
 

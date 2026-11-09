@@ -1,5 +1,5 @@
-import type { AgyCredentials } from "./credentials.ts";
 import fingerprintData from "./fingerprint-data.json";
+import type { AgyCredentials } from "./credentials.ts";
 
 /**
  * Antigravity 客户端指纹（`fingerprint-data.json`，按本机 agy 1.3.1 构建

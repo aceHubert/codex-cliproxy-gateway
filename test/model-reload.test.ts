@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { test } from "./host-test.ts";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   createModelReloadReceiver,
@@ -14,6 +13,7 @@ import {
 } from "../apps/gateway/src/model-reload.ts";
 import { instanceMarker, resolvePaths } from "../apps/gateway/src/paths.ts";
 import { atomicWrite } from "../apps/gateway/src/toml.ts";
+import { test } from "./host-test.ts";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function fixture(): { paths: ResolvedPaths; config: GatewayConfig; cleanup(): void } {

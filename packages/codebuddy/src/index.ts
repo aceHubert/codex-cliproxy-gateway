@@ -1,15 +1,6 @@
-import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { ClientProtocol, GatewayPlugin, HostServices } from "@agent-proxy/plugin-api";
-import path from "node:path";
 import { isIP } from "node:net";
-import { resolvePaths } from "@agent-proxy/plugin-api";
-import {
-  CodebuddyCredentialError,
-  createCodebuddyCredentialCache,
-  defaultAuthDirectory,
-  isCodebuddyAccountValue,
-} from "./credentials.ts";
-import type { CodebuddyCredentialCache } from "./credentials.ts";
+import path from "node:path";
+import { bindHostMethods, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol, type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import {
   codebuddyModelProduct,
   codebuddyModelRegion,
@@ -18,14 +9,18 @@ import {
   dedupeCodebuddyCatalog,
   isCodebuddyModel,
 } from "./catalog.ts";
-import { translateCodebuddyRequest, CodebuddyRequestError } from "./request.ts";
+import {
+  CodebuddyCredentialError,
+  createCodebuddyCredentialCache,
+  defaultAuthDirectory,
+  isCodebuddyAccountValue, type CodebuddyCredentialCache
+} from "./credentials.ts";
+import { buildCodebuddyChatHeaders, CODEBUDDY_AGENT_SYSTEM_PROMPT,createCodebuddyContexts } from "./request-context.ts";
+import { CodebuddyRequestError,translateCodebuddyRequest } from "./request.ts";
 import { createCodebuddyResponse } from "./response.ts";
-import { buildCodebuddyChatHeaders, createCodebuddyContexts, CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
+
 const isZcodeRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === "object" && !Array.isArray(value));
-import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
-import type { RequestLogSink } from "@agent-proxy/plugin-api";
-import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
-import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
+
 
 /** CodeBuddy 配置由插件声明，导入插件时合并到公共配置类型。 */
 declare module "@agent-proxy/plugin-api" {

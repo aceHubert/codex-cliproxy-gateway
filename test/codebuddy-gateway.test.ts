@@ -2,19 +2,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
-import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
+import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
+import { CodebuddyCredentialError, type CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
 import fingerprintData from "@agent-proxy/codebuddy/fingerprint-data.json";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "@agent-proxy/codebuddy/request-context";
-import { CodebuddyCredentialError } from "@agent-proxy/codebuddy/credentials";
-import type { CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
-
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 
@@ -229,7 +228,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
           { ...config, ...options.config },
           "fake-cpa-key",
           "invalid",
-          new Set<string>(), new Set<string>(),
+          new ThreadRoutingState(), new Set<string>(),
           path.join(directory, "models-cache.json"),
           undefined,
           undefined,
@@ -440,7 +439,7 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
         officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
         catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
       },
-      "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+      "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
       path.join(directory, "models-cache.json"), undefined, undefined,
       {
         credentialCache: {
@@ -616,7 +615,7 @@ async function retryFixture(
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
       catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
     },
-    "fake-cpa-key", "invalid", new Set<string>(), new Set<string>(),
+    "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
     path.join(directory, "models-cache.json"), undefined, undefined,
     {
       authDirectory: authDir,

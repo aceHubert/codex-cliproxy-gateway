@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { test } from "./host-test.ts";
 import { changedSinceFixedTag, releaseVersionArgs } from "../scripts/release-version.ts";
+import { test } from "./host-test.ts";
 
 test("共享产品构建与资源变更强制纳入八包，保留 Lerna 用户参数", () => {
   for (const file of ["scripts/build-library.ts", "LICENSE", ".github/workflows/deploy.yml", ".github/workflows/github-release.yml", "packages/models/src/index.ts", "packages/models/vendor_models.json", "packages/models/codex_client_models.json", "packages/models/package.json"]) {

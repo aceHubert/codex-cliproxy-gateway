@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import fingerprintData from "@agent-proxy/zcode/fingerprint-data.json";
 import {
   createStartPlanFetch,
   dressZcodeStartPlanBody,
@@ -12,11 +12,11 @@ import {
   zcodeStartPlanRefusalHint,
   zcodeStartPlanSystemBlocks,
 } from "@agent-proxy/zcode/start-plan-request";
-import fingerprintData from "@agent-proxy/zcode/fingerprint-data.json";
+import test from "./host-test.ts";
 
 const promptTexts = fingerprintData.startPlanPrompt;
-import { ZCODE_AGENT_SYSTEM_PROMPT, buildZcodeModelHeaders, readZcodeIdentity } from "@agent-proxy/zcode/request-context";
-import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
+import { buildZcodeModelHeaders, readZcodeIdentity,ZCODE_AGENT_SYSTEM_PROMPT, type ZcodeIdentity } from "@agent-proxy/zcode/request-context";
+
 
 const identity: ZcodeIdentity = {
   appVersion: "3.17.1", language: "zh-CN", timezone: "Asia/Shanghai",

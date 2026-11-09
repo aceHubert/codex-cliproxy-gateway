@@ -12,7 +12,6 @@
  */
 
 import { createHash } from "node:crypto";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { buildTargetBody, type EngineFunctionTool, type EnginePrompt, type EngineToolChoice } from "./engine.ts";
 import { normalizeResponsesToolDeclarations } from "./responses-tools.ts";
 import {
@@ -22,6 +21,7 @@ import {
   type ToolIdentity,
   type ToolIdentityMap,
 } from "./types.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 type Json = Record<string, unknown>;
 

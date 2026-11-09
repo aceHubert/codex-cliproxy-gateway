@@ -1,10 +1,9 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
-import { invalidateModelsCache } from "@agent-proxy/plugin-api";
-import { atomicWrite } from "@agent-proxy/plugin-api";
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
+import { atomicWrite, invalidateModelsCache, type ModelCatalog, type ModelEntry, type ClientProtocol } from "@agent-proxy/plugin-api";
+
 
 /**
  * OpenCode Zen 模型目录：`GET /inference/v1/models` 提供当前真实可服务的模型 id，
@@ -180,7 +179,6 @@ function metadataApi(value: unknown): string | undefined {
   } catch { return; }
 }
 
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /** 模型端点协议：由元数据 provider.npm 映射，决定转发到哪个 Zen 端点；与全仓公共协议同型。 */
 export type OpencodeZenModelProtocol = ClientProtocol;

@@ -1,10 +1,5 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import {
-  OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
-  OPENCODE_ZEN_CLIENT_TOOLS,
-  OPENCODE_ZEN_CLIENT_USER_AGENT,
-  OPENCODE_ZEN_TITLE_SYSTEM_PROMPT,
   breakOpencodeZenBlockedToolNamePairs,
   buildOpencodeZenUpstreamHeaders,
   createOpencodeZenProjectId,
@@ -13,8 +8,13 @@ import {
   mergeOpencodeZenGateTools,
   mergeOpencodeZenGateToolsResponses,
   normalizeOpencodeZenEffort,
+  OPENCODE_ZEN_AGENT_SYSTEM_PROMPT,
+  OPENCODE_ZEN_CLIENT_TOOLS,
+  OPENCODE_ZEN_CLIENT_USER_AGENT,
+  OPENCODE_ZEN_TITLE_SYSTEM_PROMPT,
 } from "@agent-proxy/opencode-zen/fingerprint";
-import { OPENCODE_SESSION_PATTERN, createOpenCodeSessionId } from "@agent-proxy/opencode-zen/session";
+import { createOpenCodeSessionId,OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
+import test from "./host-test.ts";
 
 const SESSION = createOpenCodeSessionId(1_000_000, "test-session");
 

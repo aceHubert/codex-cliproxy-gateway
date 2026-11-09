@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import {
-  CodebuddyCredentialError,
   canonicalCodebuddyAccountValue,
   codebuddyAccountLabel,
+  CodebuddyCredentialError,
+  codebuddyCredentialsPresent,
   codebuddyEndpoint,
   createCodebuddyCredentialCache,
   defaultAuthDirectory,
-  codebuddyCredentialsPresent,
   isCodebuddyAccountValue,
   listCodebuddyAccounts,
   profileForAuth,
@@ -20,6 +19,7 @@ import {
   resolveCodebuddyAccountFile,
   tokenIssuer,
 } from "@agent-proxy/codebuddy/credentials";
+import test from "./host-test.ts";
 
 function jwt(iss: string, claims: Record<string, unknown> = {}): string {
   const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");

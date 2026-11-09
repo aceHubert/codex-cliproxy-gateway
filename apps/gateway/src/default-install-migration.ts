@@ -1,10 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
-import { isJsonObject, mergeMissingConfig, migrateLegacyConfig } from "./config.ts";
 import { hasLegacyCodexOwnership, migrateCodexOwnership, resolveInstalledCodexPaths, resolveLegacyServiceCodexPaths } from "./codex-ownership.ts";
+import { isJsonObject, mergeMissingConfig, migrateLegacyConfig } from "./config.ts";
 import { createApiKeyStore } from "./keychain.ts";
-import { prepareManagedWebUiMigration, type LaunchctlExecutor } from "./launchd.ts";
-import { DEFAULT_RUNTIME_DIRECTORY, LEGACY_RUNTIME_DIRECTORY, RUNTIME_HOME_ENV, realPathOrResolve, resolvePaths } from "./paths.ts";
+import { prepareManagedWebUiMigration,type LaunchctlExecutor } from "./launchd.ts";
+import { DEFAULT_RUNTIME_DIRECTORY, LEGACY_RUNTIME_DIRECTORY, realPathOrResolve, resolvePaths,RUNTIME_HOME_ENV } from "./paths.ts";
 import { atomicWrite } from "./toml.ts";
 import type { ResolvedPaths } from "./types.ts";
 

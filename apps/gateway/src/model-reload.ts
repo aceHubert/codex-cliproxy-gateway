@@ -1,6 +1,6 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { readGatewayConfigFile } from "./config-read.ts";
 import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
 import { instanceMarker } from "./paths.ts";

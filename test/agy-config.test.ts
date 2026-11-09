@@ -1,13 +1,13 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
-import { applyWebUiConfigPatch, readGatewayConfigFile } from "../apps/gateway/src/config-update.ts";
-import { runCli } from "../apps/gateway/src/cli.ts";
 import { validateAgyConfig } from "@agent-proxy/agy";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { applyWebUiConfigPatch, readGatewayConfigFile } from "../apps/gateway/src/config-update.ts";
+import { GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function validConfig(paths: ResolvedPaths): GatewayConfig {

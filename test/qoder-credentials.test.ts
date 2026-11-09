@@ -1,9 +1,8 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
+import { createCipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createCipheriv, pbkdf2Sync, randomBytes } from "node:crypto";
 import {
   defaultQoderConfigDir,
   loadQoderCredentials,
@@ -13,6 +12,7 @@ import {
   qoderDesktopCredentialsPresent,
   qoderRegionCredentialsPresent,
 } from "@agent-proxy/qoder/credentials";
+import test from "./host-test.ts";
 
 const MACHINE = "aabbccdd-1122-3344-5566-778899aabbcc";
 const USER = { uid: "synthetic-account", access_token: "synthetic-access-secret", security_oauth_token: "synthetic-security-secret",

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
+import { createQueueAwareInfer, QoderQueueError, type QoderInferFn } from "@agent-proxy/qoder/queue";
 import { parseQueueStatus } from "@agent-proxy/qoder/sse";
-import { createQueueAwareInfer, QoderQueueError } from "@agent-proxy/qoder/queue";
-import type { QoderInferFn } from "@agent-proxy/qoder/queue";
+import test from "./host-test.ts";
 import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
 
 const credential = { region: "intl" as const, clientProfile: "cli" as const, identity: "i", accountUid: "a", authDirectory: "/x",

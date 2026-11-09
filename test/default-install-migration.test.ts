@@ -1,13 +1,13 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import test from "node:test";
+import { assertCodexHomeAvailable, claimCodexHome, releaseCodexHome } from "../apps/gateway/src/codex-ownership.ts";
 import { AGENT_DEFAULTS, agentConfigEnabled, effectiveAgentConfig } from "../apps/gateway/src/config.ts";
 import { prepareDefaultInstallMigration } from "../apps/gateway/src/default-install-migration.ts";
-import { assertCodexHomeAvailable, claimCodexHome, releaseCodexHome } from "../apps/gateway/src/codex-ownership.ts";
-import { renderLaunchAgent } from "../apps/gateway/src/launchd.ts";
 import { createApiKeyStore } from "../apps/gateway/src/keychain.ts";
+import { renderLaunchAgent } from "../apps/gateway/src/launchd.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
 
 function fixture(run: (home: string, legacy: string) => void): void {

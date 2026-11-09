@@ -1,8 +1,6 @@
-import { createClientResponse } from "@agent-proxy/llm-bridge";
-import type { ClientOutputResult, ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import { createClientResponse, type ClientOutputResult, type ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import { asObject, encoder,parseJsonObject, parseQueueStatus, readFrames, type Json } from "./sse.ts";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
-import { asObject, readFrames, parseQueueStatus, parseJsonObject, encoder } from "./sse.ts";
-import type { Json } from "./sse.ts";
 
 /**
  * Qoder 私有 infer 信封 → 标准 Chat Completions 流 → 客户端协议输出。

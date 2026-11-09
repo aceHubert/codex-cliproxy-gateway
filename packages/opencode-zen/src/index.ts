@@ -1,11 +1,17 @@
-import { bindHostMethods, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin } from "@agent-proxy/plugin-api";
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { isIP } from "node:net";
+import { clientErrorResponse, normalizeResponsesToolDeclarations, type ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import { bindHostMethods, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type GatewayPlugin,type HostServices, type ClientProtocol, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import {
-  createOpenCodeSessionResolver,
-} from "./session.ts";
+  classifyOpencodeZenProbeSignal,
+  createOpencodeZenCatalogStore,
+  isOpencodeZenModel,
+  mergeOpencodeZenCatalog,
+  OPENCODE_ZEN_PREFIX,
+  opencodeZenUpstreamModel, type OpencodeZenModelProtocol, type OpencodeZenProbeResult
+} from "./catalog.ts";
+import { convertOpencodeZenRequest, mergeOpencodeZenToolIdentities, renderOpencodeZenClientOutput, type OpencodeZenPreparedRequest } from "./convert.ts";
 import {
   breakOpencodeZenBlockedToolNamePairs,
   buildOpencodeZenUpstreamHeaders,
@@ -13,31 +19,12 @@ import {
   injectOpencodeZenFingerprintBody,
   mergeOpencodeZenGateToolsResponses,
 } from "./fingerprint.ts";
-
-import {
-  OPENCODE_ZEN_PREFIX,
-  classifyOpencodeZenProbeSignal,
-  createOpencodeZenCatalogStore,
-  isOpencodeZenModel,
-  mergeOpencodeZenCatalog,
-  opencodeZenUpstreamModel,
-} from "./catalog.ts";
-import type { OpencodeZenModelProtocol, OpencodeZenProbeResult } from "./catalog.ts";
 import { aggregateOpencodeZenStreamToCompletion } from "./response.ts";
-import { convertOpencodeZenRequest, mergeOpencodeZenToolIdentities, renderOpencodeZenClientOutput } from "./convert.ts";
-import type { OpencodeZenPreparedRequest } from "./convert.ts";
-import { clientErrorResponse, normalizeResponsesToolDeclarations } from "@agent-proxy/llm-bridge";
-import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
-import { createOpencodeZenUserAgentStore } from "./user-agent.ts";
-import type { OpencodeZenUserAgentStore } from "./user-agent.ts";
+import {
+  createOpenCodeSessionResolver,
+} from "./session.ts";
+import { createOpencodeZenUserAgentStore, type OpencodeZenUserAgentStore } from "./user-agent.ts";
 
-
-import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
-import type { RequestLogSink } from "@agent-proxy/plugin-api";
-import { resolvePaths } from "@agent-proxy/plugin-api";
-import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
-import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
 
 /**
  * OpenCode Zen（https://opencode.ai/inference/openai/v1）免费模型入口门面。

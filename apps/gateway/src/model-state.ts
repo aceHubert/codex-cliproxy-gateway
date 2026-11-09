@@ -1,11 +1,11 @@
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
 import { filterExcludedModels, normalizeCatalog } from "./catalog.ts";
 import { managedCatalogFiles } from "./paths.ts";
-import { configuredCatalogFile } from "./upstream-catalog.ts";
 import { logConfigChange } from "./process-log.ts";
 import { atomicWrite, hasRootTomlKey, patchRootToml, readRootTomlString, restoreRootTomlKeys } from "./toml.ts";
+import { configuredCatalogFile } from "./upstream-catalog.ts";
 import type { GatewayConfig, ModelCatalog, ModelEntry, ResolvedPaths } from "./types.ts";
 
 export interface ModelCatalogSource {

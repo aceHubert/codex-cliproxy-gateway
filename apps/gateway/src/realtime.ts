@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import { logGatewayError, logRequestSummary } from "./process-log.ts";
-import { httpLogFile, localTime, logGroupFromPath, logRealtimeEvent } from "./request-log.ts";
-import type { LogFileRef, RequestLogSink } from "./request-log.ts";
-import { OFFICIAL_BASE_URL, MOUNT_PATH } from "./types.ts";
-import type { GatewayConfig } from "./types.ts";
+import { httpLogFile, localTime, logGroupFromPath, logRealtimeEvent, type LogFileRef, type RequestLogSink } from "./request-log.ts";
+import { ThreadRoutingError, type ThreadRouteKind } from "./thread-routing.ts";
+import { MOUNT_PATH,OFFICIAL_BASE_URL, type GatewayConfig } from "./types.ts";
 import type { WebSocketSession } from "@agent-proxy/plugin-api";
 
 const MAX_REALTIME_BODY_BYTES = 16 * 1024 * 1024;
@@ -64,8 +63,10 @@ export interface RealtimeSocketData extends RealtimeWebSocketTarget {
   routeKind?: "cliproxy" | "official";
   /** cliproxy 模型前缀，用于逐帧校验与剥离。 */
   prefix?: string;
-  /** official 连接首次收到明确的 cliproxy/* 帧时，固定该 thread 的后续路由。 */
-  pinCpaThread?: () => void;
+  /** 根线程根据真实模型帧更新路由，子线程动态读取父路由。 */
+  resolveFrameRoute?: (model: string, confirmed: boolean, parentThreadId?: string) => ThreadRouteKind;
+  /** 连接已经关闭或正在切换，阻止随后排队的异步帧再次发出。 */
+  routingClosed?: boolean;
   /**
    * cliproxy Responses 连接逐 turn 记录 turn_id：图片请求（x-codex-image-turn-id）
    * 不带 thread-id，只能凭触发 turn 的 turn_id 继承会话路由。
@@ -96,16 +97,15 @@ export type FrameRouting =
 /**
  * 校验帧的模型与连接路由是否一致。
  * 注册插件的模型不能送入默认 WebSocket 上游，断开后重新按插件能力握手；
- * official 只拒绝明确的 cliproxy/*；
- * CPA thread 已固定路由，无前缀标题/系统帧继续走 CPA。返回 forward（可改写后的帧）、
- * reject（调用方断开客户端并关闭上游）或 reconnect（official 收到 CPA 帧，调用方固定
- * thread 后断开重连）。
+ * 根据根线程当前选择或子线程继承的最终上游执行双向检查。
+ * 无模型控制帧继续透传，upstream-only 的空前缀不进行上游切换。
  */
 export function checkFrameRouting(
   frame: string,
   routeKind: "cliproxy" | "official",
   prefix: string,
   pluginModelFamily: (model: string) => string | undefined = () => undefined,
+  resolveFrameRoute?: RealtimeSocketData["resolveFrameRoute"],
 ): FrameRouting {
   let payload: unknown;
   try {
@@ -125,9 +125,14 @@ export function checkFrameRouting(
     return { kind: "reject", model, family };
   }
   if (!prefix) return { kind: "forward", frame };
-  if (!record || typeof model !== "string") return { kind: "forward", frame };
+  if (!record || typeof model !== "string" || !model || record.type !== "response.create") return { kind: "forward", frame };
   const prefixed = model.startsWith(prefix);
-  if (routeKind === "official") return prefixed ? { kind: "reconnect" } : { kind: "forward", frame };
+  const metadata = isRecord(record.client_metadata) ? record.client_metadata : undefined;
+  const parent = metadata?.["x-codex-parent-thread-id"];
+  const parentThreadId = typeof parent === "string" && parent.trim().length <= 128 ? parent.trim() || undefined : undefined;
+  const targetKind = resolveFrameRoute?.(model, record.generate !== false, parentThreadId)
+    ?? (prefixed ? "cliproxy" : "official");
+  if (targetKind !== routeKind) return { kind: "reconnect" };
   if (!prefixed) return { kind: "forward", frame };
   // 前缀是网关加的，上游模型表里没有，必须与 HTTP 路径一样剥掉再转发。
   record.model = model.slice(prefix.length);
@@ -591,13 +596,28 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
     };
   },
   message(ws, message) {
+    if (ws.data.routingClosed) return;
     const upstream = ws.data.upstream;
     let frame = typeof message === "string" ? message : Buffer.from(message);
     // Codex 复用连接跨模型发送，握手时选定的上游可能已不适用于当前帧。
-    if (ws.data.routeKind && typeof frame === "string") {
-      const routed = checkFrameRouting(frame, ws.data.routeKind, ws.data.prefix ?? "cliproxy/", ws.data.pluginModelFamily);
+    if (ws.data.routeKind) {
+      const routingFrame = typeof frame === "string" ? frame : frame.toString("utf8");
+      let routed: FrameRouting;
+      try {
+        routed = checkFrameRouting(routingFrame, ws.data.routeKind, ws.data.prefix ?? "cliproxy/", ws.data.pluginModelFamily, ws.data.resolveFrameRoute);
+      } catch (error) {
+        if (!(error instanceof ThreadRoutingError)) throw error;
+        ws.data.routingClosed = true;
+        logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
+          event: "ws-route-unavailable", url: ws.data.url,
+          detail: { routeKind: ws.data.routeKind, error: error.message },
+        });
+        upstream?.close(1000, "Thread routing unavailable");
+        ws.close(1012, "Thread routing unavailable; retry required");
+        return;
+      }
       if (routed.kind === "reconnect") {
-        if (ws.data.routeKind === "official") ws.data.pinCpaThread?.();
+        ws.data.routingClosed = true;
         logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
           event: "ws-route-mismatch",
           url: ws.data.url,
@@ -609,6 +629,7 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
         return;
       }
       if (routed.kind === "reject") {
+        ws.data.routingClosed = true;
         // HTTP-only 族不经任何桥转发。断开让 Codex 重新协商：新握手由 gateway 侧
         // 现有闸门直接回 426，客户端随后降级 HTTPS/SSE；上游关闭避免半开连接。
         logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
@@ -627,16 +648,18 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
         ws.close(1012, "Model requires HTTPS/SSE; reconnect to negotiate");
         return;
       }
-      frame = routed.frame;
+      if (routed.frame !== routingFrame) frame = routed.frame;
     }
     // cliproxy Responses 连接：逐 turn 记录 turn_id，供图片请求（x-codex-image-turn-id）继承路由。
-    if (ws.data.noteTurnId && typeof frame === "string") {
-      const turnId = turnIdFromResponseCreate(frame);
+    if (ws.data.noteTurnId) {
+      const turnId = turnIdFromResponseCreate(typeof frame === "string" ? frame : frame.toString("utf8"));
       if (turnId) ws.data.noteTurnId(turnId);
     }
     if (ws.data.handleResponseFrame && typeof frame === "string") {
       const processFrame = async (): Promise<void> => {
+        if (ws.data.routingClosed) return;
         const action = await ws.data.handleResponseFrame!(frame as string);
+        if (ws.data.routingClosed) return;
         if (action?.kind === "events") {
           for (const event of action.events) sendToClient(ws, event);
           return;
@@ -703,6 +726,7 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
     ws.data.queuedBytes = nextBytes;
   },
   close(ws, code, reason) {
+    ws.data.routingClosed = true;
     logRealtimeEvent(ws.data.log, ws.data.logFile ?? httpLogFile("realtime"), {
       event: "ws-client-close",
       url: ws.data.url,

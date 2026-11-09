@@ -1,9 +1,9 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
 import fingerprintData from "@agent-proxy/qoder/fingerprint-data.json";
 import { createQoderTransport, decodeQoderBody, encodeQoderBody, QODER_PROTOCOL_VERSION, type QoderFetch } from "@agent-proxy/qoder/transport";
+import test from "./host-test.ts";
+import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
 
 const CREDENTIAL: QoderCredentials = { region: "intl", clientProfile: "cli", accountUid: "synthetic-user", authDirectory: "/synthetic/auth", identity: "synthetic-identity",
   machineId: "synthetic-machine", organizationId: "synthetic-org", organizationTags: ["tag1", "tag2"], dataPolicyAgreed: true,

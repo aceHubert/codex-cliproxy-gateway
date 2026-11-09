@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ZcodeFamily, ZcodeSelection } from "./config.ts";
 import { decryptZcodeCredential } from "./credential-cipher.ts";
+import type { ZcodeFamily, ZcodeSelection } from "./config.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const TEAM_API_KEY_NAME = "zcode-team-api-key";

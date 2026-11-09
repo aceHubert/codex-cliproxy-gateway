@@ -1,22 +1,22 @@
-import { PluginRegistry, compileModelPattern } from "@agent-proxy/plugin-api";
-import type { GatewayPlugin, HttpRequestContext } from "@agent-proxy/plugin-api";
 import path from "node:path";
-import { createZcodePlugin, ZCODE_MODEL_PATTERNS, ZCODE_RUNTIME_ARTIFACTS, type ZcodeDependencies } from "@agent-proxy/zcode";
-import { createCodebuddyPlugin, CODEBUDDY_MODEL_PATTERNS, CODEBUDDY_RUNTIME_ARTIFACTS, type CodebuddyDependencies } from "@agent-proxy/codebuddy";
-import { createQoderPlugin, QODER_MODEL_PATTERNS, QODER_RUNTIME_ARTIFACTS, type QoderDependencies } from "@agent-proxy/qoder";
-import { createAgyPlugin, AGY_MODEL_PATTERNS, AGY_RUNTIME_ARTIFACTS, type AgyDependencies } from "@agent-proxy/agy";
+import { AGY_MODEL_PATTERNS, AGY_RUNTIME_ARTIFACTS, createAgyPlugin,type AgyDependencies } from "@agent-proxy/agy";
+import { CODEBUDDY_MODEL_PATTERNS, CODEBUDDY_RUNTIME_ARTIFACTS, createCodebuddyPlugin,type CodebuddyDependencies } from "@agent-proxy/codebuddy";
 import { createOpencodeZenPlugin, OPENCODE_ZEN_MODEL_PATTERNS, OPENCODE_ZEN_RUNTIME_ARTIFACTS, type OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
+import { compileModelPattern,PluginRegistry, type GatewayPlugin, type HttpRequestContext } from "@agent-proxy/plugin-api";
+import { createQoderPlugin, QODER_MODEL_PATTERNS, QODER_RUNTIME_ARTIFACTS, type QoderDependencies } from "@agent-proxy/qoder";
+import { createZcodePlugin, ZCODE_MODEL_PATTERNS, ZCODE_RUNTIME_ARTIFACTS, type ZcodeDependencies } from "@agent-proxy/zcode";
 import { agentConfigEnabled } from "./config.ts";
-import { validateConfiguredPlugins } from "./plugin-config.ts";
-import { createGatewayHostServices } from "./host-services.ts";
 import {
-  buildCompactionRequest, compactV1Output, compactionError, hasCompactionTrigger,
+  buildCompactionRequest, compactionError, compactV1Output,   createPluginGatewayHandler, hasCompactionTrigger,
   isCompletedCompactionPayload, noCompactionSummaryError, responseText,
-  rewriteCompactionHistory, syntheticCompactionResponse,
-  createPluginGatewayHandler, startPluginGateway,
+  rewriteCompactionHistory, startPluginGateway,
+syntheticCompactionResponse,
 } from "./gateway.ts";
+import { createGatewayHostServices } from "./host-services.ts";
 import { readApiKey } from "./keychain.ts";
 import { managedCatalogFiles, resolvePaths } from "./paths.ts";
+import { validateConfiguredPlugins } from "./plugin-config.ts";
+import { ThreadRoutingState } from "./thread-routing.ts";
 import type { RealtimeProviderMode } from "./realtime.ts";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
 
@@ -131,7 +131,7 @@ export function createGatewayHandler(
   config: GatewayConfig,
   apiKey = readApiKey(),
   realtimeProviderMode: RealtimeProviderMode = "invalid",
-  cpaThreads = new Set<string>(),
+  threadRoutes = new ThreadRoutingState(),
   cpaTurns = new Set<string>(),
   clientVersionFile?: string,
   zcodeDependencies?: ZcodeDependencies,
@@ -146,7 +146,7 @@ export function createGatewayHandler(
     zcode: zcodeDependencies, codebuddy: codebuddyDependencies, qoder: qoderDependencies,
     agy: agyDependencies, opencodeZen: opencodeZenDependencies,
   }, processLog, runtimePaths, apiKey);
-  return createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, cpaThreads,
+  return createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, threadRoutes,
     cpaTurns, clientVersionFile, processLog, runtimePaths, isInstalledPluginModel);
 }
 

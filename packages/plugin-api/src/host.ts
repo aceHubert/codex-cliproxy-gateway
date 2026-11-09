@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { HostServices, AgentConfig, ModelCatalog, ModelEntry, ModelOverrideRule, RequestLogSink, ExchangeEntry, LogNamespace, ProcessLogTarget, ErrorEntry, RequestSummary } from "./types.ts";
+import type { AgentConfig, ErrorEntry, ExchangeEntry, HostServices, LogNamespace, ModelCatalog, ModelEntry, ModelOverrideRule, ProcessLogTarget, RequestLogSink, RequestSummary } from "./types.ts";
 
 const hosts = new AsyncLocalStorage<HostServices<AgentConfig>>();
 

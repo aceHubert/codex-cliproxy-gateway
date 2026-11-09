@@ -1,6 +1,6 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { DEFAULT_RUNTIME_DIRECTORY, LEGACY_RUNTIME_DIRECTORY, legacyLaunchAgentPaths, realPathOrResolve } from "./paths.ts";
 import type { ResolvedPaths } from "./types.ts";
 

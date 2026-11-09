@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import { QoderRequestError, translateQoderRequest } from "@agent-proxy/qoder/request";
 import { QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
+import test from "./host-test.ts";
 
 type Json = Record<string, unknown>;
 

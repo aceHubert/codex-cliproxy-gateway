@@ -1,8 +1,8 @@
-import fs from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { getHostServices } from "@agent-proxy/plugin-api";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getHostServices } from "@agent-proxy/plugin-api";
 
 /** CodeBuddy 凭据地域；具体请求按模型地域筛选凭据，auto 表示自动选择。 */
 export type CodebuddyRegion = "auto" | "cn" | "intl";

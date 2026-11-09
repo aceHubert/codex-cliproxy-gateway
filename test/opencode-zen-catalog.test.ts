@@ -3,25 +3,24 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
+import { getCodexBaselineEntry } from "@agent-proxy/models";
 import {
-  OPENCODE_ZEN_DISPLAY_PREFIX,
-  OPENCODE_ZEN_PREFIX,
   buildOpencodeZenCatalog,
   classifyOpencodeZenProbeSignal,
   createOpencodeZenCatalogStore,
   filterOpencodeZenCatalogIds,
   isOpencodeZenModel,
   mergeOpencodeZenCatalog,
-  parseOpencodeZenMetadataResponse,
-  parseOpencodeZenModelsResponse,
+  OPENCODE_ZEN_DISPLAY_PREFIX,
+  OPENCODE_ZEN_PREFIX,
   opencodeZenDefaultEffort,
   opencodeZenDisplayName,
   opencodeZenUpstreamModel,
+  parseOpencodeZenMetadataResponse,
+  parseOpencodeZenModelsResponse, type OpencodeZenModelMetadata
 } from "@agent-proxy/opencode-zen/catalog";
-import type { OpencodeZenModelMetadata } from "@agent-proxy/opencode-zen/catalog";
 import { OPENCODE_ZEN_AGENT_SYSTEM_PROMPT } from "@agent-proxy/opencode-zen/fingerprint";
-import { getCodexBaselineEntry } from "@agent-proxy/models";
+import test from "./host-test.ts";
 import type { ModelCatalog } from "../apps/gateway/src/types.ts";
 
 /** 零计费元数据条目（免费模型的默认形状）。 */

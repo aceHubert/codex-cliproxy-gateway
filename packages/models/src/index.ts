@@ -1,6 +1,6 @@
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 import codexClientModels from "../codex_client_models.json";
 import vendorModels from "../vendor_models.json";
+import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
 
 export interface VendorModelPreset { name: string; [key: string]: unknown; }
 export type VendorModelPresets = Record<string, VendorModelPreset[]>;

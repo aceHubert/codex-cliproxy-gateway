@@ -1,24 +1,9 @@
-import test from "./host-test.ts";
+import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
-import type { ReadStream, WriteStream } from "node:tty";
-import { createGatewayHandler, decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
-import { isRequestLogName, pruneLogDir, retainLogFile } from "../apps/gateway/src/request-log.ts";
-import {
-  GATEWAY_CONFIG_SCHEMA_URL,
-  GATEWAY_CONFIG_VERSION,
-  gatewayConfigWarnings,
-  mergeMissingConfig,
-} from "../apps/gateway/src/config.ts";
-import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
-import { capGatewayLog } from "../apps/gateway/src/process-log.ts";
-import { httpLogFile, websocketLogFile } from "../apps/gateway/src/request-log.ts";
-import { LEGACY_STDERR_LOG, instanceMarker, resolvePaths } from "../apps/gateway/src/paths.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 import {
   compileModelOverrides,
   fetchCliProxyCatalog,
@@ -27,10 +12,9 @@ import {
   mergeCatalog,
   parseCodexCatalog,
   resolveModelMergeJson,
-  synthesizeModelEntry,
   syncCatalog,
+  synthesizeModelEntry,
 } from "../apps/gateway/src/catalog.ts";
-import { configuredCatalogFile } from "../apps/gateway/src/upstream-catalog.ts";
 import {
   applyModelCatalogToml,
   applyRoutingMode,
@@ -43,7 +27,13 @@ import {
   syncGatewayConfigFile,
   waitForHealth,
 } from "../apps/gateway/src/cli.ts";
-import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
+import {
+  GATEWAY_CONFIG_SCHEMA_URL,
+  GATEWAY_CONFIG_VERSION,
+  gatewayConfigWarnings,
+  mergeMissingConfig,
+} from "../apps/gateway/src/config.ts";
+import { createGatewayHandler, decideRoute, installedPluginArtifactFiles, isLoopbackUrl, joinUpstreamUrl, managedRuntimeCatalogFiles, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
 import {
   applyModelPickerKey,
   chooseModels,
@@ -51,6 +41,15 @@ import {
   parseModelSelection,
   selectedModelsFromCatalog,
 } from "../apps/gateway/src/models.ts";
+import { instanceMarker, LEGACY_STDERR_LOG, resolvePaths } from "../apps/gateway/src/paths.ts";
+import { capGatewayLog } from "../apps/gateway/src/process-log.ts";
+import { httpLogFile, isRequestLogName, pruneLogDir, retainLogFile, websocketLogFile } from "../apps/gateway/src/request-log.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
+import { configuredCatalogFile } from "../apps/gateway/src/upstream-catalog.ts";
+import test from "./host-test.ts";
+import type { ReadStream, WriteStream } from "node:tty";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 test("error logs include a timestamp separator and omit blank lines", () => {
   assert.equal(
@@ -1210,7 +1209,7 @@ test("failed requests keep the full exchange in the route log and the digest in 
       logTestConfig(logDir),
       "proxy-key",
       "invalid",
-      new Set<string>(),
+      new ThreadRoutingState(),
       undefined,
       undefined,
       undefined,
@@ -1344,7 +1343,7 @@ test("successful requests get one process-log line naming the upstream, without 
       logTestConfig(logDir),
       "proxy-key",
       "invalid",
-      new Set<string>(),
+      new ThreadRoutingState(),
       undefined,
       undefined,
       undefined,
@@ -1387,7 +1386,7 @@ test("request summaries respect the process log size cap", async () => {
       logTestConfig(logDir),
       "proxy-key",
       "invalid",
-      new Set<string>(),
+      new ThreadRoutingState(),
       undefined,
       undefined,
       undefined,
@@ -2167,7 +2166,7 @@ test("protocol negotiation 426 is logged but kept out of the error digest", asyn
       logTestConfig(logDir),
       "proxy-key",
       "invalid",
-      new Set<string>(),
+      new ThreadRoutingState(),
       undefined,
       undefined,
       undefined,
@@ -2218,10 +2217,10 @@ test("routing hint decides the upstream and lets official traffic skip body deco
     catalogPath: "/tmp/missing-catalog.json",
   };
   try {
-    const cpaThreads = new Set<string>();
+    const cpaThreads = new ThreadRoutingState();
     const handler = createGatewayHandler(config, "proxy-key", "invalid", cpaThreads);
 
-    // hint 指向 cliproxy：即便 payload 无前缀也要走 CLIProxy，并把 model 改写成去前缀的名字。
+    // hint 与 payload 指向 CLIProxy，转发时剥离模型前缀。
     let sent: RequestInit | undefined;
     globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
       captured.push(String(url instanceof Request ? url.url : url));
@@ -2235,7 +2234,7 @@ test("routing hint decides the upstream and lets official traffic skip body deco
         "thread-id": "thread-cpa",
         "x-codex-routing-hint": "model=cliproxy/claude-opus-4-6;tier=ultrafast",
       },
-      body: JSON.stringify({ model: "claude-opus-4-6", input: "hi" }),
+      body: JSON.stringify({ model: "cliproxy/claude-opus-4-6", input: "hi" }),
     }));
     assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
     assert.equal(
@@ -2244,21 +2243,24 @@ test("routing hint decides the upstream and lets official traffic skip body deco
     );
     assert.equal(JSON.parse(String(sent?.body)).model, "claude-opus-4-6");
 
-    // 同一 thread 首次出现 cliproxy/ 后，无前缀 Luna 标题请求也固定走 CPA。
+    // 根线程明确选择官方模型时解除旧 CPA 路由。
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "thread-id": "thread-cpa",
         "x-codex-routing-hint": "model=gpt-5.6-luna",
+        authorization: "Bearer official-oauth",
       },
       body: JSON.stringify({ model: "gpt-5.6-luna", input: "generate title" }),
     }));
-    assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
-    assert.equal(new Headers(sent?.headers).get("authorization"), "Bearer proxy-key");
-    assert.equal(JSON.parse(String(sent?.body)).model, "gpt-5.6-luna");
+    assert.equal(captured.at(-1), "https://chatgpt.com/backend-api/codex/responses");
+    assert.equal(new Headers(sent?.headers).get("authorization"), "Bearer official-oauth");
+    assert.equal((await new Response(sent?.body as BodyInit).json() as { model: string }).model, "gpt-5.6-luna");
+    assert.equal(cpaThreads.get("thread-cpa"), "official");
 
     // 子智能体使用独立 thread/WS，但父 thread 已固定 CPA 时必须继承同一上游。
+    cpaThreads.resolve("thread-cpa", undefined, "cliproxy", true);
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: {
@@ -2270,7 +2272,7 @@ test("routing hint decides the upstream and lets official traffic skip body deco
       body: JSON.stringify({ model: "codex-auto-review", input: "review" }),
     }));
     assert.equal(captured.at(-1), "https://proxy.example/v1/responses");
-    assert.equal(cpaThreads.has("thread-guardian"), true);
+    assert.equal(cpaThreads.get("thread-guardian"), "cliproxy");
 
     // 另一个没有 cliproxy 信号的 thread 仍走官方，不能被同 session 的 CPA thread 污染。
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
@@ -2339,7 +2341,7 @@ test("image generations inherit the cliproxy route of their triggering turn", as
     catalogPath: "/tmp/missing-catalog.json",
   };
   try {
-    const cpaThreads = new Set<string>();
+    const cpaThreads = new ThreadRoutingState();
     const cpaTurns = new Set<string>();
     const handler = createGatewayHandler(config, "proxy-key", "invalid", cpaThreads, cpaTurns);
 
@@ -2471,7 +2473,7 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
     "proxy-key",
   ));
 
-  const cpaThreads = new Set<string>();
+  const cpaThreads = new ThreadRoutingState();
   const stickyHeaders = { ...probeHeaders, "thread-id": "thread-cpa" };
   assert.ok(responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
@@ -2506,7 +2508,7 @@ test("responses WebSocket target routes by hint and swaps auth for cliproxy", ()
   );
   assert.equal(stickyGuardian?.url, "wss://cliproxy.example/v1/responses");
   assert.equal(stickyGuardian?.headers.authorization, "Bearer proxy-key");
-  assert.equal(cpaThreads.has("thread-guardian"), true);
+  assert.equal(cpaThreads.get("thread-guardian"), "cliproxy");
   const isolatedOfficial = responsesWebSocketTarget(
     new Request("http://127.0.0.1:8320/v1/responses", {
       headers: { ...probeHeaders, "thread-id": "thread-official", "x-codex-routing-hint": "model=gpt-5.6-luna" },

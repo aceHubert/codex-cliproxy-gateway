@@ -1,4 +1,3 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -6,12 +5,13 @@ import path from "node:path";
 import {
   isCodexAppServerProcess,
   parseWindowsCommandLine,
-  stopCodexAppServers,
+  stopCodexAppServers, type ProcessIdentity
 } from "../apps/gateway/src/app-server.ts";
 import { runCli } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
-import type { ProcessIdentity } from "../apps/gateway/src/app-server.ts";
+import test from "./host-test.ts";
+
 
 function appServer(pid: number, overrides: Partial<ProcessIdentity> = {}): ProcessIdentity {
   return {

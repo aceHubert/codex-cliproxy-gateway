@@ -1,6 +1,6 @@
 import { createClientResponse } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { encodeCodebuddyReasoning } from "./wire.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { CodebuddyToolMap } from "./request.ts";
 
 /**
