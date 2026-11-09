@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
+import { translateAgyRequest } from "@agent-proxy/agy/request";
 import { translateCodebuddyRequest } from "@agent-proxy/codebuddy/request";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "@agent-proxy/codebuddy/request-context";
 import { createCodebuddyResponse as codebuddyClientResponse } from "@agent-proxy/codebuddy/response";
 import { translateQoderRequest } from "@agent-proxy/qoder/request";
-import { QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
 import { translateQoderResponse } from "@agent-proxy/qoder/response";
+import { QODER_AGENT_SYSTEM_PROMPT } from "@agent-proxy/qoder/transport";
 import { translateZcodeRequest } from "@agent-proxy/zcode/request";
 import { ZCODE_AGENT_SYSTEM_PROMPT } from "@agent-proxy/zcode/request-context";
 import { createZcodeClientResponse } from "@agent-proxy/zcode/response";
 import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
-import { translateAgyRequest } from "@agent-proxy/agy/request";
+import test from "./host-test.ts";
 
 /**
  * 逐家三协议入口 fake 验收：每家至少覆盖 chat-completions 与 anthropic 来源的

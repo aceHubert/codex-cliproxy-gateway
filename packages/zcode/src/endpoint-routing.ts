@@ -1,6 +1,5 @@
 /** ZCode 端点动态重映射 — 复刻桌面客户端 3.7+ 的 ProviderEndpointRoutingService。 */
-import { buildZcodeSourceHeaders } from "./request-context.ts";
-import type { ZcodeIdentity } from "./request-context.ts";
+import { buildZcodeSourceHeaders, type ZcodeIdentity } from "./request-context.ts";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
 const CONFIG_PATH = "/api/v1/agent/configs";

@@ -1,8 +1,7 @@
-import fs from "node:fs";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { getCodexBaselineEntry, getVendorModelPresets } from "@agent-proxy/models";
-import { atomicWrite } from "@agent-proxy/plugin-api";
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
+import { atomicWrite, type ModelCatalog, type ModelEntry } from "@agent-proxy/plugin-api";
 import type { ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
 
 const vendorModelIds = () => (getVendorModelPresets()["z.ai"] ?? []).map((model) => model.name);

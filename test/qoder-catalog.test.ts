@@ -2,19 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import {
   buildQoderCatalog,
   createQoderCatalogStore,
   isQoderModel,
   mergeQoderCatalog,
   parseQoderCatalogData,
+  QODER_CN_PREFIX,
   qoderModelConfig,
   qoderModelSlug,
   qoderRegionOf,
   qoderUpstreamModel,
-  QODER_CN_PREFIX,
 } from "@agent-proxy/qoder/catalog";
+import test from "./host-test.ts";
 import type { QoderCredentials } from "@agent-proxy/qoder/credentials";
 
 function credential(identity = "account-one"): QoderCredentials {

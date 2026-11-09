@@ -3,13 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { PluginRegistry, type GatewayPlugin, type HttpRequestContext } from "@agent-proxy/plugin-api";
-import { createPluginGatewayHandler, startPluginGateway, responsesWebSocketTarget } from "../apps/gateway/src/gateway.ts";
-import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { PluginRegistry, type GatewayPlugin,type HttpRequestContext } from "@agent-proxy/plugin-api";
+import { createPluginGatewayHandler, responsesWebSocketTarget,startPluginGateway } from "../apps/gateway/src/gateway.ts";
 import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 

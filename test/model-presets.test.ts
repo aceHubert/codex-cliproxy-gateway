@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ModelEntry } from "@agent-proxy/plugin-api";
 import {
   CODEX_BASELINE_SLUG,
   codexBaselineEntry,
@@ -10,6 +9,7 @@ import {
 } from "@agent-proxy/models";
 import codexModels from "@agent-proxy/models/codex_client_models.json";
 import vendorModels from "@agent-proxy/models/vendor_models.json";
+import type { ModelEntry } from "@agent-proxy/plugin-api";
 
 test("私有模型包无需主机上下文即可提供完整预设", () => {
   const snapshot = getCodexModelSnapshot();

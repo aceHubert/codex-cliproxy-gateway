@@ -1,15 +1,15 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import {
   assertCodexHomeAvailable,
   claimCodexHome,
   releaseCodexHome,
   resolveInstalledCodexPaths,
 } from "../apps/gateway/src/codex-ownership.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 function fixture(run: (home: string) => void): void {
   const home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "ccp-codex-owner-")));

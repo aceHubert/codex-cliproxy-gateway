@@ -1,6 +1,6 @@
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
 import { AGY_AGENT_SYSTEM_PROMPT, AGY_DEFAULT_PROJECT } from "./transport.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /**
  * Codex Responses → Antigravity v1internal generateContent 请求转换。

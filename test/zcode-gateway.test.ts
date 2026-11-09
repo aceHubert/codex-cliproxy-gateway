@@ -1,20 +1,18 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createGatewayHandler, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
-import { createZcodeAdapter } from "@agent-proxy/zcode";
 import vendorModels from "@agent-proxy/models/vendor_models.json";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
-import { ZcodeConfigError, type ZcodeProviderSnapshot, type ZcodeFamily, type ZcodeSelection } from "@agent-proxy/zcode/config";
+import { createZcodeAdapter } from "@agent-proxy/zcode";
+import { ZcodeConfigError, type ZcodeFamily, type ZcodeProviderSnapshot, type ZcodeSelection } from "@agent-proxy/zcode/config";
 import { ZcodeEndpointRouting } from "@agent-proxy/zcode/endpoint-routing";
-import { ZCODE_AGENT_SYSTEM_PROMPT } from "@agent-proxy/zcode/request-context";
-import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { ZCODE_AGENT_SYSTEM_PROMPT, type ZcodeIdentity } from "@agent-proxy/zcode/request-context";
+import { createGatewayHandler, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
-
+import test from "./host-test.ts";
 import { matchesPluginUpgrade, routingRegistry } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 type Snapshot = ZcodeProviderSnapshot & { modelIds: readonly string[] };

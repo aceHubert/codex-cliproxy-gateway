@@ -1,12 +1,10 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
-import { invalidateModelsCache } from "@agent-proxy/plugin-api";
-import { atomicWrite } from "@agent-proxy/plugin-api";
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
-import type { QoderCredentials, QoderRegion } from "./credentials.ts";
-import { QODER_REGION_LABELS } from "./credentials.ts";
+import { atomicWrite, invalidateModelsCache, type ModelCatalog, type ModelEntry } from "@agent-proxy/plugin-api";
+import { QODER_REGION_LABELS, type QoderCredentials, type QoderRegion } from "./credentials.ts";
+
 
 export const QODER_INTL_PREFIX = "qoder-intl/";
 export const QODER_CN_PREFIX = "qoder-cn/";

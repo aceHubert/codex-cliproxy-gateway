@@ -1,9 +1,9 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createZcodePushTarget, pushZcodeModels, resolveZcodeClientPaths, synthesizeZcodeModelDefinition } from "../apps/gateway/src/zcode-client-sync.ts";
+import test from "./host-test.ts";
 import type { ModelEntry } from "../apps/gateway/src/types.ts";
 
 /** 用户自建 provider（含名为 cliproxy 的条目）的哨兵 ID：推送前后必须一字不动。 */

@@ -1,9 +1,8 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { isZcodeModel } from "@agent-proxy/zcode/catalog";
-import type { GatewayConfig, ModelEntry } from "./types.ts";
 import {
   modelContextWindow,
   modelInputModalities,
@@ -12,6 +11,7 @@ import {
   type ModelPushOutcome,
   type ModelPushTarget,
 } from "./models-push.ts";
+import type { GatewayConfig, ModelEntry } from "./types.ts";
 
 /**
  * 本命令在 ZCode 侧的唯一受管 provider（与 dsh 的 agent-proxy 同构）；用户自建的

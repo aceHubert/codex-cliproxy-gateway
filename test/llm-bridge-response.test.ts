@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  ResponsesOutputShell,
   clientErrorResponse,
   createAnthropicClientOutput,
   createChatCompletionsClientOutput,
@@ -10,8 +9,9 @@ import {
   createResponsesClientOutput,
   parseUpstreamEvents,
   readSseFrames,
+  ResponsesOutputShell, type BridgeStreamEvent
 } from "@agent-proxy/llm-bridge";
-import type { BridgeStreamEvent } from "@agent-proxy/llm-bridge";
+
 
 type Json = Record<string, unknown>;
 

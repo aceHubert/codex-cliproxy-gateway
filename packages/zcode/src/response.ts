@@ -1,7 +1,7 @@
 import { createClientResponse, remapUndeclaredToolName } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
-import { encodeZcodeThinking, isZcodeRecord, type ZcodeToolMap } from "./wire.ts";
 import { gatewayToolCallNarration, gatewayToolResultNarration, type ZcodeGatewayCall } from "./vision.ts";
+import { encodeZcodeThinking, isZcodeRecord, type ZcodeToolMap } from "./wire.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /** 网关代执行工具（analyze_image）的驱动层钩子：执行调用并按需发起上游续跑。 */
 export interface ZcodeGatewayToolsHook {

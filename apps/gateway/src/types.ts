@@ -1,7 +1,7 @@
-import type { AgentConfig } from "@agent-proxy/plugin-api";
+import type {} from "@agent-proxy/agy";
 // 类型导入加载已安装插件的配置增强，不增加运行时依赖调用。
 import type {} from "@agent-proxy/codebuddy";
-import type {} from "@agent-proxy/agy";
+import type { AgentConfig } from "@agent-proxy/plugin-api";
 
 /** 目录契约类型的单一来源在 @agent-proxy/plugin-api（契约包），网关侧只再导出，调用点不变。 */
 export type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";

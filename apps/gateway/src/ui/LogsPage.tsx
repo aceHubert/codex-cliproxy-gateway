@@ -7,10 +7,10 @@ import {
   type RequestLogFile,
   type UiStatus,
 } from "./api.ts";
-import { Header } from "./Header.tsx";
-import { TextView } from "./TextView.tsx";
 import { navigate } from "./hash-router.ts";
+import { Header } from "./Header.tsx";
 import { useI18n } from "./i18n/index.ts";
+import { TextView } from "./TextView.tsx";
 
 type LogTab = "gateway" | "requests";
 

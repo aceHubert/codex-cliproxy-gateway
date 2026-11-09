@@ -1,14 +1,14 @@
-import { useCallback } from "react";
 import { createInstance, type TFunction } from "i18next";
+import { useCallback } from "react";
 import { initReactI18next, useTranslation } from "react-i18next";
-import zhCommon from "./locales/zh/common.ts";
-import zhConfig from "./locales/zh/config.ts";
-import zhLogs from "./locales/zh/logs.ts";
-import zhModels from "./locales/zh/models.ts";
 import enCommon from "./locales/en/common.ts";
 import enConfig from "./locales/en/config.ts";
 import enLogs from "./locales/en/logs.ts";
 import enModels from "./locales/en/models.ts";
+import zhCommon from "./locales/zh/common.ts";
+import zhConfig from "./locales/zh/config.ts";
+import zhLogs from "./locales/zh/logs.ts";
+import zhModels from "./locales/zh/models.ts";
 
 export type Lang = "zh" | "en";
 

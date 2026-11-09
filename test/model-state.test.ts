@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import test from "./host-test.ts";
-import { managedCatalogFiles, resolvePaths } from "../apps/gateway/src/paths.ts";
-import type { AgyDependencies } from "@agent-proxy/agy";
 import {
   applyModelCatalogToml,
   codexCatalogFile,
@@ -14,8 +11,11 @@ import {
   updateCodexModelCatalog,
   writeStaticCatalog,
 } from "../apps/gateway/src/model-composition.ts";
-import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
+import { managedCatalogFiles, resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 import { routingPluginFamily } from "./plugin-routing-fixture.ts";
+import type { AgyDependencies } from "@agent-proxy/agy";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 const hash = (source: string): string => createHash("sha256").update(source).digest("hex");

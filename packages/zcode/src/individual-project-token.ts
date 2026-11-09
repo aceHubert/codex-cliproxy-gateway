@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ZcodeFamily } from "./config.ts";
 import { decryptZcodeCredential } from "./credential-cipher.ts";
+import type { ZcodeFamily } from "./config.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
 const LOCATION_PREFIX = "project-key-location:v1:";

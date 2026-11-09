@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
-import { translateAgyRequest, AgyRequestError } from "@agent-proxy/agy/request";
+import { AgyRequestError,translateAgyRequest } from "@agent-proxy/agy/request";
 import { AGY_AGENT_SYSTEM_PROMPT, AGY_DEFAULT_PROJECT } from "@agent-proxy/agy/transport";
+import test from "./host-test.ts";
 
 const TIMEOUT = { timeout: 30_000 };
 type Json = Record<string, any>;

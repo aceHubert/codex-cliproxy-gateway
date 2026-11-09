@@ -1,7 +1,7 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
-import { ThreadRoutingError, ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { createGatewayHandler, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
+import { ThreadRoutingError, ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const config: GatewayConfig = {

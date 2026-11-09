@@ -1,8 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-
-import type { ErrorEntry, RequestSummary } from "@agent-proxy/plugin-api";
 import { fileStamp, localTime } from "./request-log.ts";
+import type { ErrorEntry, RequestSummary } from "@agent-proxy/plugin-api";
 import type { ProcessLogTarget } from "./types.ts";
 
 export type { ProcessLogTarget };

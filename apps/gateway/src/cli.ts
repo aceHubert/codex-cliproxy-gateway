@@ -1,35 +1,40 @@
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import bytes from "bytes";
+import { compileModelFilter, fetchUpstreamCatalog, filterExcludedModels, invalidateModelsCache } from "./catalog.ts";
+import { assertCodexHomeAvailable, claimCodexHome, codexOwnerRuntimeHome, releaseCodexHome,resolveInstalledCodexPaths } from "./codex-ownership.ts";
+import { resolveCodexClientVersion } from "./codex-version.ts";
 import {
+  AGENT_DEFAULTS,
+  agentConfigEnabled,
+  effectiveAgentConfig,
   GATEWAY_CONFIG_SCHEMA_URL,
   GATEWAY_CONFIG_VERSION,
   gatewayConfigWarnings,
   isJsonObject,
-  mergeMissingConfig,
   LEGACY_FIELD_MIGRATIONS,
+  mergeMissingConfig,
   migrateLegacyConfig,
-  AGENT_DEFAULTS,
-  agentConfigEnabled,
-  effectiveAgentConfig,
 } from "./config.ts";
-import { realPathOrResolve, resolvePaths, LEGACY_STDERR_LOG, runWithInstancePaths, instanceMarker, legacyLaunchAgentPaths } from "./paths.ts";
-import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
 import { prepareDefaultInstallMigration } from "./default-install-migration.ts";
-import { resolveInstalledCodexPaths, assertCodexHomeAvailable, claimCodexHome, codexOwnerRuntimeHome, releaseCodexHome } from "./codex-ownership.ts";
-import {
-  patchRootToml,
-  restoreRootTomlKeys,
-  atomicWrite,
-  readRootTomlString,
-  hasRootTomlKey,
-} from "./toml.ts";
-import { saveApiKey, readApiKey, deleteApiKey } from "./keychain.ts";
-import { fetchUpstreamCatalog, filterExcludedModels, compileModelFilter, invalidateModelsCache } from "./catalog.ts";
-import { resolveCodexClientVersion } from "./codex-version.ts";
+import { createDshPushTarget } from "./dsh-client-sync.ts";
+import { isInstalledPluginModel, isLoopbackUrl, managedRuntimeCatalogFiles, startGateway } from "./gateway-composition.ts";
+import { assertHealthyInstance, InstanceHealthError } from "./instance-health.ts";
+import { deleteApiKey,readApiKey, saveApiKey } from "./keychain.ts";
+import { applyModelCatalogToml, codexCatalogFile, collectAdapterModels, rebuildStaticCatalog,updateCodexModelCatalog, type ModelCatalogDependencies } from "./model-composition.ts";
+import { reloadGatewayModels } from "./model-reload.ts";
+import { pushModelsToTargets,type ModelPushTarget } from "./models-push.ts";
 import { chooseModels, selectedModelsFromCatalog } from "./models.ts";
+import { instanceMarker, LEGACY_STDERR_LOG, legacyLaunchAgentPaths,realPathOrResolve, resolvePaths, runWithInstancePaths } from "./paths.ts";
+import {
+  atomicWrite,
+  hasRootTomlKey,
+  patchRootToml,
+  readRootTomlString,
+  restoreRootTomlKeys,
+} from "./toml.ts";
 import {
   configuredCatalogFile,
   configuredModelPrefix,
@@ -39,56 +44,48 @@ import {
   rebuildCatalog,
   upstreamClientVersion,
 } from "./upstream-catalog.ts";
-import { isInstalledPluginModel, isLoopbackUrl, managedRuntimeCatalogFiles, startGateway } from "./gateway-composition.ts";
-import { applyModelCatalogToml, codexCatalogFile, collectAdapterModels, rebuildStaticCatalog, updateCodexModelCatalog, type ModelCatalogDependencies } from "./model-composition.ts";
-import { reloadGatewayModels } from "./model-reload.ts";
-import { pushModelsToTargets, type ModelPushTarget } from "./models-push.ts";
 import { createZcodePushTarget } from "./zcode-client-sync.ts";
-import { createDshPushTarget } from "./dsh-client-sync.ts";
 export { applyModelCatalogToml } from "./model-state.ts";
-import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
 import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 import { requestLogDir } from "./request-log.ts";
+import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
 export { parseMaxLogSize, parseMaxRequestLogs } from "./config-update.ts";
-import type { ZcodeDependencies } from "@agent-proxy/zcode";
-import type { CodebuddyDependencies } from "@agent-proxy/codebuddy";
-import { validateConfiguredPlugins } from "./plugin-config.ts";
 import {
   defaultAuthDirectory,
   listCodebuddyAccounts,
   resolveCodebuddyAccountFile,
 } from "@agent-proxy/codebuddy/credentials";
-import type { QoderDependencies } from "@agent-proxy/qoder";
-import type { AgyDependencies } from "@agent-proxy/agy";
-import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
-import { loadRealtimeProviderMode } from "./realtime.ts";
-import { capGatewayLog, logConfigChange } from "./process-log.ts";
-import type { ConfigChange } from "./process-log.ts";
 import { stopCodexAppServers } from "./app-server.ts";
 import {
+  adoptLegacyLaunchAgents,
+  gatewayServiceLabel,
   installLaunchAgent,
-  uninstallLaunchAgent,
+  launchAgentStatus,
+  plistServiceLabel,
+  reloadLaunchAgent,
+  removeLegacyLaunchAgents,
+  restartLaunchAgent,
   startLaunchAgent,
   startWebUiLaunchAgent,
   stopLaunchAgent,
-  restartLaunchAgent,
-  reloadLaunchAgent,
-  launchAgentStatus,
-  gatewayServiceLabel,
+  uninstallLaunchAgent,
   webUiServiceLabel,
-  adoptLegacyLaunchAgents,
-  removeLegacyLaunchAgents,
-  plistServiceLabel,
 } from "./launchd.ts";
-import { MOUNT_PATH } from "./types.ts";
-import type {
-  CliOptions,
-  GatewayConfig,
-  ModelCatalog,
-  ModelEntry,
-  ResolvedPaths,
-  UpstreamType,
-} from "./types.ts";
+import { validateConfiguredPlugins } from "./plugin-config.ts";
+import { capGatewayLog, logConfigChange, type ConfigChange } from "./process-log.ts";
+import { loadRealtimeProviderMode } from "./realtime.ts";
+import { MOUNT_PATH,
+  type CliOptions,
+  type GatewayConfig,
+  type ModelCatalog,
+  type ModelEntry,
+  type ResolvedPaths,
+  type UpstreamType } from "./types.ts";
+import type { AgyDependencies } from "@agent-proxy/agy";
+import type { CodebuddyDependencies } from "@agent-proxy/codebuddy";
+import type { OpencodeZenDependencies } from "@agent-proxy/opencode-zen";
+import type { QoderDependencies } from "@agent-proxy/qoder";
+import type { ZcodeDependencies } from "@agent-proxy/zcode";
 
 const DEFAULTS = {
   host: "127.0.0.1",

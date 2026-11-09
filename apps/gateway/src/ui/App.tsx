@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { captureTokenFromUrl, getUiStatus, setUiToken, ApiError, type UiStatus } from "./api.ts";
+import { ApiError, captureTokenFromUrl, getUiStatus, setUiToken, type UiStatus } from "./api.ts";
+import { ConfigPage } from "./ConfigPage.tsx";
 import { useHashRoute } from "./hash-router.ts";
 import { useI18n } from "./i18n/index.ts";
-import { ConfigPage } from "./ConfigPage.tsx";
 import { LogsPage } from "./LogsPage.tsx";
 
 function TokenPrompt({ onDone }: { onDone: () => void }) {

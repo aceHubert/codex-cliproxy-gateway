@@ -1,20 +1,20 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
   adoptLegacyLaunchAgents,
+  gatewayServiceLabel,
+  LAUNCHD_LABEL,
+  LEGACY_LAUNCHD_LABEL,
+  legacyGatewayServiceLabel,
+  legacyLabelForLabel,
+  plistServiceLabel,
   removeLegacyLaunchAgents,
   renderLaunchAgent,
   renderWebUiAgent,
-  plistServiceLabel,
-  legacyLabelForLabel,
-  LAUNCHD_LABEL,
-  LEGACY_LAUNCHD_LABEL,
-  gatewayServiceLabel,
-  legacyGatewayServiceLabel,
 } from "../apps/gateway/src/launchd.ts";
+import test from "./host-test.ts";
 
 function fixture(run: (home: string) => void): void {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-launchd-migration-"));

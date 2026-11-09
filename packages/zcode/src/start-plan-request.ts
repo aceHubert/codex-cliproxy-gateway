@@ -19,13 +19,12 @@
  * - 官方文本与其余指纹数据同源维护（`fingerprint-data.json` 的
  *   `startPlanPrompt` 与 `agentSystemPrompt`，各段 SHA-256 见测试）。
  */
-import fingerprintData from "./fingerprint-data.json";
-import { ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
-import type { ZcodeIdentity, ZcodeRequestContext } from "./request-context.ts";
-import type { ZcodeFamily } from "./config.ts";
 import http from "node:http";
 import https from "node:https";
 import { Readable } from "node:stream";
+import fingerprintData from "./fingerprint-data.json";
+import { ZCODE_AGENT_SYSTEM_PROMPT, type ZcodeIdentity, type ZcodeRequestContext } from "./request-context.ts";
+import type { ZcodeFamily } from "./config.ts";
 
 interface ZcodeStartPlanPrompt {
   identity: string;

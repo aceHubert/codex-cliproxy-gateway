@@ -1,12 +1,12 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
 import { syncGatewayConfigFile } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION, gatewayConfigWarnings, migrateLegacyConfig } from "../apps/gateway/src/config.ts";
-import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function validConfig(paths: ResolvedPaths): GatewayConfig {

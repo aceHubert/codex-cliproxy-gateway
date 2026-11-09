@@ -1,12 +1,10 @@
+import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import assert from "node:assert/strict";
 import { managedCodexServiceToml, managedCodexToml } from "../apps/gateway/src/cli.ts";
 import { createGatewayHandler, startGateway } from "../apps/gateway/src/gateway-composition.ts";
 import { renderLaunchAgent } from "../apps/gateway/src/launchd.ts";
-import { websocketLogFile } from "../apps/gateway/src/request-log.ts";
 import {
   checkFrameRouting,
   loadRealtimeProviderMode,
@@ -16,10 +14,12 @@ import {
   realtimeWebSocketTarget,
   turnIdFromResponseCreate,
 } from "../apps/gateway/src/realtime.ts";
-import { readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import { routingPluginFamily } from "./plugin-routing-fixture.ts";
+import { websocketLogFile } from "../apps/gateway/src/request-log.ts";
 import { ThreadRoutingError, ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
+import test from "./host-test.ts";
+import { routingPluginFamily } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 function config(officialBaseUrl: string): GatewayConfig {
   return {

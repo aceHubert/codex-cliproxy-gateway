@@ -1,14 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
+import { getCodexModelSnapshot, getVendorModelPresets } from "@agent-proxy/models";
 import {
   compileModelOverrides,
   fetchUpstreamCatalog,
   loadModelOverrides,
   resolveModelMergeJson,
-  syncCatalog,
+  syncCatalog, type ModelOverrideRule
 } from "./catalog.ts";
-import type { ModelOverrideRule } from "./catalog.ts";
-import { getCodexModelSnapshot, getVendorModelPresets } from "@agent-proxy/models";
 import { FALLBACK_CLIENT_VERSION, resolveCodexClientVersion } from "./codex-version.ts";
 import { readApiKey } from "./keychain.ts";
 import { catalogFileFor } from "./paths.ts";

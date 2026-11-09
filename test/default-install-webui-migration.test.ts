@@ -1,9 +1,9 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { prepareManagedWebUiMigration, renderLaunchAgent, renderWebUiAgent, type LaunchctlExecutor } from "../apps/gateway/src/launchd.ts";
+import test from "node:test";
+import { prepareManagedWebUiMigration,renderLaunchAgent, renderWebUiAgent, type LaunchctlExecutor } from "../apps/gateway/src/launchd.ts";
 
 function fixture(run: (directory: string) => void): void {
   const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-proxy-webui-migrate-")));

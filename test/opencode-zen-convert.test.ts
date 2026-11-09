@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import {
   convertOpencodeZenRequest,
   mergeOpencodeZenToolIdentities,
   renderOpencodeZenClientOutput,
 } from "@agent-proxy/opencode-zen/convert";
-import type { OpencodeZenModelProtocol } from "@agent-proxy/opencode-zen/catalog";
 import { mergeOpencodeZenGateTools } from "@agent-proxy/opencode-zen/fingerprint";
+import test from "./host-test.ts";
+import type { OpencodeZenModelProtocol } from "@agent-proxy/opencode-zen/catalog";
 
 const encoder = new TextEncoder();
 function streamOf(text: string): ReadableStream<Uint8Array> {

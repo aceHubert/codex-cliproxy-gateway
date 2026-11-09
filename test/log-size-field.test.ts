@@ -1,12 +1,12 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize } from "../apps/gateway/src/ui/log-size-field.ts";
 import { applyWebUiConfigPatch, parseMaxLogSize } from "../apps/gateway/src/config-update.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
+import { isValidRequestLogCount, LOG_SIZE_UNITS, parseLogSizeField, splitLogSize } from "../apps/gateway/src/ui/log-size-field.ts";
+import test from "./host-test.ts";
 
 test("日志上限零值提交数字，非零值提交带单位字符串", () => {
   assert.deepEqual(LOG_SIZE_UNITS, ["KB", "MB"]);

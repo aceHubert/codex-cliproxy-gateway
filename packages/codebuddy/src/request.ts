@@ -1,8 +1,7 @@
-import { BridgeConversionError, convertRequest, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
-import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import { BridgeConversionError, convertRequest, stripClientSystemPrompt, type ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
 import { decodeCodebuddyReasoning } from "./wire.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /**
  * CodeBuddy/WorkBuddy 请求准备：标准转换统一走 @agent-proxy/llm-bridge 的

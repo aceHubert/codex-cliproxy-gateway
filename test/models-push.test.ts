@@ -1,14 +1,14 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
-import { pushModelsToTargets, type ModelPushTarget } from "../apps/gateway/src/models-push.ts";
-import { runCli, runModelsPush, type PushModelsDependencies } from "../apps/gateway/src/cli.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { runCli,runModelsPush, type PushModelsDependencies } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION, gatewayConfigWarnings } from "../apps/gateway/src/config.ts";
+import { pushModelsToTargets,type ModelPushTarget } from "../apps/gateway/src/models-push.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig, ModelEntry, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 function silenceConsole(): () => string[] {

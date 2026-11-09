@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, type StdioOptions } from "node:child_process";
 import os from "node:os";
-import type { StdioOptions } from "node:child_process";
-import { resolvePaths } from "./paths.ts";
 import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "./credentials-store.ts";
+import { resolvePaths } from "./paths.ts";
+
 
 export const KEYCHAIN_SERVICE = "agent-proxy-gateway";
 /** 项目更名前的 Keychain 槽位名；仅默认实例读取时回退、卸载时一并删除，写入只落新槽位。 */

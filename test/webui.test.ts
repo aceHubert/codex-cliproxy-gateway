@@ -1,20 +1,19 @@
-import test from "./host-test.ts";
+import assert from "node:assert/strict";
+import * as childProcess from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import assert from "node:assert/strict";
 import { mock } from "bun:test";
-import * as childProcess from "node:child_process";
-import { startGateway } from "../apps/gateway/src/gateway-composition.ts";
-import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
 import { runCli } from "../apps/gateway/src/cli.ts";
+import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import { startGateway } from "../apps/gateway/src/gateway-composition.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "../apps/gateway/src/model-composition.ts";
 import { instanceMarker, resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { requestLogDir } from "../apps/gateway/src/request-log.ts";
-import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance } from "../apps/gateway/src/webui.ts";
-import { codexCatalogFile, updateCodexModelCatalog } from "../apps/gateway/src/model-composition.ts";
-import type { WebUiContext } from "../apps/gateway/src/webui.ts";
+import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance, type WebUiContext } from "../apps/gateway/src/webui.ts";
+import test from "./host-test.ts";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 const TOKEN = "ccp_test_token_0123456789abcdef";

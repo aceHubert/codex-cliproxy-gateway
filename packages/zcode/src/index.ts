@@ -1,12 +1,7 @@
-import { bindHostMethods, getHostServices, withHostServices } from "@agent-proxy/plugin-api";
-import type { HostServices, GatewayPlugin, ClientProtocol } from "@agent-proxy/plugin-api";
+import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { isIP } from "node:net";
-import { resolvePaths } from "@agent-proxy/plugin-api";
-import { createZcodeConfigCache, readZcodeAPIKeyProviders, zcodeConfigPresent, ZcodeConfigError } from "./config.ts";
-import type { ZcodeAPIKeyProvider, ZcodeConfigCache, ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "./config.ts";
-import { clearModelsCacheEntries, invalidateModelsCache } from "@agent-proxy/plugin-api";
+import { bindHostMethods, clearModelsCacheEntries, getHostServices, invalidateModelsCache, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol,type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import {
   buildZcodeVendorCatalog,
   createZcodeCatalog,
@@ -16,20 +11,17 @@ import {
   zcodeModelPlan,
   zcodeUpstreamModel,
 } from "./catalog.ts";
+import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError,zcodeConfigPresent, type ZcodeAPIKeyProvider, type ZcodeConfigCache, type ZcodeFamily, type ZcodeProviderSnapshot, type ZcodeSelection } from "./config.ts";
+import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
+import { zcodeStartPlanEntitledFromLog } from "./plans.ts";
+import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, type ZcodeIdentity } from "./request-context.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "./request.ts";
 import { createZcodeClientResponse, type ZcodeGatewayToolsHook } from "./response.ts";
-import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
-import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
-import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
-import { isZcodeRecord } from "./wire.ts";
-import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan } from "./request-context.ts";
 import { createStartPlanFetch, dressZcodeStartPlanBody, startPlanUpstreamUrl, zcodeStartPlanRefusalHint } from "./start-plan-request.ts";
-import { zcodeStartPlanEntitledFromLog } from "./plans.ts";
-import type { ZcodeIdentity } from "./request-context.ts";
-import { localTime, logExchange, logGroupFromPath, requestLogDir } from "@agent-proxy/plugin-api";
-import type { RequestLogSink } from "@agent-proxy/plugin-api";
-import { logGatewayError, logRequestSummary } from "@agent-proxy/plugin-api";
-import type { AgentConfig, ModelCatalog, ProcessLogTarget } from "@agent-proxy/plugin-api";
+import { executeZcodeAnalyzeImage, matchZcodeAnalyzeImage } from "./vision.ts";
+import { isZcodeRecord } from "./wire.ts";
+
 
 export interface ZcodeDependencies {
   /** 目录管理层传入策略；manual 只在启动与显式命令发布模型变更。 */

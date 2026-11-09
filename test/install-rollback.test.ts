@@ -1,10 +1,10 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { realPathOrResolve } from "../apps/gateway/src/paths.ts";
 import { composeInstallFailureMessage, restoredHealthUrl, runCli } from "../apps/gateway/src/cli.ts";
+import { realPathOrResolve } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 test("restoredHealthUrl prefers the previous host and port after rollback", () => {
   const next = { host: "127.0.0.1", port: 9001 };

@@ -1,4 +1,4 @@
-import { compileModelPattern, modelPatternsOverlap, type CompiledModelPattern } from "./patterns.ts";
+import { compileModelPattern,modelPatternsOverlap, type CompiledModelPattern } from "./patterns.ts";
 import type { CandidateSelector, ClientProtocol, GatewayPlugin, HttpRequestContext, ModelCatalog, ModelMatch, RequestOperation, WebSocketRequestContext } from "./types.ts";
 
 export interface PluginMatch extends ModelMatch {

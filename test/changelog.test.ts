@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "./host-test.ts";
-
 import {
   changelogArgs,
   fixedReleaseVersion,
   prependChangelog,
   stageChangelog,
 } from "../scripts/changelog.ts";
+import test from "./host-test.ts";
 
 test("changelog prepends each release once", () => {
   const release = "## v0.2.5 (2026-09-04)\n\n* Add release tooling";

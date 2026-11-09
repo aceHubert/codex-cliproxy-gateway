@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import { getInstallApiKey } from "../apps/gateway/src/cli.ts";
 import { createApiKeyStore } from "../apps/gateway/src/keychain.ts";
 import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 const upstream = { upstreamBaseUrl: "https://upstream.invalid/v1", upstreamType: "cliproxy" as const };
 const unexpected = (): never => { throw new Error("不应调用此密钥来源"); };

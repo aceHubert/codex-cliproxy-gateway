@@ -1,9 +1,9 @@
-import type { HostServices, PluginLogEvent } from "@agent-proxy/plugin-api";
 import * as catalog from "./catalog.ts";
 import { resolvePaths } from "./paths.ts";
 import { appendProcessLog, logGatewayError, logRequestSummary } from "./process-log.ts";
 import { localTime, logExchange, logGroupFromPath } from "./request-log.ts";
 import { atomicWrite } from "./toml.ts";
+import type { HostServices, PluginLogEvent } from "@agent-proxy/plugin-api";
 import type { GatewayConfig, ProcessLogTarget, ResolvedPaths } from "./types.ts";
 
 /** 实例能力在组合入口注入；插件契约不承载主机实现，也不读取全局配置。 */

@@ -1,7 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import { atomicWrite } from "./toml.ts";
 
 export const LAUNCHD_LABEL = "agent-proxy-gateway";

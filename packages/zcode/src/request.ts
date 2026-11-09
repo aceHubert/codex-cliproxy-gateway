@@ -1,11 +1,9 @@
-import { BridgeConversionError, convertRequest, normalizeResponsesToolDeclarations, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
-import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import { createHash } from "node:crypto";
+import { BridgeConversionError, convertRequest, normalizeResponsesToolDeclarations, stripClientSystemPrompt, type ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import { ZCODE_AGENT_SYSTEM_PROMPT } from "./request-context.ts";
-import { decodeZcodeThinking, isZcodeRecord } from "./wire.ts";
-import type { ZcodeTranslatedRequest, ZcodeToolMap } from "./wire.ts";
 import { ANALYZE_IMAGE_SYSTEM_NOTE, ANALYZE_IMAGE_TOOL_DECLARATION, ANALYZE_IMAGE_TOOL_NAME, collectZcodeImages } from "./vision.ts";
+import { decodeZcodeThinking, isZcodeRecord, type ZcodeToolMap,type ZcodeTranslatedRequest } from "./wire.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /**
  * ZCode 请求准备：标准消息/工具/参数统一经 @agent-proxy/llm-bridge 的

@@ -1,10 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
+import { identifyClientEndpoint,PluginRegistry, type RequestBody } from "@agent-proxy/plugin-api";
+import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
 import { readApiKey } from "./keychain.ts";
+import { createModelReloadReceiver } from "./model-reload.ts";
+import { codexCatalogFile, writeStaticCatalog } from "./model-state.ts";
 import { instanceMarker, resolvePaths } from "./paths.ts";
-import { PluginRegistry, identifyClientEndpoint } from "@agent-proxy/plugin-api";
-import type { RequestBody } from "@agent-proxy/plugin-api";
+import { logGatewayError, logRequestSummary } from "./process-log.ts";
 import {
   dialUpstreamWebSocket,
   forwardedHeaders,
@@ -13,33 +16,25 @@ import {
   realtimeAccessError,
   realtimeWebSocketHandler,
   realtimeWebSocketTarget,
-  websocketUrl,
+  websocketUrl, type RealtimeProviderMode, type RealtimeSocketData, type ResponseFrameAction
 } from "./realtime.ts";
-import type { RealtimeProviderMode, RealtimeSocketData, ResponseFrameAction } from "./realtime.ts";
-import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
-import { codexCatalogFile, writeStaticCatalog } from "./model-state.ts";
-import { createModelReloadReceiver } from "./model-reload.ts";
-import { atomicWrite } from "./toml.ts";
 import {
+  localTime,
   logExchange,
   logGroupFromPath,
   logRealtimeEvent,
+  maskedHeaders,
   pruneLogDir,
   requestLogDir,
   retainLogFile,
-  websocketLogFile,
-  localTime,
-  maskedHeaders,
+  websocketLogFile, type RequestLogSink
 } from "./request-log.ts";
-import type { RequestLogSink } from "./request-log.ts";
-import { logGatewayError, logRequestSummary } from "./process-log.ts";
+import { ThreadRoutingError, ThreadRoutingState, type ThreadRouteKind } from "./thread-routing.ts";
+import { atomicWrite } from "./toml.ts";
+import { MOUNT_PATH, OFFICIAL_BASE_URL, type ProcessLogTarget, type GatewayConfig, type ModelCatalog, type ResolvedPaths } from "./types.ts";
 import { webUiPort } from "./ui-port.ts";
-import type { ProcessLogTarget } from "./types.ts";
-import type { GatewayConfig, ModelCatalog, ResolvedPaths } from "./types.ts";
-import { MOUNT_PATH, OFFICIAL_BASE_URL } from "./types.ts";
 import { configuredCatalogFile, configuredModelPrefix } from "./upstream-catalog.ts";
-import { ThreadRoutingError, ThreadRoutingState } from "./thread-routing.ts";
-import type { ThreadRouteKind } from "./thread-routing.ts";
+
 
 const HOP_BY_HOP_HEADERS = new Set([
   "connection",

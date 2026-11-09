@@ -4,12 +4,11 @@ import {
   createChatCompletionsClientOutput,
   createGeminiClientOutput,
   createResponsesClientOutput,
-  parseUpstreamEvents,
+  parseUpstreamEvents, type ToolIdentityMap
 } from "@agent-proxy/llm-bridge";
-import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
+import { mergeOpencodeZenGateTools, mergeOpencodeZenGateToolsResponses } from "./fingerprint.ts";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { OpencodeZenModelProtocol } from "./catalog.ts";
-import { mergeOpencodeZenGateTools, mergeOpencodeZenGateToolsResponses } from "./fingerprint.ts";
 
 /**
  * OpenCode Zen 多协议转换层。

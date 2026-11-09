@@ -1,11 +1,11 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import YAML, { isMap, isSeq } from "yaml";
 import { buildOpencodeZenCatalog, parseOpencodeZenMetadataResponse } from "@agent-proxy/opencode-zen/catalog";
+import YAML, { isMap, isSeq } from "yaml";
 import { createDshPushTarget, pushDshModels, resolveDshClientPaths, synthesizeDshModel } from "../apps/gateway/src/dsh-client-sync.ts";
+import test from "./host-test.ts";
 import type { ModelEntry } from "../apps/gateway/src/types.ts";
 
 const PROVIDER_KEY = "agent-proxy";

@@ -1,16 +1,16 @@
-import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
   compileModelOverrides,
   resolveModelMergeJson,
   syncCatalog,
 } from "../apps/gateway/src/catalog.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { gatewayConfigWarnings, migrateLegacyConfig } from "../apps/gateway/src/config.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import {
   fetchConfiguredUpstreamCatalog,
   loadModelOverrideRules,

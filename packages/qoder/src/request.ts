@@ -1,7 +1,6 @@
-import { BridgeConversionError, convertRequest, stripClientSystemPrompt } from "@agent-proxy/llm-bridge";
-import type { ToolIdentityMap } from "@agent-proxy/llm-bridge";
-import type { ClientProtocol } from "@agent-proxy/plugin-api";
+import { BridgeConversionError, convertRequest, stripClientSystemPrompt, type ToolIdentityMap } from "@agent-proxy/llm-bridge";
 import { QODER_AGENT_SYSTEM_PROMPT } from "./transport.ts";
+import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
 /**
  * Qoder 请求准备：标准转换统一走 @agent-proxy/llm-bridge（四种客户端来源 →

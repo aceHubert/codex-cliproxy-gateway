@@ -1,5 +1,5 @@
-import { withHostServices } from "@agent-proxy/plugin-api";
 import nodeTest from "node:test";
+import { withHostServices } from "@agent-proxy/plugin-api";
 import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 

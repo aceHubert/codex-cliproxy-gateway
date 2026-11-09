@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import { profileProduct, profileRegion, type CodebuddyCredential, type CodebuddyProfile } from "./credentials.ts";
 import fingerprintData from "./fingerprint-data.json";
-import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
-import { profileProduct, profileRegion } from "./credentials.ts";
+
 
 /**
  * CLI 与 WorkBuddy 身份头：两套产品使用各自的 UA/IDE 头，鉴权字段共享。

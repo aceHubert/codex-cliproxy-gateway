@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { handleWebUiRequest } from "../apps/gateway/src/webui.ts";
+import test from "./host-test.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
-import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };

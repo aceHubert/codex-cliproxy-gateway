@@ -1,10 +1,10 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { EventEmitter } from "node:events";
 import { compileModelFilter, filterExcludedModels } from "../apps/gateway/src/catalog.ts";
+import { collectCompatibleModels, excludeModels, runCli,type ExcludeModelsDependencies } from "../apps/gateway/src/cli.ts";
 import {
   applyWebUiConfigPatch,
   excludedModelGroupsFor,
@@ -15,14 +15,14 @@ import {
   parseExcludedModels,
   splitExcludedModelsByGroup,
 } from "../apps/gateway/src/config-update.ts";
-import { joinExcludedLines, splitExcludedLines } from "../apps/gateway/src/ui/excluded-models-field.ts";
-import { collectCompatibleModels, excludeModels, runCli, type ExcludeModelsDependencies } from "../apps/gateway/src/cli.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL } from "../apps/gateway/src/config.ts";
 import { modelReloadRequestFile } from "../apps/gateway/src/model-reload.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { readRootTomlString } from "../apps/gateway/src/toml.ts";
-import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
+import { joinExcludedLines, splitExcludedLines } from "../apps/gateway/src/ui/excluded-models-field.ts";
+import test from "./host-test.ts";
 import { routingPluginFamily } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 test("exclusion filter matches exact IDs, vendor prefixes, and globs case-insensitively", () => {
   const filter = compileModelFilter([

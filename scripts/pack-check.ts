@@ -1,8 +1,8 @@
-import { copyFile, mkdtemp, mkdir, rm } from "node:fs/promises";
+import assert from "node:assert/strict";
 import { constants } from "node:fs";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import assert from "node:assert/strict";
 
 const root = path.resolve(import.meta.dir, "..");
 const temporary = await mkdtemp(path.join(os.tmpdir(), "agent-proxy-pack-"));

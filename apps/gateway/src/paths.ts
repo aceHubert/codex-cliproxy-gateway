@@ -1,8 +1,8 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { AsyncLocalStorage } from "node:async_hooks";
 import type { ResolvedPaths, UpstreamType } from "./types.ts";
 
 /**

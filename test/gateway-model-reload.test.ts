@@ -2,17 +2,17 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
+import { PluginRegistry,type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { createGatewayHandler, responsesWebSocketTarget, startGateway } from "../apps/gateway/src/gateway-composition.ts";
-import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
-import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
-import { PluginRegistry, type GatewayPlugin } from "@agent-proxy/plugin-api";
 import { createPluginGatewayHandler } from "../apps/gateway/src/gateway.ts";
-import { routingRegistry } from "./plugin-routing-fixture.ts";
+import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
+import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
+import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
+import { routingRegistry } from "./plugin-routing-fixture.ts";
+import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 const TIMEOUT = { timeout: 60_000 };
 

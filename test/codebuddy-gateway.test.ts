@@ -2,20 +2,18 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
-import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
-import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
+import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
+import { CodebuddyCredentialError, type CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
 import fingerprintData from "@agent-proxy/codebuddy/fingerprint-data.json";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "@agent-proxy/codebuddy/request-context";
-import { CodebuddyCredentialError } from "@agent-proxy/codebuddy/credentials";
-import type { CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
+import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
-import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
-
+import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 

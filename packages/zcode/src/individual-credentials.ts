@@ -1,5 +1,5 @@
-import type { ZcodeFamily } from "./config.ts";
 import { decryptZcodeCredential } from "./credential-cipher.ts";
+import type { ZcodeFamily } from "./config.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);

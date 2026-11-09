@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import test from "./host-test.ts";
 import { runCli } from "../apps/gateway/src/cli.ts";
 import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
 import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 for (const upstreamOnly of [false, true]) {
   test(`models --sync 在插件目录失败时仍保存${upstreamOnly ? "静态" : "动态"}模型选择`, { timeout: 60_000 }, async () => {

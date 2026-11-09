@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import { translateZcodeRequest, ZcodeRequestError } from "@agent-proxy/zcode/request";
 import { ZCODE_AGENT_SYSTEM_PROMPT } from "@agent-proxy/zcode/request-context";
 import { createZcodeResponse } from "@agent-proxy/zcode/response";
 import { encodeZcodeThinking } from "@agent-proxy/zcode/wire";
+import test from "./host-test.ts";
 
 const clientModel = "zcode/GLM-5.3";
 async function translate(body: Record<string, unknown>) { return await translateZcodeRequest({ model: clientModel, ...body }, "glm-5.3"); }

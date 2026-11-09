@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import {
   analysisFromExecutorText,
   ANALYZE_IMAGE_TOOL_NAME,
@@ -13,6 +12,7 @@ import {
   ZcodeVisionError,
   type ZcodeRequestImage,
 } from "@agent-proxy/zcode/vision";
+import test from "./host-test.ts";
 
 function imageOf(data: string): ZcodeRequestImage {
   return { identifier: imageIdentifier(data), media_type: "image/png", data };

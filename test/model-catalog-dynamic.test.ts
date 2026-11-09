@@ -1,19 +1,19 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import { runCli } from "../apps/gateway/src/cli.ts";
-import { resolvePaths } from "../apps/gateway/src/paths.ts";
-import { readRootTomlString } from "../apps/gateway/src/toml.ts";
 import {
   clearModelsCacheEntries,
   fetchCliProxyCatalog,
   invalidateModelsCache,
 } from "../apps/gateway/src/catalog.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import { runCli } from "../apps/gateway/src/cli.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { readRootTomlString } from "../apps/gateway/src/toml.ts";
+import test from "./host-test.ts";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 test("dynamic /models refreshes official catalog and merges only CLIProxy rows", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dynamic-models-response-"));

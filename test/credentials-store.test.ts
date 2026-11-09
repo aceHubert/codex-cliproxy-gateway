@@ -1,11 +1,11 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createApiKeyStore, keychainAccount, keychainService, KEYCHAIN_SERVICE } from "../apps/gateway/src/keychain.ts";
 import { deleteUpstreamApiKey, readUpstreamApiKey, saveUpstreamApiKey } from "../apps/gateway/src/credentials-store.ts";
+import { createApiKeyStore, KEYCHAIN_SERVICE,keychainAccount, keychainService } from "../apps/gateway/src/keychain.ts";
 import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import test from "./host-test.ts";
 
 /** 测试用占位 key：运行时拼接生成，避免源码里出现「凭据字段名 + 明文值」的硬编码形状。 */
 function sampleKey(label: string): string {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import test from "node:test";
 
 /**
  * 边界静态检查：AGY 的请求/响应转换在自身包内独立封装，不得依赖或调用

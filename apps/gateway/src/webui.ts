@@ -1,12 +1,19 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
+import { agyCredentialsPresent, defaultAgyCredentialFile } from "@agent-proxy/agy/credentials";
+import { getActiveAccount, withInstanceContext as withCodebuddyInstanceContext } from "@agent-proxy/codebuddy";
+import {
+  canonicalCodebuddyAccountValue,
+  codebuddyCredentialsPresent,
+  defaultAuthDirectory,
+  listCodebuddyAccounts,
+  resolveCodebuddyAccountFile,
+} from "@agent-proxy/codebuddy/credentials";
+import { getActiveSources, withInstanceContext as withQoderInstanceContext } from "@agent-proxy/qoder";
+import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
 import { stopCodexAppServers } from "./app-server.ts";
 import { invalidateModelsCache } from "./catalog.ts";
-import { agentConfigEnabled, GATEWAY_CONFIG_VERSION } from "./config.ts";
-import { codexCatalogFile, updateCodexModelCatalog } from "./model-composition.ts";
-import { reloadGatewayModels } from "./model-reload.ts";
-import { logConfigChange } from "./process-log.ts";
 import {
   applySelectedModelsPatch,
   applyWebUiConfigPatch,
@@ -17,21 +24,16 @@ import {
   sanitizeUrlValue,
   splitExcludedModelsByGroup,
 } from "./config-update.ts";
+import { agentConfigEnabled, GATEWAY_CONFIG_VERSION } from "./config.ts";
 import { gatewayServiceLabel, restartLaunchAgent } from "./launchd.ts";
+import { codexCatalogFile, updateCodexModelCatalog } from "./model-composition.ts";
+import { reloadGatewayModels } from "./model-reload.ts";
 import { instanceMarker, realPathOrResolve, resolvePaths, runWithInstancePaths } from "./paths.ts";
+import { logConfigChange } from "./process-log.ts";
 import { isRequestLogName, requestLogDir, safeLogPath } from "./request-log.ts";
 import { atomicWrite, readRootTomlString } from "./toml.ts";
-import { getActiveAccount, withInstanceContext as withCodebuddyInstanceContext } from "@agent-proxy/codebuddy";
-import {
-  canonicalCodebuddyAccountValue,
-  codebuddyCredentialsPresent,
-  defaultAuthDirectory,
-  listCodebuddyAccounts,
-  resolveCodebuddyAccountFile,
-} from "@agent-proxy/codebuddy/credentials";
-import { agyCredentialsPresent, defaultAgyCredentialFile } from "@agent-proxy/agy/credentials";
-import { getActiveSources, withInstanceContext as withQoderInstanceContext } from "@agent-proxy/qoder";
-import { zcodeConfigPresent } from "@agent-proxy/zcode/config";
+import { MOUNT_PATH, OFFICIAL_BASE_URL, type GatewayConfig, type ResolvedPaths } from "./types.ts";
+import { webUiPort } from "./ui-port.ts";
 import {
   configuredCatalogFile,
   configuredModelPrefix,
@@ -39,9 +41,7 @@ import {
   fetchConfiguredUpstreamCatalog,
   rebuildCatalog,
 } from "./upstream-catalog.ts";
-import { MOUNT_PATH, OFFICIAL_BASE_URL } from "./types.ts";
-import type { GatewayConfig, ResolvedPaths } from "./types.ts";
-import { webUiPort } from "./ui-port.ts";
+
 export { webUiPort } from "./ui-port.ts";
 
 /**

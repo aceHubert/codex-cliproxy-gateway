@@ -1,12 +1,10 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
-import { invalidateModelsCache } from "@agent-proxy/plugin-api";
-import { atomicWrite } from "@agent-proxy/plugin-api";
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
-import { AGY_ENDPOINT } from "./transport.ts";
+import { atomicWrite, invalidateModelsCache, type ModelCatalog, type ModelEntry } from "@agent-proxy/plugin-api";
 import { THINKING_LEVELS } from "./request.ts";
+import { AGY_ENDPOINT } from "./transport.ts";
 import type { AgyCredentials } from "./credentials.ts";
 
 /**

@@ -6,13 +6,13 @@ import {
   readZcodeIndividualProjectLocation,
   resolveZcodeIndividualApiKey,
   zcodeIndividualTokenFingerprint,
-  ZcodeProjectTokenError,
+  ZcodeProjectTokenError, type ZcodeIndividualProjectLocation
 } from "./individual-project-token.ts";
-import type { ZcodeIndividualProjectLocation } from "./individual-project-token.ts";
 import {
   readZcodeTeamCredentialInputs,
   resolveZcodeTeamApiKey,
 } from "./team-credentials.ts";
+
 
 export type ZcodeFamily = "zai" | "bigmodel";
 export interface ZcodeSelection {

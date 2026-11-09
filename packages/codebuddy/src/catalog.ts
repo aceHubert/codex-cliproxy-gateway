@@ -1,13 +1,11 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { createHash } from "node:crypto";
-import { atomicWrite } from "@agent-proxy/plugin-api";
 import { codexBaselineEntry, getCodexModelSnapshot } from "@agent-proxy/models";
-import { invalidateModelsCache } from "@agent-proxy/plugin-api";
-import type { ModelCatalog, ModelEntry } from "@agent-proxy/plugin-api";
-import type { CodebuddyCredential, CodebuddyProfile } from "./credentials.ts";
-import { profileProduct, profileRegion } from "./credentials.ts";
+import { atomicWrite, invalidateModelsCache, type ModelCatalog, type ModelEntry } from "@agent-proxy/plugin-api";
+import { profileProduct, profileRegion, type CodebuddyCredential, type CodebuddyProfile } from "./credentials.ts";
 import { buildCodebuddyCatalogHeaders, catalogRevision } from "./request-context.ts";
+
 
 /**
  * CodeBuddy/WorkBuddy 官方目录：`GET {endpoint}/v3/config` 拉取，按 serves scope

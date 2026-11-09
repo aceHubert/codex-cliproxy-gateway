@@ -1,9 +1,8 @@
-import test from "./host-test.ts";
 import assert from "node:assert/strict";
+import { createHash, createHmac, hkdfSync } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createHash, createHmac, hkdfSync } from "node:crypto";
 import {
   clientSigningVerifyRejection,
   parseClientSigningCredential,
@@ -11,10 +10,11 @@ import {
   ZcodeClientSigning,
 } from "@agent-proxy/zcode/client-signing";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
-import type { ZcodeProviderSnapshot, ZcodeFamily, ZcodeSelection } from "@agent-proxy/zcode/config";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import test from "./host-test.ts";
+import type { ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "@agent-proxy/zcode/config";
 import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
-import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 
 const API_KEY_ID = "testkeyid7f3a";
 const API_KEY_SECRET = "test-secret-4d51";

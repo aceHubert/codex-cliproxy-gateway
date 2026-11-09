@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import test from "node:test";
 
 /**
  * 契约类型单一来源边界：plugin-api（契约包）与 llm-bridge（桥接共享资产）导出的

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import { createCodebuddyResponse } from "@agent-proxy/codebuddy/response";
-import type { CodebuddyToolMap } from "@agent-proxy/codebuddy/request";
 import { decodeCodebuddyReasoning } from "@agent-proxy/codebuddy/wire";
+import test from "./host-test.ts";
+import type { CodebuddyToolMap } from "@agent-proxy/codebuddy/request";
 
 type Json = Record<string, any>;
 

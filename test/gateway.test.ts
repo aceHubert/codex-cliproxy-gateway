@@ -1,25 +1,9 @@
-import test from "./host-test.ts";
+import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import assert from "node:assert/strict";
 import { zstdCompressSync } from "node:zlib";
-import type { ReadStream, WriteStream } from "node:tty";
-import { createGatewayHandler, decideRoute, isLoopbackUrl, joinUpstreamUrl, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
-import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
-import { isRequestLogName, pruneLogDir, retainLogFile } from "../apps/gateway/src/request-log.ts";
-import {
-  GATEWAY_CONFIG_SCHEMA_URL,
-  GATEWAY_CONFIG_VERSION,
-  gatewayConfigWarnings,
-  mergeMissingConfig,
-} from "../apps/gateway/src/config.ts";
-import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
-import { capGatewayLog } from "../apps/gateway/src/process-log.ts";
-import { httpLogFile, websocketLogFile } from "../apps/gateway/src/request-log.ts";
-import { LEGACY_STDERR_LOG, instanceMarker, resolvePaths } from "../apps/gateway/src/paths.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 import {
   compileModelOverrides,
   fetchCliProxyCatalog,
@@ -28,10 +12,9 @@ import {
   mergeCatalog,
   parseCodexCatalog,
   resolveModelMergeJson,
-  synthesizeModelEntry,
   syncCatalog,
+  synthesizeModelEntry,
 } from "../apps/gateway/src/catalog.ts";
-import { configuredCatalogFile } from "../apps/gateway/src/upstream-catalog.ts";
 import {
   applyModelCatalogToml,
   applyRoutingMode,
@@ -44,7 +27,13 @@ import {
   syncGatewayConfigFile,
   waitForHealth,
 } from "../apps/gateway/src/cli.ts";
-import { installedPluginArtifactFiles, managedRuntimeCatalogFiles } from "../apps/gateway/src/gateway-composition.ts";
+import {
+  GATEWAY_CONFIG_SCHEMA_URL,
+  GATEWAY_CONFIG_VERSION,
+  gatewayConfigWarnings,
+  mergeMissingConfig,
+} from "../apps/gateway/src/config.ts";
+import { createGatewayHandler, decideRoute, installedPluginArtifactFiles, isLoopbackUrl, joinUpstreamUrl, managedRuntimeCatalogFiles, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
 import {
   applyModelPickerKey,
   chooseModels,
@@ -52,6 +41,15 @@ import {
   parseModelSelection,
   selectedModelsFromCatalog,
 } from "../apps/gateway/src/models.ts";
+import { instanceMarker, LEGACY_STDERR_LOG, resolvePaths } from "../apps/gateway/src/paths.ts";
+import { capGatewayLog } from "../apps/gateway/src/process-log.ts";
+import { httpLogFile, isRequestLogName, pruneLogDir, retainLogFile, websocketLogFile } from "../apps/gateway/src/request-log.ts";
+import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
+import { configuredCatalogFile } from "../apps/gateway/src/upstream-catalog.ts";
+import test from "./host-test.ts";
+import type { ReadStream, WriteStream } from "node:tty";
+import type { GatewayConfig } from "../apps/gateway/src/types.ts";
 
 test("error logs include a timestamp separator and omit blank lines", () => {
   assert.equal(

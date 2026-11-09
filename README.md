@@ -54,7 +54,11 @@ bun run build
 # 单独构建 Web UI
 bun run build:ui
 
-# 完整验证：依赖边界、构建、类型检查、测试
+# 导入顺序检查与自动修复
+bun run lint
+bun run lint:fix
+
+# 完整验证：导入顺序、依赖边界、构建、类型检查、测试
 bun run check
 
 # 打包并在隔离消费项目验证包与 CLI

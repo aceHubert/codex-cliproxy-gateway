@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import test from "./host-test.ts";
 import { runCli } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
+import test from "./host-test.ts";
 
 async function captureRuns(argGroups: string[][]): Promise<string[]> {
   const printed: string[] = [];
