@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.24.1 (2026-11-16)
+
+#### :bug: Bug Fix
+* `agy`, `codebuddy`, `opencode-zen`, `qoder`
+  * [#39](https://github.com/aceHubert/codex-cliproxy-gateway/pull/39) fix(codebuddy): 关闭不可兑现的 web_search 能力声明并完善搜索历史回放 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.24.0 (2026-11-16)
 
 #### :rocket: New Feature
