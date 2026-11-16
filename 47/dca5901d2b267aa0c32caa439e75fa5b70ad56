@@ -1,0 +1,18 @@
+test/codebuddy-request.test.ts
+  h_e8eb00b1da99ae 103-104,108-136
+docs/histories/2026-11/20261116-1554-codebuddy-search-tool-flag.md
+  h_e8eb00b1da99ae 18,20,23,28-30,34-35,37,44,49,52
+packages/codebuddy/src/request.ts
+  h_e8eb00b1da99ae 89-117,126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "47dca5901d2b267aa0c32caa439e75fa5b70ad56",
+  "prompts": {},
+  "humans": {
+    "h_e8eb00b1da99ae": {
+      "author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
