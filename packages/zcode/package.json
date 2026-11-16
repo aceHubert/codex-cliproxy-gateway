@@ -1,6 +1,6 @@
 {
   "name": "@agent-proxy/zcode",
-  "version": "0.22.0",
+  "version": "0.23.0",
   "description": "Agent Proxy zcode 插件；保留基线转换行为。",
   "type": "module",
   "exports": {
@@ -38,8 +38,8 @@
     "@agent-proxy/models": "workspace:*"
   },
   "dependencies": {
-    "@napi-rs/keyring": "2.1.2",
     "@agent-proxy/llm-bridge": "workspace:*",
-    "@agent-proxy/plugin-api": "workspace:*"
+    "@agent-proxy/plugin-api": "workspace:*",
+    "@napi-rs/keyring": "2.1.2"
   }
 }

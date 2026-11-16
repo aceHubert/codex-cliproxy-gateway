@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.23.0 (2026-11-16)
+
+#### :rocket: New Feature
+* `agy`, `codebuddy`, `llm-bridge`, `qoder`, `zcode`
+  * [#37](https://github.com/aceHubert/codex-cliproxy-gateway/pull/37) feat(gateway): 线程路由容量治理、ZCode 3.18 适配与 upstream-only 目录加载修复 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.22.0 (2026-11-09)
 
 #### :rocket: New Feature
