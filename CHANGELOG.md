@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.24.0 (2026-11-16)
+
+#### :rocket: New Feature
+* `agy`, `plugin-api`
+  * [#38](https://github.com/aceHubert/codex-cliproxy-gateway/pull/38) feat(agy): 接入 AGY 原生搜索并重写思考级别还原 ([@aceHubert](https://github.com/aceHubert))
+
+#### Committers: 1
+- Hubert X ([@aceHubert](https://github.com/aceHubert))
+
 ## v0.23.0 (2026-11-16)
 
 #### :rocket: New Feature

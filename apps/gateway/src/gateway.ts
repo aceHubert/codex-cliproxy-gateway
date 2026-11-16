@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { brotliDecompressSync, gunzipSync, inflateSync, zstdDecompressSync } from "node:zlib";
-import { identifyClientEndpoint,PluginRegistry, type RequestBody } from "@agent-proxy/plugin-api";
+import { identifyClientEndpoint,PluginRegistry, type RequestBody, type SearchRequestContext } from "@agent-proxy/plugin-api";
 import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalog } from "./catalog.ts";
 import { readApiKey } from "./keychain.ts";
 import { createModelReloadReceiver } from "./model-reload.ts";
@@ -1113,6 +1113,69 @@ export function createPluginGatewayHandler(
       return catalogModelsResponse(request, config, clientVersionFile, registry,
         config.upstreamOnly === true ? { models: [] } : await registry.getCatalog(),
         codexCatalogFile(effectivePaths), ownsLocalModel, effectivePaths);
+    }
+
+    // Codex Alpha Search 是独立请求协议，不属于普通模型生成 endpoint。
+    // 本地模型必须显式交给所属插件；绝不能把 AGY 等模型名送入默认后端。
+    if (request.method === "POST" && incomingUrl.pathname === `${mountPath}/alpha/search`) {
+      let bytes: ArrayBuffer | undefined;
+      let json: Record<string, unknown> | undefined;
+      try {
+        bytes = await readBodyBytes(request);
+        json = decodeJsonBody(bytes, request.headers);
+      } catch (error) {
+        return Response.json({ error: { message: error instanceof Error ? error.message : "无效搜索请求" } }, { status: 400 });
+      }
+      if (!json) return Response.json({ error: { message: "Alpha Search 请求必须是 JSON 对象" } }, { status: 400 });
+      const hintedModel = modelFromRoutingHint(request);
+      const model = typeof json.model === "string" && json.model.trim() ? json.model : hintedModel;
+      if (model && ownsLocalModel(model) && modelExclusion.isExcluded(model)) {
+        pluginRequests.add(request);
+        logGatewayError(processLog, {
+          requestTime: localTime(), method: request.method, url: incomingUrl.pathname, status: 404,
+          message: "搜索请求模型已被网关排除，请调整模型排除规则。",
+        });
+        return excludedModelResponse(model);
+      }
+
+      if (model && registry.match(model)) {
+        pluginRequests.add(request);
+        const bodyBytes = new TextEncoder().encode(JSON.stringify(json));
+        const sanitizedHeaders = new Headers(request.headers);
+        for (const name of [
+          "authorization", "proxy-authorization", "chatgpt-account-id", "x-api-key", "x-goog-api-key",
+          "x-zcode-authorization", "cookie", "set-cookie", "x-oai-attestation",
+          "content-encoding", "content-length", "host", "x-codex-routing-hint",
+        ]) sanitizedHeaders.delete(name);
+        sanitizedHeaders.set("content-type", "application/json");
+        const sanitizedRequest = new Request(request.url, {
+          method: "POST", headers: sanitizedHeaders, body: bodyBytes, signal: request.signal,
+        });
+        const context: Omit<SearchRequestContext, "matchedPattern" | "matchedPrefix"> = {
+          request: sanitizedRequest,
+          url: incomingUrl,
+          model,
+          signal: request.signal,
+          body: {
+            bytes: async () => bodyBytes.slice(),
+            json: async () => json,
+          },
+        };
+        return await registry.dispatchSearch(context) ?? Response.json({ error: {
+          type: "unsupported_operation", message: "该本地模型插件未声明 Alpha Search 处理器。",
+        } }, { status: 501 });
+      }
+
+      if (model && ownsLocalModel(model)) {
+        // 插件已安装但当前关闭时，本地模型不能逃逸到默认模型上游。
+        pluginRequests.add(request);
+        return Response.json({ error: {
+          type: "unsupported_operation", message: "该本地模型所属插件未启用或当前不可用。",
+        } }, { status: 501 });
+      }
+
+      // 非本地模型沿用既有默认上游行为；保存原始 bytes 以便 gzip/zstd 等请求体可透明直通。
+      preparedBodies.set(request, { bytes, json });
     }
 
     const endpoint = identifyClientEndpoint(incomingUrl.pathname, mountPath);

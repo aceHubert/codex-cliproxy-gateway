@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { agyRequestEffort, resolveAgyModel, type AgyModelSelection } from "./catalog.ts";
 import { AGY_AGENT_SYSTEM_PROMPT, AGY_DEFAULT_PROJECT } from "./transport.ts";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 
@@ -28,6 +29,10 @@ export interface AgyTranslatedRequest {
   wrapper: Record<string, unknown>;
   tools: AgyToolMap;
   dropped: string[];
+  /** 仅由网关执行的原生搜索函数，不进入客户端函数映射。 */
+  nativeSearchTool?: string;
+  nativeSearchSettings?: Record<string, unknown>;
+  nativeSearchLimit?: number;
 }
 
 type GeminiPart = Record<string, unknown>;
@@ -250,18 +255,33 @@ function serverCallSummary(item: Record<string, unknown>): string {
   const action = record(item.action) ? item.action : {};
   const query = [action.query, action.url].find((field): field is string => typeof field === "string" && field.length > 0);
   const detail = query ? `（查询：${query}）` : "";
+  if (item.type === "web_search_call" && Array.isArray(item.results)) {
+    const sources = item.results.slice(0, 20).flatMap((raw) => {
+      if (!record(raw) || typeof raw.url !== "string") return [];
+      let url: URL;
+      try { url = new URL(raw.url); } catch { return []; }
+      if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return [];
+      url.search = "";
+      url.hash = "";
+      const title = typeof raw.title === "string" && raw.title ? raw.title : url.hostname;
+      const snippet = typeof raw.snippet === "string" ? raw.snippet.slice(0, 4000) : "";
+      return [`${title}\n${url.toString()}${snippet ? `\n${snippet}` : ""}`];
+    });
+    // 搜索历史回放为已执行的文本记录，不制造新的函数调用或上游签名。
+    return `[已执行网页搜索${detail}]${sources.length ? `\n${sources.join("\n\n")}` : "\n本轮未记录可回放的来源。"}`;
+  }
   return `[已省略服务器内置工具调用 ${String(item.type)}${detail}；本通道不支持该工具]`;
 }
 
-/** reasoning.effort → 三档 thinkingLevel；四档家族在目录层选择具体模型变体。 */
-export const THINKING_LEVELS: Record<string, string> = {
-  minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high", max: "high",
-};
+const NATIVE_SEARCH_TOOL = "__agy_native_search_web";
 
-function translateTools(value: unknown): { tools: Array<Record<string, unknown>>; map: AgyToolMap; dropped: Set<string> } {
+function translateTools(value: unknown): { tools: Array<Record<string, unknown>>; map: AgyToolMap; dropped: Set<string>; nativeSearchTool?: string; nativeSearchSettings?: Record<string, unknown>; nativeSearchLimit?: number } {
   const tools: Array<Record<string, unknown>> = [];
   const map: AgyToolMap = new Map();
   const dropped = new Set<string>();
+  let nativeSearchTool: string | undefined;
+  let nativeSearchSettings: Record<string, unknown> | undefined;
+  let nativeSearchLimit: number | undefined;
   function visit(entries: unknown, namespace?: string, description?: string): void {
     if (!Array.isArray(entries)) fail("tools 必须是数组");
     for (const raw of entries) {
@@ -273,6 +293,29 @@ function translateTools(value: unknown): { tools: Array<Record<string, unknown>>
         visit(raw.tools, segment, typeof raw.description === "string" ? raw.description : undefined);
         continue;
       }
+      if (raw.type === "web_search") {
+        if (raw.external_web_access === false || namespace !== undefined || raw.namespace !== undefined) {
+          dropped.add("web_search");
+        } else if (!nativeSearchTool) {
+          if (raw.max_uses !== undefined && (!Number.isSafeInteger(raw.max_uses) || Number(raw.max_uses) < 1)) fail("web_search.max_uses 必须是正整数");
+          if (raw.filters !== undefined && !record(raw.filters)) fail("web_search.filters 必须是对象");
+          if (raw.user_location !== undefined && !record(raw.user_location)) fail("web_search.user_location 必须是对象");
+          nativeSearchLimit = Math.min(4, Number(raw.max_uses ?? 4));
+          nativeSearchSettings = {
+            ...(raw.filters !== undefined ? { filters: raw.filters } : {}),
+            ...(raw.user_location !== undefined ? { user_location: raw.user_location } : {}),
+            ...(raw.search_context_size !== undefined ? { search_context_size: raw.search_context_size } : {}),
+            ...(raw.external_web_access !== undefined ? { external_web_access: raw.external_web_access } : {}),
+          };
+          nativeSearchTool = NATIVE_SEARCH_TOOL;
+          tools.push({
+            name: nativeSearchTool,
+            description: "搜索实时网页，返回有来源和引用的摘要。每次只提交一个搜索查询。",
+            parameters: { type: "object", properties: { query: { type: "string" }, domain: { type: "string", description: "可选的限定搜索域名" } }, required: ["query"] },
+          });
+        }
+        continue;
+      }
       if (raw.type !== "function" && raw.type !== "custom") {
         dropped.add(typeof raw.type === "string" ? raw.type : "unknown");
         continue;
@@ -282,6 +325,7 @@ function translateTools(value: unknown): { tools: Array<Record<string, unknown>>
       const flat = namespace === undefined && typeof raw.namespace === "string" && raw.namespace
         ? raw.namespace : undefined;
       const identity = toolIdentity(raw.name, namespace ?? flat);
+      if (identity.name === NATIVE_SEARCH_TOOL) fail(`工具名 ${NATIVE_SEARCH_TOOL} 由 AGY 原生搜索保留，请更换名称`);
       if (map.has(identity.name)) fail(`工具名映射冲突：${identity.original}`);
       const custom = raw.type === "custom";
       const schema = record(raw.parameters) ? raw.parameters : undefined;
@@ -298,7 +342,7 @@ function translateTools(value: unknown): { tools: Array<Record<string, unknown>>
     }
   }
   if (value !== undefined) visit(value);
-  return { tools, map, dropped };
+  return { tools, map, dropped, ...(nativeSearchTool ? { nativeSearchTool, nativeSearchSettings, nativeSearchLimit } : {}) };
 }
 
 /**
@@ -485,7 +529,9 @@ function normalizeSourceItems(body: Record<string, unknown>, to: ClientProtocol)
   return normalized;
 }
 
-export function translateAgyRequest(body: Record<string, unknown>, upstreamModel: string, to: ClientProtocol = "responses"): AgyTranslatedRequest {
+export function translateAgyRequest(body: Record<string, unknown>, selection: string | AgyModelSelection, to: ClientProtocol = "responses"): AgyTranslatedRequest {
+  const selected = typeof selection === "string" ? resolveAgyModel(selection, agyRequestEffort(body)) : selection;
+  const upstreamModel = selected.model;
   if (typeof upstreamModel !== "string" || !upstreamModel) fail("上游模型不能为空");
   if (to === "responses") body = normalizeAdditionalTools(body);
   body = normalizeSourceItems(body, to);
@@ -675,14 +721,11 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
   }
 
   // thinkingConfig 按 CLI 真实形态发送：includeThoughts 使 thought 部件随流返回，
-  // thinkingBudget=-1 交由服务端按模型档位决定。
-  // xhigh 由具体模型变体表达，不能再带 high 覆盖它，也不能猜测上游枚举值。
+  // thinkingBudget=-1 交由服务端决定。模型和思考参数均来自统一选择结果，
+  // 此处不再解析模型名或重复解释客户端 effort。
   const thinkingConfig: Record<string, unknown> = { includeThoughts: true, thinkingBudget: -1 };
-  const reasoning = record(body.reasoning) ? body.reasoning : undefined;
-  const effort = reasoning?.effort;
-  if (!upstreamModel.endsWith("-xhigh") && typeof effort === "string" && THINKING_LEVELS[effort]) {
-    thinkingConfig.thinkingLevel = THINKING_LEVELS[effort];
-  }
+  const thinkingLevel = selected.thinkingLevel;
+  if (thinkingLevel !== undefined) thinkingConfig.thinkingLevel = thinkingLevel;
   const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens, thinkingConfig };
   if (body.temperature !== undefined) {
     if (typeof body.temperature !== "number" || !Number.isFinite(body.temperature)) fail("temperature 必须是数值");
@@ -710,6 +753,8 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
       const identity = toolIdentity(choice.name, choice.namespace);
       if (!convertedTools.map.has(identity.name)) fail(`工具选择引用了未声明的工具 ${identity.original}`);
       inner.toolConfig = { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [identity.name] } };
+    } else if (record(choice) && choice.type === "web_search" && convertedTools.nativeSearchTool) {
+      inner.toolConfig = { functionCallingConfig: { mode: "ANY", allowedFunctionNames: [convertedTools.nativeSearchTool] } };
     } else if (record(choice) && typeof choice.type === "string" && choice.type !== "") {
       // 指向服务器内置工具的选择无法跨格式表达，省略让上游回到默认 auto。
     } else fail("不支持的 tool_choice");
@@ -728,5 +773,10 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
     },
     tools: convertedTools.map,
     dropped: [...convertedTools.dropped],
+    ...(convertedTools.nativeSearchTool ? {
+      nativeSearchTool: convertedTools.nativeSearchTool,
+      nativeSearchSettings: convertedTools.nativeSearchSettings,
+      nativeSearchLimit: convertedTools.nativeSearchLimit,
+    } : {}),
   };
 }

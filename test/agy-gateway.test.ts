@@ -425,17 +425,25 @@ test("agy 合并条目按 reasoning effort 选择档位，显式档位 slug 兼�
     await handler(request(MODEL));
     assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-medium");
     assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
-    // effort high：解析到 -high 变体并带匹配 thinkingLevel。
+    // effort high：解析到 -high 变体，选档后不再透传 thinkingLevel。
     await handler(request(MODEL, { reasoning: { effort: "high" } }));
     assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-high");
-    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, "high");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
     // effort minimal：解析到 -low 变体。
     await handler(request(MODEL, { reasoning: { effort: "minimal" } }));
     assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-low");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
+    // 缺少 xhigh 时该选档不生效，使用默认变体，不降成 high。
+    const fallback = await handler(request(MODEL, { reasoning: { effort: "xhigh" } }));
+    assert.equal(fallback.status, 200);
+    await fallback.text();
+    assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-medium");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
     // 显式档位 slug 不在目录中列出，但仍按成员 id 直连（向后兼容）。
     const explicit = await handler(request("agy/gemini-3.8-flash-high", { reasoning: { effort: "low" } }));
     assert.equal(explicit.status, 200);
     assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-high");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
   });
 });
 
@@ -463,10 +471,10 @@ test("agy 四档目录经网关转发保留 xhigh 模型，显式变体同样可
       const response = await handler(request("agy/gemini-4-hydrogen", { reasoning: { effort } }));
       assert.equal(response.status, 200);
       await response.text();
-      const tier = effort === "max" ? "xhigh" : effort;
+      // 目录没有 max，选档不生效；不能将它当作 xhigh 的别名。
+      const tier = effort === "max" ? "medium" : effort;
       assert.equal(inferBodies.at(-1)!.model, `gemini-4-hydrogen-${tier}`);
-      assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel,
-        tier === "xhigh" ? undefined : tier);
+      assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
     }
     const explicit = await handler(request("agy/gemini-4-hydrogen-xhigh"));
     assert.equal(explicit.status, 200);
@@ -500,10 +508,81 @@ test("agy 新版客户端指纹获取 Orchestrator 并保留真实模型 ID 转�
     const orchestrator = models.find((model) => model.slug === `agy/${modelId}`)!;
     assert.equal(orchestrator.display_name, "AGY/Orchestrator (Argon)");
     assert.deepEqual(orchestrator.supported_reasoning_levels, []);
+    assert.equal(Object.hasOwn(orchestrator, "default_reasoning_level"), false);
     const result = await handler(request(`agy/${modelId}`));
     assert.equal(result.status, 200);
     await result.text();
     assert.equal(inferBodies.at(-1)!.model, modelId);
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
+  });
+});
+
+test("agy 切换模型时从各自目录能力还原变体、默认档位与参数，不泄漏上次选档", TIMEOUT, async () => {
+  await fixture(async ({ create, inferBodies }) => {
+    const handler = create(undefined, {
+      fetch: async (url, init) => {
+        if (url.includes(":fetchAvailableModels")) return Response.json({
+          defaultAgentModelId: "hydrogen-high",
+          groupedModels: {
+            hydrogen: { displayName: "Hydrogen", supportedThinkingLevels: ["low", "high", "xhigh"].map((thinkingSuffix) => ({ thinkingSuffix })) },
+            claude: { displayName: "Claude", supportedThinkingLevels: ["medium", "max"].map((thinkingSuffix) => ({ thinkingSuffix })) },
+          },
+          models: {
+            "hydrogen-low": {}, "hydrogen-high": {}, "hydrogen-xhigh": {},
+            "claude-medium": {}, "claude-max": {},
+            orchestrator: { supportsThinking: true, thinkingLevel: "high" },
+            parameter: { supportsThinking: true, supportedThinkingLevels: ["low", "xhigh", "max"] },
+          },
+          deprecatedModelIds: { "old-hydrogen": { newModelId: "hydrogen" } },
+        });
+        inferBodies.push(JSON.parse(String(init.body)));
+        return upstream();
+      },
+    });
+    const cases = [
+      ["hydrogen", "xhigh", "hydrogen-xhigh", undefined],
+      ["claude", "max", "claude-max", undefined],
+      ["hydrogen", undefined, "hydrogen-high", undefined],
+      ["hydrogen", "max", "hydrogen-high", undefined],
+      ["hydrogen-high", "low", "hydrogen-high", undefined],
+      ["old-hydrogen", "xhigh", "hydrogen-xhigh", undefined],
+      ["orchestrator", "max", "orchestrator", undefined],
+      ["parameter", "xhigh", "parameter", "xhigh"],
+      ["parameter", "max", "parameter", "max"],
+      ["parameter", "high", "parameter", undefined],
+    ] as const;
+    for (const [model, effort, expectedModel, thinkingLevel] of cases) {
+      const response = await handler(request(`agy/${model}`, { reasoning: { effort } }));
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(inferBodies.at(-1)!.model, expectedModel);
+      assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, thinkingLevel);
+    }
+    const chat = await handler(new Request("http://127.0.0.1:8327/v1/chat/completions", {
+      method: "POST", headers: { "content-type": "application/json", authorization: "Bearer inbound-oauth" },
+      body: JSON.stringify({ model: "agy/hydrogen", messages: [{ role: "user", content: "你好" }], reasoning_effort: "xhigh" }),
+    }));
+    assert.equal(chat.status, 200);
+    await chat.text();
+    assert.equal(inferBodies.at(-1)!.model, "hydrogen-xhigh");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, undefined);
+  });
+});
+
+test("agy 目录不可用时同名透传思考级别，不依据模型后缀猜测能力", TIMEOUT, async () => {
+  await fixture(async ({ create, inferBodies }) => {
+    const handler = create(undefined, {
+      fetch: async (url, init) => {
+        if (url.includes(":fetchAvailableModels")) throw new Error("目录离线");
+        inferBodies.push(JSON.parse(String(init.body)));
+        return upstream();
+      },
+    });
+    const response = await handler(request("agy/unknown-high", { reasoning: { effort: "max" } }));
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(inferBodies.at(-1)!.model, "unknown-high");
+    assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel, "max");
   });
 });
 

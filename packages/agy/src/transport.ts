@@ -72,6 +72,7 @@ export interface AgyTransportOptions {
 
 export interface AgyTransport {
   fetchModels(credential: AgyCredentials, signal?: AbortSignal): Promise<unknown>;
+  generate(credential: AgyCredentials, body: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
   streamInfer(credential: AgyCredentials, body: Record<string, unknown>, signal?: AbortSignal): Promise<Response>;
 }
 
@@ -111,6 +112,11 @@ export function createAgyTransport(options: AgyTransportOptions = {}): AgyTransp
     },
     async streamInfer(credential, body, signal) {
       return post(credential, "streamGenerateContent", body, true, signal);
+    },
+    async generate(credential, body, signal) {
+      const response = await post(credential, "generateContent", body, false, signal);
+      try { return await response.json(); }
+      catch { throw new AgyTransportError(response.status, ""); }
     },
   };
 }
