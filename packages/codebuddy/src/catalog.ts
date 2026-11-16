@@ -233,7 +233,7 @@ export function parseCodebuddyConfigData(data: unknown, product: "cli" | "workbu
 }
 
 function cloneCodexBase(id: string, priority: number): ModelEntry {
-  // 基底优先 gpt-5.5，缺失回退快照首条（CLIProxyAPI e240bd8 同款回退）。
+  // 基底优先 gpt-6-luna（CODEX_BASELINE_SLUG），缺失回退快照首条（CLIProxyAPI e240bd8 同款回退）。
   const base = codexBaselineEntry(codexSnapshot().models);
   const model = structuredClone(base);
   model.slug = id;
@@ -244,6 +244,9 @@ function cloneCodexBase(id: string, priority: number): ModelEntry {
   // CodeBuddy 上游只有 HTTP 接口，网关对它的 Responses WebSocket 升级一律回 426；
   // 旧基底 gpt-5.5 的 prefer_websockets=true 会诱导 Codex 每次先试探 WS 再降级，必须显式关闭。
   model.prefer_websockets = false;
+  // 基底官方条目自带 supports_search_tool=true，但本通道在请求层剥离 web_search 声明、
+  // alpha/search 未实现返回 501；不显式关闭会让 Codex 默认武装联网工具后每次尝试都失败。
+  model.supports_search_tool = false;
   model.priority = priority;
   // 条目保持 Codex 基线基底（含官方模板提示词，cli/work 共用）；官方 CLI 主提示词
   // 由请求转换层整体注入（request.ts），catalog 不再改写提示词。

@@ -176,9 +176,12 @@ test("synthesizeCodebuddyEntry 按①~④映射合成 Codex 条目", () => {
   assert.equal(entry.priority, 7);
   // ③ Codex 行为字段从快照基底继承，且必须解除最低客户端版本限制。
   assert.equal(entry.minimal_client_version, undefined);
-  // CodeBuddy 上游只有 HTTP 接口：不能从 gpt-5.5 基底继承 prefer_websockets=true，
+  // CodeBuddy 上游只有 HTTP 接口：不能从 Codex 基底继承 prefer_websockets=true，
   // 否则 Codex 每次会话都要先被 426 打回再降级到 SSE。
   assert.equal(entry.prefer_websockets, false);
+  // 基底官方条目 supports_search_tool=true，但本通道请求层剥离 web_search 声明、
+  // alpha/search 未实现返回 501；目录必须声明 false，避免 Codex 默认武装联网工具。
+  assert.equal(entry.supports_search_tool, false);
   assert.ok(typeof entry.tool_mode === "string" || Array.isArray(entry.model_messages) || JSON.stringify(entry).includes("truncation_policy"));
   // ④ CB 特有字段保留，vendor/tags 丢弃。
   assert.equal(entry.credits, "x0.14 credits");
@@ -196,6 +199,7 @@ test("synthesizeCodebuddyEntry 按①~④映射合成 Codex 条目", () => {
   assert.equal(tier.default_reasoning_level, undefined);
   assert.deepEqual(tier.input_modalities, ["text"]);
   assert.equal(tier.display_name, "CB-CN/Auto (x0.79)");
+  assert.equal(tier.supports_search_tool, false);
 });
 
 test("推理档位：有效非空 supportedEfforts 沿用上游列表", () => {

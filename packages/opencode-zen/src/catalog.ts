@@ -21,7 +21,7 @@ const CATALOG_TTL_MS = 10 * 60 * 1000;
 const FAILURE_COOLDOWN_MS = 30_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-/** 档位展示文案：复用快照基底（优先 gpt-5.5，缺失回退首条）里 low/medium/high 的描述，其余值域（none/max/xhigh）留空。 */
+/** 档位展示文案：复用快照基底（优先 gpt-6-luna，缺失回退首条）里 low/medium/high 的描述，其余值域（none/max/xhigh）留空。 */
 const effortDescriptions = (base: ModelEntry) => new Map(
   (Array.isArray(base.supported_reasoning_levels)
     ? base.supported_reasoning_levels as Array<{ effort?: unknown; description?: unknown }>
@@ -80,7 +80,7 @@ export function parseOpencodeZenModelsResponse(value: unknown): string[] {
 }
 
 /**
- * Codex 目录基底沿用快照基底（优先 gpt-5.5，缺失回退首条，与 agy/ 一致），能力字段按 chat-completions 中性化。
+ * Codex 目录基底沿用快照基底（优先 gpt-6-luna，缺失回退首条，与 agy/ 一致），能力字段按 chat-completions 中性化。
  * `metadata` 为可选的实时元数据表（models.opencode.ai）：显示名、上下文窗口
  * （limit.context）、输入模态（modalities.input）与 reasoning effort 档位（reasoning_options）全部取自它；
  * 元数据缺失的模型按 id 人工化命名、仅支持文本、删窗口字段、不暴露档位。
