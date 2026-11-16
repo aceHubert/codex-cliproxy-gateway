@@ -29,7 +29,6 @@ export interface ManualCodexKeyRow {
 /** 手动模式（--manual-codex-config）的 config.toml 配置指引；仅 codexConfigManaged=false 时返回。 */
 export interface ManualCodexConfig {
   gatewayBaseUrl: string;
-  staticCatalogActive: boolean;
   removeModelCatalogJson: boolean;
   keys: ManualCodexKeyRow[];
 }

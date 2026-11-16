@@ -3,14 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { getCodexBaselineEntry } from "@agent-proxy/models";
 import { atomicWrite, invalidateModelsCache, type ModelCatalog, type ModelEntry } from "@agent-proxy/plugin-api";
-import { THINKING_LEVELS } from "./request.ts";
 import { AGY_ENDPOINT } from "./transport.ts";
 import type { AgyCredentials } from "./credentials.ts";
 
 /**
  * Antigravity 模型目录：`POST /v1internal:fetchAvailableModels` 拉取，以 `models`
  * map 合成 `agy/` 前缀的 Codex 目录条目；`deprecatedModelIds` 提供旧 id 到新 id 的
- * 服务端重定向。多档位家族（同一基名的 high/medium/low 变体）在目录中合并为一个
+ * 服务端重定向。多档位家族（同一基名的 low/medium/high/xhigh 变体）在目录中合并为一个
  * `agy/<base>` 条目，转发时按 reasoning.effort 解析具体上游模型。缓存键带账号身份
  * 与端点摘要；缓存文件不含任何凭据。
  */
@@ -22,8 +21,8 @@ export const AGY_DISPLAY_PREFIX = "AGY/";
  *  （v2：档位家族合并；v3：levels 按实际档位重建；v4：删 web_search_tool_type；
  *  v5：v3/v4 的字段删除改为保留字段置中性值——缺字段疑似导致 Codex 弃用目录；
  *  v6：系统提示词在合成时替换（base_instructions + model_messages 模板））。 */
-/** 目录输出语义修订：变化时旧磁盘缓存整体失效（-disabled 剔除自 7 起）。 */
-const CACHE_REVISION = 7;
+/** 目录输出语义修订：变化时旧磁盘缓存整体失效（v7 剔除 -disabled；v8 合并 xhigh）。 */
+const CACHE_REVISION = 8;
 const CATALOG_TTL_MS = 6 * 60 * 1000;
 const FAILURE_COOLDOWN_MS = 30_000;
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -57,10 +56,10 @@ export interface AgyModelDetails {
   maxTokens?: number;
 }
 
-export type AgyTier = "high" | "medium" | "low";
+export type AgyTier = "low" | "medium" | "high" | "xhigh";
 
 /**
- * 多档位家族：同一基名（去 `-high/-medium/-low` 后缀）的变体集合。目录只暴露
+ * 多档位家族：同一基名（去 `-low/-medium/-high/-xhigh` 后缀）的变体集合。目录只暴露
  * `agy/<base>` 一个条目，具体上游模型由请求的 reasoning.effort 解析；显式档位
  * id（如 `agy/gemini-3.8-flash-high`）仍按成员 id 直连。
  */
@@ -148,13 +147,13 @@ export function parseAgyCatalogData(value: unknown): AgyCatalogData {
       }
     }
   }
-  // 多档位家族识别：按 `-high/-medium/-low` 后缀分组；仅两个成员以上的组才合并
+  // 多档位家族识别：按 `-low/-medium/-high/-xhigh` 后缀分组；仅两个成员以上的组才合并
   // （单档位后缀模型与无后缀模型保持独立），且基名与显式无后缀模型冲突时不合并
   // （避免目录出现重复 slug）。已改名的档位（如 gemini-pro-agent）不强行归族。
   const listed = new Set(models.map((model) => model.id));
   const grouped = new Map<string, Partial<Record<AgyTier, string>>>();
   for (const model of models) {
-    const match = /^(.+)-(high|medium|low)$/.exec(model.id);
+    const match = /^(.+)-(low|medium|high|xhigh)$/.exec(model.id);
     if (!match) continue;
     const [, base, tier] = match as unknown as [string, string, AgyTier];
     grouped.set(base, { ...(grouped.get(base) ?? {}), [tier]: model.id });
@@ -168,22 +167,25 @@ export function parseAgyCatalogData(value: unknown): AgyCatalogData {
       ?? models.find((model) => memberIds.includes(model.id));
     families.push({
       base, tiers,
-      displayName: preferred ? preferred.displayName.replace(/\s*\((High|Medium|Low)\)$/, "") : base,
+      displayName: preferred ? preferred.displayName.replace(/\s*\((low|medium|high|xhigh)\)$/i, "") : base,
     });
   }
   return { models, families, reroute };
 }
 
-/** effort（缺省或未知值）→ 目标档位；与 thinkingLevel 的档位语义一致，缺省 medium。 */
+/** effort → 家族档位；与传输枚举分离，缺省或未知值使用 medium。 */
 export function agyEffortTier(effort: unknown): AgyTier {
-  if (typeof effort !== "string") return "medium";
-  return (THINKING_LEVELS[effort] as AgyTier | undefined) ?? "medium";
+  if (effort === "xhigh" || effort === "max") return "xhigh";
+  if (effort === "minimal" || effort === "low") return "low";
+  if (effort === "high") return "high";
+  return "medium";
 }
 
 const TIER_FALLBACK: Record<AgyTier, readonly AgyTier[]> = {
-  low: ["low", "medium", "high"],
-  medium: ["medium", "high", "low"],
-  high: ["high", "medium", "low"],
+  low: ["low", "medium", "high", "xhigh"],
+  medium: ["medium", "high", "low", "xhigh"],
+  high: ["high", "xhigh", "medium", "low"],
+  xhigh: ["xhigh", "high", "medium", "low"],
 };
 
 /** 家族内按档位解析上游模型 id；目标档缺失时按「就近偏高」回退，家族必有成员。 */
@@ -195,7 +197,7 @@ export function resolveAgyFamilyModel(family: AgyModelFamily, effort: unknown): 
   return family.base;
 }
 
-/** 基底快照里 low/medium/high 档位的展示文案（复用到家族条目；xhigh/minimal 不沿用）。 */
+/** 从基底快照复用实际存在档位的展示文案。 */
 const baseLevelDescriptions = (base: ModelEntry) => new Map(
   (Array.isArray(base.supported_reasoning_levels)
     ? base.supported_reasoning_levels as Array<{ effort?: unknown; description?: unknown }>
@@ -245,17 +247,15 @@ export function buildAgyCatalog(data: AgyCatalogData): ModelCatalog {
     delete model.default_service_tier;
     delete model.default_reasoning_level;
     delete model.default_reasoning_summary;
-    // 快照基底的 supported_reasoning_levels 是 OpenAI 风格档位（含 xhigh/minimal），
-    // 上游只有 high/medium/low 变体：家族条目必须只列出实际存在的档位，否则客户端
-    // 会发出不存在的档位。默认档位与转发侧缺省解析一致（medium → high → low）。
+    // 家族条目只列实际存在的变体，不能继承快照的完整档位列表。
+    // 默认档位与转发侧缺省解析使用同一回退顺序。
     // 字段一律保留（无档位的条目置空数组），不删除——缺字段可能让 Codex 弃用整个目录。
     if (merged && tiers.length) {
       model.supported_reasoning_levels = tiers.map((tier) => ({
         effort: tier,
         description: BASE_LEVEL_DESCRIPTIONS.get(tier) ?? "",
       }));
-      model.default_reasoning_level = tiers.includes("medium") ? "medium"
-        : tiers.includes("high") ? "high" : "low";
+      model.default_reasoning_level = TIER_FALLBACK.medium.find((tier) => tiers.includes(tier))!;
     } else {
       model.supported_reasoning_levels = [];
       model.default_reasoning_level = "medium";
@@ -302,9 +302,9 @@ export function buildAgyCatalog(data: AgyCatalogData): ModelCatalog {
   return { models };
 }
 
-/** 家族档位按 low → high 排序输出；保证目录展示顺序稳定。 */
+/** 家族档位按 low → xhigh 排序输出；保证目录展示顺序稳定。 */
 function orderedTiers(family: AgyModelFamily): AgyTier[] {
-  return (["low", "medium", "high"] as const).filter((tier) => family.tiers[tier] !== undefined);
+  return (["low", "medium", "high", "xhigh"] as const).filter((tier) => family.tiers[tier] !== undefined);
 }
 
 export function mergeAgyCatalog(base: ModelCatalog, agy: ModelCatalog): ModelCatalog {
@@ -380,7 +380,7 @@ export function createAgyCatalogStore(options: AgyCatalogStoreOptions) {
       if (!family || typeof family.base !== "string" || !family.base || /[\s/\\]/.test(family.base)
         || typeof family.displayName !== "string" || !family.displayName
         || !tiers || Object.keys(tiers).length === 0
-        || !Object.entries(tiers).every(([tier, id]) => ["high", "medium", "low"].includes(tier)
+        || !Object.entries(tiers).every(([tier, id]) => ["low", "medium", "high", "xhigh"].includes(tier)
           && typeof id === "string" && id.length > 0)) {
         return undefined;
       }

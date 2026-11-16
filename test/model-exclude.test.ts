@@ -499,14 +499,16 @@ test("models --exclude 读取 config 当前模式并按手动配置状态处理�
         assert.equal(fs.existsSync(staticFile), upstreamOnly);
         if (upstreamOnly) {
           assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models,
-            JSON.parse(fs.readFileSync(fixture.paths.catalogFile, "utf8")).models);
+            JSON.parse(fs.readFileSync(fixture.paths.catalogFile, "utf8")).models.map(
+              (model: Record<string, unknown>, index: number) => ({ ...model, priority: index + 1 }),
+            ));
           assert.equal(fs.readFileSync(fixture.paths.modelsCacheFile, "utf8"), cacheBefore);
         } else {
           assert.equal(JSON.parse(fs.readFileSync(fixture.paths.modelsCacheFile, "utf8")).fetched_at, "2000-01-01T00:00:00Z");
         }
         const toml = fs.readFileSync(fixture.paths.configToml, "utf8");
         if (manual) assert.equal(toml, userToml);
-        else assert.equal(readRootTomlString(toml, "model_catalog_json"), upstreamOnly ? staticFile : undefined);
+        else assert.equal(readRootTomlString(toml, "model_catalog_json"), undefined);
         assert.ok(fs.existsSync(modelReloadRequestFile(fixture.paths)));
       } finally {
         fixture.cleanup();

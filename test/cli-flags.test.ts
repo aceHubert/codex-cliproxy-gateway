@@ -56,3 +56,9 @@ test("-v wins over -h when both are requested", async () => {
 test("-h consumed as an option value does not trigger the usage shortcut", async () => {
   await assert.rejects(() => runCli(["status", "--port", "-h"]), /Unknown option --port for command "status"/);
 });
+
+test("config --codex-static-catalog passes the option whitelist", async () => {
+  // 白名单放行后由取值校验接住非法值：报 expects on or off 而不是 Unknown option，
+  // 且校验发生在读取安装状态之前，未隔离 HOME 也安全。
+  await assert.rejects(() => runCli(["config", "--codex-static-catalog", "banana"]), /--codex-static-catalog expects on or off/);
+});

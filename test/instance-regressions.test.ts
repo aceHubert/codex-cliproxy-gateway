@@ -20,13 +20,14 @@ function isolatedScenario(scenario: string): void {
     const codexA = path.join(base, "codex-a");
     const pathsA = resolvePaths();
     const calls = [];
+    const restarts = [];
     let failInstall = true;
     const launchd = await import("./apps/gateway/src/launchd.ts");
     mock.module("./apps/gateway/src/launchd.ts", () => ({
       ...launchd,
       launchAgentStatus: () => null,
       startLaunchAgent: () => { calls.push("start"); },
-      restartLaunchAgent: () => { calls.push("restart"); },
+      restartLaunchAgent: (plist, label) => { calls.push("restart"); restarts.push({ plist, label }); },
       uninstallLaunchAgent: () => { calls.push("uninstall"); },
       installLaunchAgent: () => { calls.push("install"); if (failInstall) throw new Error("模拟服务启动失败"); },
       startWebUiLaunchAgent: () => { calls.push("write-ui-plist"); }
@@ -88,6 +89,28 @@ test("模型排除命令使用当前实例配置和审计，不修改另一实�
     assert.equal(JSON.parse(fs.readFileSync(path.join(rootB, "config.json"))).excludedModels, undefined);
     assert.match(fs.readFileSync(pathsA.stdoutLog, "utf8"), /models --exclude/);
     assert.deepEqual(calls, []);
+  `);
+});
+
+test("已安装实例的配置修改仅重启自己的服务", { timeout: 60_000 }, () => {
+  isolatedScenario(`
+    const defaultPlist = path.join(base, "Library", "LaunchAgents", "agent-proxy-gateway.plist");
+    fs.mkdirSync(path.dirname(defaultPlist), { recursive: true });
+    fs.writeFileSync(defaultPlist, "default-service-plist");
+    fs.writeFileSync(pathsA.launchAgent, "instance-a-plist");
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), "http://127.0.0.1:8399/healthz");
+      return Response.json({ ok: true }, { headers: { "x-ccp-instance": instanceMarker(rootA) } });
+    };
+    await runCli(["config", "--debug", "on"]);
+    assert.deepEqual(calls, ["restart"]);
+    assert.deepEqual(restarts, [{
+      plist: pathsA.launchAgent,
+      label: "agent-proxy-gateway-" + instanceMarker(rootA),
+    }]);
+    assert.equal(JSON.parse(fs.readFileSync(pathsA.gatewayConfig)).debug, true);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(rootB, "config.json"))).debug, false);
+    assert.equal(fs.readFileSync(defaultPlist, "utf8"), "default-service-plist");
   `);
 });
 

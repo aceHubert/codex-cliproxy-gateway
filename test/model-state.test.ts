@@ -12,6 +12,7 @@ import {
   writeStaticCatalog,
 } from "../apps/gateway/src/model-composition.ts";
 import { managedCatalogFiles, resolvePaths } from "../apps/gateway/src/paths.ts";
+import { readRootTomlString } from "../apps/gateway/src/toml.ts";
 import test from "./host-test.ts";
 import { routingPluginFamily } from "./plugin-routing-fixture.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
@@ -54,8 +55,30 @@ test("静态目录合并裸上游与 agent，排除规则只作用于本地模�
     const kept = { slug: "agy/visible", priority: 7, base_instructions: "原始提示词", supported_reasoning_levels: [{ effort: "high" }] };
     const catalog = writeStaticCatalog(paths, config, [kept, { slug: "agy/hidden" }], (model) => Boolean(routingPluginFamily(model)));
     assert.deepEqual(catalog.models.map((entry) => entry.slug), ["gpt-test", "agy/visible"]);
-    assert.deepEqual(catalog.models[1], kept);
+    assert.deepEqual(catalog.models[1], { ...kept, priority: 2 });
     assert.equal(fs.readFileSync(paths.catalogFile, "utf8"), upstreamSource);
+    assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), catalog);
+  });
+});
+
+test("静态目录按上游在前插件在后的顺序重排连续 priority，避免选择框乱序", TIMEOUT, async () => {
+  await fixture(async (paths, config) => {
+    fs.writeFileSync(paths.catalogFile, JSON.stringify({
+      models: [
+        { slug: "gpt-a", priority: 1 },
+        { slug: "gpt-b", priority: 1043 },
+      ],
+    }));
+    const catalog = writeStaticCatalog(paths, config, [
+      { slug: "agy/first", priority: 1 },
+      { slug: "agy/second", priority: 0 },
+    ]);
+    assert.deepEqual(catalog.models.map((entry) => [entry.slug, entry.priority]), [
+      ["gpt-a", 1],
+      ["gpt-b", 2],
+      ["agy/first", 3],
+      ["agy/second", 4],
+    ]);
     assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), catalog);
   });
 });
@@ -69,7 +92,7 @@ test("重复或空静态目录拒绝覆盖 last-good，空上游允许仅 agent 
     fs.writeFileSync(paths.catalogFile, JSON.stringify({ models: [] }));
     assert.throws(() => writeStaticCatalog(paths, config, []), /静态模型目录为空/);
     assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")), good);
-    assert.deepEqual(writeStaticCatalog(paths, config, [{ slug: "agy/only" }]).models, [{ slug: "agy/only" }]);
+    assert.deepEqual(writeStaticCatalog(paths, config, [{ slug: "agy/only" }]).models, [{ slug: "agy/only", priority: 1 }]);
   });
 });
 
@@ -118,9 +141,27 @@ test("agent 刷新失败且没有缓存时仍发布可用静态目录，警告�
   });
 });
 
-test("受管模式更新 TOML 与匹配的安装哈希，退出模式只移除目录键", TIMEOUT, async () => {
+test("codexStaticCatalog 开启时受管写入静态指向，动态模式忽略该开关", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
-    const original = "model = \"gpt-test\"\n[custom]\nvalue = 7\n";
+    config.codexStaticCatalog = true;
+    const original = 'model = "gpt-test"\n[custom]\nvalue = 7\n';
+    fs.writeFileSync(paths.configToml, original);
+    fs.writeFileSync(paths.stateFile, JSON.stringify({ installedConfigHash: hash(original), version: 1 }));
+    const first = await updateCodexModelCatalog(paths, config);
+    assert.equal(first.tomlChanged, true);
+    const patched = fs.readFileSync(paths.configToml, "utf8");
+    assert.equal(readRootTomlString(patched, "model_catalog_json"), codexCatalogFile(paths));
+    assert.ok(patched.includes("[custom]\nvalue = 7"));
+    // 动态模式不维护静态目录：开关被忽略，受管指向移除。
+    config.upstreamOnly = false;
+    await updateCodexModelCatalog(paths, config);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
+  });
+});
+
+test("受管模式更新移除历史目录键并匹配安装哈希，重复更新不再改写 TOML", TIMEOUT, async () => {
+  await fixture(async (paths, config) => {
+    const original = `model = "gpt-test"\nmodel_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}\n[custom]\nvalue = 7\n`;
     fs.writeFileSync(paths.configToml, original);
     fs.writeFileSync(paths.stateFile, JSON.stringify({ installedConfigHash: hash(original), version: 1 }));
     const first = await updateCodexModelCatalog(paths, config);
@@ -128,13 +169,14 @@ test("受管模式更新 TOML 与匹配的安装哈希，退出模式只移除�
     assert.equal(first.tomlChanged, true);
     assert.equal(first.count, 1);
     const patched = fs.readFileSync(paths.configToml, "utf8");
-    assert.ok(patched.includes(`model_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}`));
+    assert.equal(readRootTomlString(patched, "model_catalog_json"), undefined);
+    assert.ok(patched.includes("model = \"gpt-test\""));
     assert.ok(patched.includes("[custom]\nvalue = 7"));
     assert.equal(JSON.parse(fs.readFileSync(paths.stateFile, "utf8")).installedConfigHash, hash(patched));
-    config.upstreamOnly = false;
-    await updateCodexModelCatalog(paths, config);
-    assert.equal(fs.readFileSync(paths.configToml, "utf8"), original);
-    assert.equal(JSON.parse(fs.readFileSync(paths.stateFile, "utf8")).installedConfigHash, hash(original));
+    const second = await updateCodexModelCatalog(paths, config);
+    assert.equal(second.tomlChanged, false);
+    assert.equal(fs.readFileSync(paths.configToml, "utf8"), patched);
+    assert.equal(JSON.parse(fs.readFileSync(paths.stateFile, "utf8")).installedConfigHash, hash(patched));
   });
 });
 
@@ -160,7 +202,7 @@ test("用户改过 TOML 后不覆盖安装哈希，手动配置不改任何用�
   });
 });
 
-test("非受管或不可解析的目录键在刷新前拒绝，受管旧目录可迁移", TIMEOUT, async () => {
+test("非受管或不可解析的目录键在刷新前拒绝，受管旧目录指向被移除", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
     config.agy = true;
     let requests = 0;
@@ -170,18 +212,19 @@ test("非受管或不可解析的目录键在刷新前拒绝，受管旧目录�
     assert.equal(requests, 0);
     assert.equal(fs.existsSync(codexCatalogFile(paths)), false);
     const invalid = "model_catalog_json = \"\"\"unparseable\"\"\"\n";
-    assert.throws(() => applyModelCatalogToml(invalid, false, paths, codexCatalogFile(paths), managedCatalogFiles(paths)), /cannot be parsed/);
+    assert.throws(() => applyModelCatalogToml(invalid, false, paths, managedCatalogFiles(paths)), /cannot be parsed/);
     const source = `model_catalog_json = ${JSON.stringify(paths.catalogFile)}\n`;
-    const migrated = applyModelCatalogToml(source, true, paths, codexCatalogFile(paths), managedCatalogFiles(paths));
+    const migrated = applyModelCatalogToml(source, false, paths, managedCatalogFiles(paths));
     assert.equal(migrated.previousCatalog, paths.catalogFile);
-    assert.equal(migrated.patchedToml, `model_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}\n`);
+    assert.equal(migrated.patchedToml, "");
   });
 });
 
 test("异步刷新期间用户修改 TOML 时保留用户修改并恢复已有静态目录", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
     const previous = writeStaticCatalog(paths, config, []);
-    const original = "model = \"before\"\n";
+    // 预置历史受管目录键：本次更新要移除它，才会进入改写与并发守卫路径。
+    const original = `model = "before"\nmodel_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}\n`;
     const userEdit = "model = \"user-edit-during-refresh\"\n";
     fs.writeFileSync(paths.configToml, original);
     config.agy = true;
@@ -220,7 +263,8 @@ test("动态模式的显式更新刷新 agent 一次但不生成静态目录", T
 test("目录更新后状态写入失败时回滚静态文件与已经改写的 TOML", TIMEOUT, async () => {
   await fixture(async (paths, config) => {
     const previous = writeStaticCatalog(paths, config, []);
-    const original = "model = \"before\"\n";
+    // 预置历史受管目录键：移除改写会更新安装哈希，状态解析失败时整体回滚。
+    const original = `model = "before"\nmodel_catalog_json = ${JSON.stringify(codexCatalogFile(paths))}\n`;
     fs.writeFileSync(paths.configToml, original);
     fs.writeFileSync(paths.stateFile, JSON.stringify({ installedConfigHash: hash(original) }));
     config.agy = true;

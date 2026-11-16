@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { decryptZcodeCredential } from "./credential-cipher.ts";
+import { decryptZcodeCredential, ZcodeCredentialError, type ZcodeCredentialCipherDependencies } from "./credential-cipher.ts";
+import { mintZcodeProjectToken, type ZcodeIndividualApiKey } from "./individual-project-token.ts";
 import type { ZcodeFamily, ZcodeSelection } from "./config.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -14,6 +15,8 @@ export interface ZcodeTeamCredentialInputs {
 export interface ZcodeTeamCredentialDependencies {
   fetch?: typeof fetch;
   env?: NodeJS.ProcessEnv;
+  clientVersion?: string;
+  now?: () => number;
 }
 
 function invalid(message: string): never {
@@ -24,12 +27,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function credentialValue(credentials: Record<string, unknown>, key: string, env: NodeJS.ProcessEnv): string {
+function credentialValue(credentials: Record<string, unknown>, key: string, env: NodeJS.ProcessEnv, cipherDependencies: ZcodeCredentialCipherDependencies): string {
   const value = credentials[key];
   if (typeof value !== "string" || !value.trim()) return "";
   try {
-    return decryptZcodeCredential(value, env).trim();
-  } catch {
+    return decryptZcodeCredential(value, env, cipherDependencies).trim();
+  } catch (error) {
+    if (error instanceof ZcodeCredentialError) throw error;
     throw new Error("团队凭据解密失败");
   }
 }
@@ -38,10 +42,11 @@ export function readZcodeTeamCredentialInputs(
   credentials: Record<string, unknown>,
   family: ZcodeFamily,
   env: NodeJS.ProcessEnv = process.env,
+  cipherDependencies: ZcodeCredentialCipherDependencies = {},
 ): ZcodeTeamCredentialInputs {
-  const accessToken = credentialValue(credentials, `oauth:${family}:access_token`, env);
+  const accessToken = credentialValue(credentials, `oauth:${family}:access_token`, env, cipherDependencies);
   if (!accessToken) invalid("团队套餐缺少 OAuth access token");
-  const zcodeJwt = credentialValue(credentials, "zcodejwttoken", env);
+  const zcodeJwt = credentialValue(credentials, "zcodejwttoken", env, cipherDependencies);
   if (family === "bigmodel" && zcodeJwt && zcodeJwt === accessToken) {
     invalid("团队套餐 OAuth token 已过期");
   }
@@ -109,12 +114,12 @@ function usableApiKey(value: unknown): { apiKey: string } | undefined {
   return apiKey ? { apiKey } : undefined;
 }
 
-/** 复刻 ZCode 3.12.3 的团队项目 Key 读取、缺失创建和 secret 复制流程。 */
+/** 团队套餐使用项目短期令牌，长期项目 Key 仅作签发定位。 */
 export async function resolveZcodeTeamApiKey(
   selection: ZcodeSelection,
   inputs: ZcodeTeamCredentialInputs,
   dependencies: ZcodeTeamCredentialDependencies = {},
-): Promise<string> {
+): Promise<ZcodeIndividualApiKey> {
   if (selection.kind !== "team-coding-plan" || !selection.team) invalid("团队套餐缺少项目上下文");
   const { team, family } = selection;
   const fetchImpl = dependencies.fetch ?? fetch;
@@ -132,15 +137,10 @@ export async function resolveZcodeTeamApiKey(
   const matching = Array.isArray(existing) ? existing.find((item) => usableApiKey(item)) : undefined;
   const current = matching === undefined ? undefined : usableApiKey(matching);
   const key = current ?? usableApiKey(responseData(await requestJson(keysUrl, {
-    body: JSON.stringify({ keyType: TEAM_API_KEY_TYPE, name: TEAM_API_KEY_NAME }),
+    body: JSON.stringify({ keyType: TEAM_API_KEY_TYPE, name: TEAM_API_KEY_NAME, usageScene: 1 }),
     headers: teamHeaders(inputs.accessToken, team), method: "POST",
   }, fetchImpl)));
   if (!key) throw new Error("ZCode 团队项目 API Key 缺失");
 
-  const copied = await requestJson(`${keysUrl}/copy/${encodeURIComponent(key.apiKey)}`, {
-    headers: teamHeaders(inputs.accessToken, team), method: "GET",
-  }, fetchImpl);
-  const secret = responseData(copied);
-  const secretKey = isRecord(secret) && typeof secret.secretKey === "string" ? secret.secretKey.trim() : "";
-  return secretKey ? `${key.apiKey}.${secretKey}` : key.apiKey;
+  return mintZcodeProjectToken(family, inputs, { ...team, apiKeyId: key.apiKey }, dependencies);
 }

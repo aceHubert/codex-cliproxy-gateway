@@ -6,8 +6,8 @@ import { compileModelFilter, filterExcludedModels, mergeCatalog, normalizeCatalo
 import { readApiKey } from "./keychain.ts";
 import { createModelReloadReceiver } from "./model-reload.ts";
 import { codexCatalogFile, writeStaticCatalog } from "./model-state.ts";
-import { instanceMarker, resolvePaths } from "./paths.ts";
-import { logGatewayError, logRequestSummary } from "./process-log.ts";
+import { instanceMarker, resolvePaths, runWithInstancePaths } from "./paths.ts";
+import { appendProcessLog, logGatewayError, logRequestSummary } from "./process-log.ts";
 import {
   dialUpstreamWebSocket,
   forwardedHeaders,
@@ -29,7 +29,7 @@ import {
   retainLogFile,
   websocketLogFile, type RequestLogSink
 } from "./request-log.ts";
-import { ThreadRoutingError, ThreadRoutingState, type ThreadRouteKind } from "./thread-routing.ts";
+import { ThreadRoutingCapacityError, ThreadRoutingError, ThreadRoutingState } from "./thread-routing.ts";
 import { atomicWrite } from "./toml.ts";
 import { MOUNT_PATH, OFFICIAL_BASE_URL, type ProcessLogTarget, type GatewayConfig, type ModelCatalog, type ResolvedPaths } from "./types.ts";
 import { webUiPort } from "./ui-port.ts";
@@ -526,10 +526,10 @@ export function isLoopbackUrl(value: string): boolean {
  * processLog 由 serve 注入（paths.stdoutLog + maxGatewayLogBytes）；没有它时请求日志照写，
  * 但不产生 gateway.log 里的请求摘要。
  */
-function resolveLogSink(config: GatewayConfig, processLog?: ProcessLogTarget): RequestLogSink | undefined {
+function resolveLogSink(config: GatewayConfig, paths: ResolvedPaths, processLog?: ProcessLogTarget): RequestLogSink | undefined {
   if (config.requestLogging !== true) return undefined;
   return {
-    dir: requestLogDir(),
+    dir: requestLogDir(paths),
     maxLogs: Math.max(0, Math.trunc(config.maxRequestLogs ?? 0)),
     processLog,
   };
@@ -607,6 +607,7 @@ function decideThreadRoute(
   threadRoutes: ThreadRoutingState,
   cpaTurns: Set<string>,
   confirmModel = true,
+  reserveWithoutModel = false,
 ): Route {
   const route = decideRoute(model, prefix);
   const imageTurnId = requestThreadId(request, "x-codex-image-turn-id");
@@ -625,13 +626,21 @@ function decideThreadRoute(
   } catch { /* 缺失或损坏的元数据不改变正常模型路由。 */ }
   const kind = threadRoutes.resolve(requestThreadId(request), requestThreadId(request, "x-codex-parent-thread-id"),
     responses && typeof model === "string" && model ? route.kind : undefined,
-    responses && request.method !== "GET" && !prewarm && confirmModel) ?? route.kind;
+    responses && request.method !== "GET" && !prewarm && confirmModel,
+    responses && reserveWithoutModel) ?? route.kind;
   if (kind === "cliproxy") {
     const turnId = turnIdFromMetadataHeader(request.headers.get("x-codex-turn-metadata"));
     if (turnId) rememberCpaTurn(cpaTurns, turnId);
     return { kind, upstreamModel: route.kind === "cliproxy" ? route.upstreamModel : typeof model === "string" ? model : "" };
   }
   return { kind, upstreamModel: route.upstreamModel };
+}
+
+function threadRoutingErrorResponse(error: ThreadRoutingError): Response {
+  if (error instanceof ThreadRoutingCapacityError) {
+    return Response.json({ error: { code: "thread_routing_capacity_exhausted", message: error.message } }, { status: 503 });
+  }
+  return Response.json({ error: { message: error.message } }, { status: 503, headers: { "retry-after": "1" } });
 }
 
 function stripRoutingHintPrefix(value: string, prefix: string): string {
@@ -724,7 +733,7 @@ export function responsesWebSocketTarget(
   if (hintedModel && identifyClientEndpoint(new URL(request.url).pathname, mountPath) && registry.match(hintedModel)) return null;
   const route = config.upstreamOnly === true
     ? { kind: "cliproxy", upstreamModel: "" } as const
-    : decideThreadRoute(request, hintedModel, prefix, threadRoutes, cpaTurns);
+    : decideThreadRoute(request, hintedModel, prefix, threadRoutes, cpaTurns, false, true);
   // 不做任何网关侧门控：CPA WebSocket 升级一律桥接 CLIProxy，由上游按请求决定
   // 走 ws 还是 HTTP/SSE；上游不支持时握手失败，拨号失败路径回 426 令客户端降级。
   const baseUrl = route.kind === "cliproxy" ? config.upstreamBaseUrl : OFFICIAL_BASE_URL;
@@ -1050,7 +1059,7 @@ export function createPluginGatewayHandler(
     ready = Promise.resolve();
   };
   const logging = config.requestLogging === true;
-  const sink = resolveLogSink(config, processLog);
+  const sink = resolveLogSink(config, effectivePaths, processLog);
   // 启动补扫一次：保留计数按时间全局生效，不必等某个分组再被写入。ZCode 适配器用的是
   // 同一份 logDir/maxRequestLogs，这一次扫描同时覆盖两者。
   if (sink) pruneLogDir(sink.dir, sink.maxLogs);
@@ -1224,10 +1233,10 @@ export function createPluginGatewayHandler(
           }
         : decideThreadRoute(request, model, prefix, threadRoutes, cpaTurns, json?.generate !== false);
     } catch (error) {
+      if (error instanceof ThreadRoutingError) return threadRoutingErrorResponse(error);
       return Response.json(
         { error: { message: error instanceof Error ? error.message : String(error) } },
-        { status: error instanceof ThreadRoutingError ? 503 : 400,
-          headers: error instanceof ThreadRoutingError ? { "retry-after": "1" } : undefined },
+        { status: 400 },
       );
     }
     // 推理类 POST（responses/compact/images 等）点名被排除模型时在转发前拦截：
@@ -1443,7 +1452,7 @@ async function bridgeUpstreamWebSocket(
     headers: Record<string, string>;
     routeKind?: "cliproxy" | "official";
     prefix?: string;
-    resolveFrameRoute?: (model: string, confirmed: boolean, parentThreadId?: string) => ThreadRouteKind;
+    resolveFrameRoute?: RealtimeSocketData["resolveFrameRoute"];
     routeIsCurrent?: () => boolean;
     noteTurnId?: (turnId: string) => void;
     handleResponseFrame?: (frame: string) => Promise<ResponseFrameAction | null>;
@@ -1501,15 +1510,26 @@ async function bridgeUpstreamWebSocket(
     url: target.url,
     detail: { durationMs: Date.now() - startedAt, headers: maskedHeaders(target.headers) },
   });
-  if (target.routeIsCurrent && !target.routeIsCurrent()) {
+  try {
+    if (target.routeIsCurrent && !target.routeIsCurrent()) {
+      throw new ThreadRoutingError("会话路由已切换，请重新建立连接。");
+    }
+  } catch (error) {
     upstream.close(1000, "Model routing changed during handshake");
     releaseLog?.();
-    return Response.json({ error: { message: "会话路由已切换，请重新建立连接。" } }, { status: 503, headers: { "retry-after": "1" } });
+    if (!(error instanceof ThreadRoutingError)) throw error;
+    return threadRoutingErrorResponse(error);
   }
   if (server.upgrade(request, { data: { ...socket, upstream } })) return undefined;
   upstream.close(1000, "Client upgrade failed");
   releaseLog?.();
   return new Response("WebSocket upgrade failed", { status: 400 });
+}
+
+export interface GatewayStartOptions {
+  runtimePaths?: ResolvedPaths;
+  apiKey?: string;
+  threadRoutes?: ThreadRoutingState;
 }
 
 export function startPluginGateway(
@@ -1519,14 +1539,17 @@ export function startPluginGateway(
   clientVersionFile?: string,
   processLog?: ProcessLogTarget,
   ownsLocalModel: (model: string) => boolean = (model) => Boolean(registry.match(model)),
+  options: GatewayStartOptions = {},
 ): Bun.Server<RealtimeSocketData> {
   if (typeof Bun === "undefined") {
     throw new Error("The gateway server must run with Bun");
   }
-  const apiKey = readApiKey(isLoopbackUrl(config.upstreamBaseUrl));
-  const threadRoutes = new ThreadRoutingState();
+  const paths = options.runtimePaths ?? resolvePaths();
+  const apiKey = options.apiKey ?? runWithInstancePaths(paths, () => readApiKey(isLoopbackUrl(config.upstreamBaseUrl)));
+  const threadRoutes = options.threadRoutes ?? new ThreadRoutingState([], processLog ? {
+    onStats: (stats) => appendProcessLog(processLog, `--${localTime()}-- 线程路由容量 ${JSON.stringify(stats)}`),
+  } : {});
   const cpaTurns = new Set<string>();
-  const paths = resolvePaths();
   const handler = createPluginGatewayHandler(config, registry, apiKey, realtimeProviderMode, threadRoutes, cpaTurns, clientVersionFile, processLog, paths, ownsLocalModel);
   const ready = handler.modelsReady();
   // 服务启动保留一次 agent 刷新，健康探测也等待静态目录发布完毕。
@@ -1578,7 +1601,7 @@ export function startPluginGateway(
         if (target) {
           const accessError = realtimeAccessError(request, realtimeProviderMode);
           if (accessError) return accessError;
-          const sink = resolveLogSink(config, processLog);
+          const sink = resolveLogSink(config, paths, processLog);
           return bridgeUpstreamWebSocket(request, server, target, sink, (error) => {
             // sideband 拨号失败是真实故障：502 并进错误摘要（原先会退化成 101 后静默断开）。
             const incoming = new URL(request.url);
@@ -1602,9 +1625,11 @@ export function startPluginGateway(
           wsTarget = responsesWebSocketTarget(request, config, apiKey, threadRoutes, cpaTurns, registry);
         } catch (error) {
           if (!(error instanceof ThreadRoutingError)) throw error;
-          logGatewayError(processLog, { requestTime: localTime(), method: request.method,
-            url: incoming.pathname, status: 503, message: error.message });
-          return Response.json({ error: { message: error.message } }, { status: 503, headers: { "retry-after": "1" } });
+          if (!(error instanceof ThreadRoutingCapacityError)) {
+            logGatewayError(processLog, { requestTime: localTime(), method: request.method,
+              url: incoming.pathname, status: 503, message: error.message });
+          }
+          return threadRoutingErrorResponse(error);
         }
         if (wsTarget) {
           const threadId = requestThreadId(request);
@@ -1617,11 +1642,13 @@ export function startPluginGateway(
               ...wsTarget,
               pluginModelFamily: (model) => registry.match(model)?.plugin.id ?? (ownsLocalModel(model) ? "plugin" : undefined),
               prefix: config.upstreamOnly === true ? "" : configuredModelPrefix(config),
-              resolveFrameRoute: config.upstreamOnly === true ? undefined : (model, confirmed, parentThreadId) =>
-                threadRoutes.resolve(threadId, parentThreadId ?? handshakeParent, decideRoute(model, configuredModelPrefix(config)).kind, confirmed)
-                  ?? decideRoute(model, configuredModelPrefix(config)).kind,
+              resolveFrameRoute: config.upstreamOnly === true ? undefined : (model, confirmed, parentThreadId) => {
+                const modelRoute = model ? decideRoute(model, configuredModelPrefix(config)).kind : undefined;
+                return threadRoutes.resolve(threadId, parentThreadId ?? handshakeParent, modelRoute, confirmed)
+                  ?? modelRoute ?? wsTarget.routeKind;
+              },
               routeIsCurrent: config.upstreamOnly === true || !routeThreadId ? undefined
-                : () => (threadRoutes.get(routeThreadId) ?? "official") === wsTarget.routeKind,
+                : () => (threadRoutes.resolve(routeThreadId, undefined, undefined, false) ?? "official") === wsTarget.routeKind,
               handleResponseFrame: wsTarget.routeKind === "cliproxy"
                 ? (frame) => handleResponsesWebSocketFrame(frame, wsTarget)
                 : undefined,
@@ -1631,7 +1658,7 @@ export function startPluginGateway(
                 ? (turnId) => rememberCpaTurn(cpaTurns, turnId)
                 : undefined,
             },
-            resolveLogSink(config, processLog),
+            resolveLogSink(config, paths, processLog),
             () => websocketNotSupportedResponse("websocket-upstream-unavailable"),
           );
         }

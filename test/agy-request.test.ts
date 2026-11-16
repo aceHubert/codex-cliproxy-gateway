@@ -284,6 +284,16 @@ test("agy 请求转换：reasoning 档位映射 thinkingLevel，未知档位只�
   assert.equal(translated({ input: "q", reasoning: { effort: "none" } }).request.generationConfig.thinkingConfig.thinkingLevel, undefined);
 });
 
+test("agy xhigh 模型由上游变体决定档位，不以 thinkingLevel 降成 high", TIMEOUT, () => {
+  for (const effort of [undefined, "low", "xhigh", "max"]) {
+    const { wrapper } = translateAgyRequest({ input: "q", reasoning: { effort } }, "gemini-4-hydrogen-xhigh");
+    assert.equal(wrapper.model, "gemini-4-hydrogen-xhigh");
+    assert.deepEqual((wrapper.request as Json).generationConfig.thinkingConfig,
+      { includeThoughts: true, thinkingBudget: -1 });
+  }
+  assert.equal(translated({ input: "q", reasoning: { effort: "xhigh" } }).request.generationConfig.thinkingConfig.thinkingLevel, "high");
+});
+
 test("agy 请求转换：默认 maxOutputTokens 与采样参数透传", TIMEOUT, () => {
   const config = translated({ input: "q", temperature: 0.2, top_p: 0.9 }).request.generationConfig;
   assert.equal(config.maxOutputTokens, 16384);

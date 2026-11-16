@@ -175,7 +175,8 @@ test("models --sync 保持静态模式，config 切换模式时手动 TOML 不�
     const catalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8"));
     assert.deepEqual(catalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
     const staticFile = path.join(paths.runtimeHome, "codex-catalog.json");
-    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, catalog.models);
+    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models,
+      catalog.models.map((model: Record<string, unknown>, index: number) => ({ ...model, priority: index + 1 })));
     // catalogPath 已过时：目录文件按上游类型派生，配置不再携带该键。
     assert.equal("catalogPath" in config, false);
     // config.toml 逐字节不变，state 保持手动且不跟踪 hash。
@@ -183,12 +184,11 @@ test("models --sync 保持静态模式，config 切换模式时手动 TOML 不�
     const state = JSON.parse(fs.readFileSync(paths.stateFile, "utf8"));
     assert.equal(state.codexConfigManaged, false);
     assert.equal("installedConfigHash" in state, false);
-    // 需要手动添加的键以 warning + 确切值打印。
+    // 目录统一经网关 /models 提供：不再提示添加 model_catalog_json。
     const output = captured.lines.join("\n");
-    assert.match(output, /手动配置模式：.*根表设置 model_catalog_json/);
-    assert.ok(output.includes(`model_catalog_json = "${staticFile}"`));
+    assert.doesNotMatch(output, /model_catalog_json/);
 
-    // 模拟用户手动加键后切回 split：提示删除该键，仍不改写 config.toml。
+    // 模拟用户残留目录键后切回 split：提示删除该键，仍不改写 config.toml。
     const userTomlWithKey = `${userToml}model_catalog_json = "${staticFile}"\n`;
     fs.writeFileSync(paths.configToml, userTomlWithKey);
     const secondRun = captureConsole();

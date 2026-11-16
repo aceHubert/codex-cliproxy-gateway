@@ -1,4 +1,4 @@
-import { decryptZcodeCredential } from "./credential-cipher.ts";
+import { decryptZcodeCredential, ZcodeCredentialError, type ZcodeCredentialCipherDependencies } from "./credential-cipher.ts";
 import type { ZcodeFamily } from "./config.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -21,14 +21,16 @@ export function readZcodeIndividualCredential(
   credentials: Record<string, unknown>,
   family: ZcodeFamily,
   env: NodeJS.ProcessEnv = process.env,
+  cipherDependencies: ZcodeCredentialCipherDependencies = {},
 ): ZcodeIndividualCredential {
   const rawProfile = credentials[`oauth:${family}:user_info`];
   if (rawProfile === undefined || rawProfile === null) return { state: "absent" };
   if (typeof rawProfile !== "string" || !rawProfile.trim()) return { state: "unavailable" };
   let profile: unknown;
   try {
-    profile = JSON.parse(decryptZcodeCredential(rawProfile, env));
-  } catch {
+    profile = JSON.parse(decryptZcodeCredential(rawProfile, env, cipherDependencies));
+  } catch (error) {
+    if (error instanceof ZcodeCredentialError) throw error;
     return { state: "unavailable" };
   }
   // ZCode 3.14 的 user_info 使用 `user_id`；部分旧布局/接口写 `id`，
@@ -43,9 +45,10 @@ export function readZcodeIndividualCredential(
   const key = credentials[`account-provider:coding-plan:${provider}:account:${encodeURIComponent(accountIdentity)}:api-key`];
   if (typeof key !== "string" || !key.trim()) return { state: "unavailable", identity: accountIdentity };
   try {
-    const apiKey = decryptZcodeCredential(key, env).trim();
+    const apiKey = decryptZcodeCredential(key, env, cipherDependencies).trim();
     return apiKey ? { state: "available", identity: accountIdentity, apiKey } : { state: "unavailable", identity: accountIdentity };
-  } catch {
+  } catch (error) {
+    if (error instanceof ZcodeCredentialError) throw error;
     return { state: "unavailable", identity: accountIdentity };
   }
 }

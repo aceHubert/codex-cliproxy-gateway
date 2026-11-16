@@ -253,8 +253,7 @@ function serverCallSummary(item: Record<string, unknown>): string {
   return `[已省略服务器内置工具调用 ${String(item.type)}${detail}；本通道不支持该工具]`;
 }
 
-/** reasoning.effort → Gemini thinkingLevel；unknown 档位映射到最近的低/高档。
- *  档位名同时是多档位家族的上游变体后缀，catalog.ts 复用该映射做 effort → 变体解析。 */
+/** reasoning.effort → 三档 thinkingLevel；四档家族在目录层选择具体模型变体。 */
 export const THINKING_LEVELS: Record<string, string> = {
   minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "high", max: "high",
 };
@@ -676,11 +675,12 @@ export function translateAgyRequest(body: Record<string, unknown>, upstreamModel
   }
 
   // thinkingConfig 按 CLI 真实形态发送：includeThoughts 使 thought 部件随流返回，
-  // thinkingBudget=-1 交由服务端按模型档位决定；档位用 thinkingLevel 表达。
+  // thinkingBudget=-1 交由服务端按模型档位决定。
+  // xhigh 由具体模型变体表达，不能再带 high 覆盖它，也不能猜测上游枚举值。
   const thinkingConfig: Record<string, unknown> = { includeThoughts: true, thinkingBudget: -1 };
   const reasoning = record(body.reasoning) ? body.reasoning : undefined;
   const effort = reasoning?.effort;
-  if (typeof effort === "string" && THINKING_LEVELS[effort]) {
+  if (!upstreamModel.endsWith("-xhigh") && typeof effort === "string" && THINKING_LEVELS[effort]) {
     thinkingConfig.thinkingLevel = THINKING_LEVELS[effort];
   }
   const generationConfig: Record<string, unknown> = { maxOutputTokens: maxTokens, thinkingConfig };

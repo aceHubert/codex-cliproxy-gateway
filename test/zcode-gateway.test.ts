@@ -8,11 +8,12 @@ import { ZcodeConfigError, type ZcodeFamily, type ZcodeProviderSnapshot, type Zc
 import { ZcodeEndpointRouting } from "@agent-proxy/zcode/endpoint-routing";
 import { ZCODE_AGENT_SYSTEM_PROMPT, type ZcodeIdentity } from "@agent-proxy/zcode/request-context";
 import { createGatewayHandler, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade, routingRegistry } from "./plugin-routing-fixture.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 type Snapshot = ZcodeProviderSnapshot & { modelIds: readonly string[] };
@@ -57,10 +58,10 @@ async function decoded(response: Response): Promise<Json> {
 }
 async function fixture(run: (context: {
   config: GatewayConfig; directory: string; cacheFile: string;
-  create: (options?: { current?: () => Promise<Snapshot>; currentPlan?: ZcodeSelection["kind"]; fetch?: (url: string, init: RequestInit) => Promise<Response>; sticky?: boolean; onClose?: () => void; codexModelsCacheFile?: string; endpointRouting?: ZcodeEndpointRouting | null; planCaches?: Partial<Record<ZcodeSelection["kind"], { get: () => Promise<Snapshot>; close: () => void }>>; zcodeHome?: string }) => ReturnType<typeof createGatewayHandler>;
+  create: (options?: { current?: () => Promise<Snapshot>; currentPlan?: ZcodeSelection["kind"]; fetch?: (url: string, init: RequestInit) => Promise<Response>; sticky?: boolean; onClose?: () => void; codexModelsCacheFile?: string; endpointRouting?: ZcodeEndpointRouting | null; planCaches?: Partial<Record<ZcodeSelection["kind"], { get: () => Promise<Snapshot>; close: () => void }>>; zcodeHome?: string; paths?: ResolvedPaths }) => ReturnType<typeof createGatewayHandler>;
 }) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-gateway-"));
-  const paths = resolvePaths({ HOME: directory }, directory);
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
@@ -68,7 +69,7 @@ async function fixture(run: (context: {
     catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
   };
   fs.writeFileSync(path.join(directory, "cliproxy-catalog.json"), JSON.stringify({ models: [{ slug: "test-cpa", priority: 0 }] }));
-  const cacheFile = path.join(directory, "models-cache.json");
+  const cacheFile = paths.modelsCacheFile;
   const handlers: ReturnType<typeof createGatewayHandler>[] = [];
   const originalFetch = globalThis.fetch;
   // 官方 /models 刷新是目录合成的正常依赖；其余未模拟的网络请求仍然拒绝。
@@ -79,23 +80,24 @@ async function fixture(run: (context: {
   try {
     await run({ config, directory, cacheFile, create(options = {}) {
       const currentCache = { get: options.current ?? (async () => snapshot()), close: options.onClose ?? (() => {}) };
-      const override = process.env.CODEX_CLIPROXY_HOME;
-      const handlerPaths = override?.startsWith(`${directory}${path.sep}`) ? resolvePaths({ HOME: directory }, override) : paths;
-      const handler = runWithInstancePaths(handlerPaths, () => createGatewayHandler(config, "fake-cpa-key", "invalid", new ThreadRoutingState(options.sticky ? ["sticky-thread"] : []), new Set<string>(), cacheFile, {
+      const handlerPaths = options.paths ?? paths;
+      const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new ThreadRoutingState(options.sticky ? ["sticky-thread"] : []), new Set<string>(), handlerPaths.modelsCacheFile, {
+        zcodeHome: options.zcodeHome ?? path.join(handlerPaths.home, ".zcode"),
         ...(options.zcodeHome
-          ? { zcodeHome: options.zcodeHome }
+          ? {}
           : options.planCaches
           ? { planCaches: options.planCaches }
           : options.currentPlan
             ? { planCaches: { [options.currentPlan]: currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>> }
             : { configCache: currentCache }),
         fetch: options.fetch ?? (async () => upstream()),
-        ...(options.codexModelsCacheFile ? { codexModelsCacheFile: options.codexModelsCacheFile } : {}),
+        codexModelsCacheFile: options.codexModelsCacheFile ?? handlerPaths.modelsCacheFile,
         // 自管目录文件（zcode-catalog.json 等）注入到测试目录；生产缺省为运行主目录。
-        cacheDirectory: directory,
+        cacheDirectory: handlerPaths.runtimeHome,
         // 默认禁用端点重映射：既有用例断言上游 URL 与调用次数，重映射行为由专属用例覆盖。
         endpointRouting: options.endpointRouting ?? null,
-      }, undefined, undefined, undefined, undefined, undefined, handlerPaths));
+        clientSigning: null,
+      }, undefined, undefined, undefined, undefined, undefined, handlerPaths);
       handlers.push(handler);
       return handler;
     } });
@@ -231,10 +233,10 @@ test("ZCode 启动、刷新与重载仅使用模型包预设，忽略缓存覆�
   await fixture(async ({ config, directory }) => {
     const overrides = path.join(directory, "models.json");
     fs.writeFileSync(overrides, JSON.stringify({ "z.ai": [{ name: "glm-5.3", context_window: 123 }] }));
-    const adapter = createZcodeAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createZcodeAdapter(config, {
       cacheDirectory: directory, endpointRouting: null, clientSigning: null,
       configCache: { get: async () => snapshot(), close() {} },
-    });
+    }));
     const expected = vendorModels["z.ai"].find(model => model.name === "glm-5.3")!;
     const assertPreset = (catalog: Awaited<ReturnType<typeof adapter.catalog>>) => {
       const model = catalog.models.find(entry => entry.slug.endsWith("/glm-5.3"))!;
@@ -258,11 +260,11 @@ test("ZCode 手动目录只在显式刷新后发布模型变化，推理继续�
     let current = snapshot();
     let reads = 0;
     const keys: string[] = [];
-    const adapter = createZcodeAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createZcodeAdapter(config, {
       catalogMode: "manual", cacheDirectory: directory, endpointRouting: null, clientSigning: null,
       configCache: { get: async () => { reads++; return current; }, close() {} },
       fetch: async (_url, init) => { keys.push(new Headers(init.headers).get("x-api-key")!); return upstream(); },
-    });
+    }));
     try {
       const first = await adapter.catalog();
       assert.ok(first.models.some((model) => model.slug.endsWith("/glm-5.3")));
@@ -288,7 +290,7 @@ test("ZCode 目录刷新复用启动与并发更新，本地重载调用只读�
     let refreshes = 0;
     let reloads = 0;
     const pending = new Promise<Snapshot>((resolve) => { finish = resolve; });
-    const adapter = createZcodeAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createZcodeAdapter(config, {
       catalogMode: "manual", refreshCatalogOnStart: false,
       cacheDirectory: directory, endpointRouting: null, clientSigning: null,
       configCache: {
@@ -297,7 +299,7 @@ test("ZCode 目录刷新复用启动与并发更新，本地重载调用只读�
         reload: async () => { reloads++; return { ...snapshot(), modelIds: ["glm-5.3-flash"] }; },
         close() {},
       },
-    });
+    }));
     try {
       assert.deepEqual(await adapter.catalog(), { models: [] });
       assert.equal(reads + refreshes + reloads, 0);
@@ -319,14 +321,14 @@ test("ZCode 目录刷新复用启动与并发更新，本地重载调用只读�
 test("ZCode 手动目录首次刷新失败拒绝发布，已有目录失败保留最后有效快照", async () => {
   await fixture(async ({ config, directory }) => {
     let broken = true;
-    const adapter = createZcodeAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createZcodeAdapter(config, {
       catalogMode: "manual", refreshCatalogOnStart: false,
       cacheDirectory: directory, endpointRouting: null, clientSigning: null,
       configCache: {
         get: async () => { if (broken) throw new ZcodeConfigError("测试授权失败"); return snapshot(); },
         close() {},
       },
-    });
+    }));
     try {
       await assert.rejects(adapter.refreshCatalog(), /测试授权失败/);
       assert.deepEqual(await adapter.catalog(), { models: [] });
@@ -741,17 +743,11 @@ test("ZCode 请求日志沿用缺省日志目录", async () => {
     config.requestLogging = true;
     // 缺省日志目录回退运行主目录（不再从 catalogPath 倒推）；用环境变量钉住测试位置。
     const envHome = path.join(directory, "env-home");
-    const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-    process.env.CODEX_CLIPROXY_HOME = envHome;
-    try {
-      const handler = create();
-      await (await handler(request("zcode/glm-5.3"))).text();
-      const files = fs.readdirSync(path.join(envHome, "logs"));
-      assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
-    } finally {
-      if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-      else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    }
+    const paths = resolvePaths({ HOME: directory, CODEX_CLIPROXY_HOME: envHome });
+    const handler = create({ paths });
+    await (await handler(request("zcode/glm-5.3"))).text();
+    const files = fs.readdirSync(path.join(envHome, "logs"));
+    assert.ok(files.some((name) => /^zcode-v1-responses-http-\d{14}\.log$/.test(name)));
   });
 });
 
@@ -1118,11 +1114,11 @@ test("Start Plan 目录随宿主日志权益判定即时增减，无信号时保
     ] } });
     const expired = line("account:zai-start-plan", { code: 0, data: { plans: [] } });
     fs.writeFileSync(logFile, `${active}\n`);
-    const adapter = createZcodeAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createZcodeAdapter(config, {
       cacheDirectory: directory, endpointRouting: null, clientSigning: null,
       zcodeHome,
       planCaches: { "start-plan": { get: async () => snapshot("zai", "start-plan"), close() {} } },
-    });
+    }));
     const ids = async () => (await adapter.catalog()).models.map((model) => model.slug);
     try {
       assert.deepEqual(await ids(), ["zcode-start-plan/glm-5.3", "zcode-start-plan/glm-5.3-flash"]);

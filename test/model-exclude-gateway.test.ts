@@ -5,6 +5,7 @@ import path from "node:path";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { handleWebUiRequest } from "../apps/gateway/src/webui.ts";
+import { gatewayFixturePaths } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import type { AgyDependencies } from "@agent-proxy/agy";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
@@ -34,8 +35,7 @@ async function gatewayFixture(
   overrides: Partial<GatewayConfig> = {},
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-gw-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
@@ -63,8 +63,8 @@ async function gatewayFixture(
       directory, config, upstreamCalls,
       create(extra = {}) {
         const handler = createGatewayHandler({ ...config, ...extra }, "fake-cpa-key", "invalid",
-          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
-          undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 });
+          new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile,
+          undefined, { file: paths.stdoutLog, maxBytes: 100_000 }, undefined, undefined, undefined, undefined, paths);
         handlers.push(handler);
         return handler;
       },
@@ -72,8 +72,6 @@ async function gatewayFixture(
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -141,8 +139,7 @@ function agyCredential(): AgyCredentials {
 
 test("agy adapter models honor excludedModels in /v1/models and inference routing", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-agy-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
@@ -173,13 +170,14 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
   try {
     const agyDependencies: AgyDependencies = {
       cacheDirectory: directory,
+      codexModelsCacheFile: paths.modelsCacheFile,
       refreshCatalogOnStart: false,
       credentials: async () => agyCredential(),
     };
     const handler = createGatewayHandler(config, "fake-cpa-key", "invalid",
-      new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
-      undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
-      undefined, undefined, agyDependencies);
+      new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile,
+      undefined, { file: paths.stdoutLog, maxBytes: 100_000 },
+      undefined, undefined, agyDependencies, undefined, paths);
     try {
       // 合并目录过滤：agy 条目被排除；作用域外规则（cliproxy/gamma）不影响上游条目。
       const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
@@ -196,8 +194,6 @@ test("agy adapter models honor excludedModels in /v1/models and inference routin
     }
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -209,8 +205,7 @@ const OPENCODE_ZEN_EXCLUDED = "opencode-zen/exo-free";
 
 test("zen models honor excludedModels in /v1/models and are blocked on chat and responses", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-exclude-zen-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, agy: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", opencodeZen: true,
@@ -231,7 +226,9 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
   try {
     const opencodeZenDependencies = {
       cacheDirectory: directory,
+      codexModelsCacheFile: paths.modelsCacheFile,
       refreshCatalogOnStart: false,
+      apiKey: "public",
       projectId: "a".repeat(40),
       fetch: (async (url: string | URL | Request) => {
         const target = String(url);
@@ -247,9 +244,9 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
       }) as typeof fetch,
     };
     const handler = createGatewayHandler(config, "fake-cpa-key", "invalid",
-      new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"),
-      undefined, { file: path.join(directory, "gateway.log"), maxBytes: 100_000 },
-      undefined, undefined, undefined, opencodeZenDependencies);
+      new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile,
+      undefined, { file: paths.stdoutLog, maxBytes: 100_000 },
+      undefined, undefined, undefined, opencodeZenDependencies, paths);
     try {
       // 合并目录过滤：被排除的 zen 条目从 /models 撤下，未排除的 zen 条目保留。
       const codex = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=0.150.0"));
@@ -285,8 +282,6 @@ test("zen models honor excludedModels in /v1/models and are blocked on chat and 
     }
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

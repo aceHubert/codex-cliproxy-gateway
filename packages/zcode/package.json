@@ -38,6 +38,7 @@
     "@agent-proxy/models": "workspace:*"
   },
   "dependencies": {
+    "@napi-rs/keyring": "2.1.2",
     "@agent-proxy/llm-bridge": "workspace:*",
     "@agent-proxy/plugin-api": "workspace:*"
   }

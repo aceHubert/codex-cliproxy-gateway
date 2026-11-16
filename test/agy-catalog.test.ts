@@ -232,6 +232,38 @@ test("agy 多档位家族合并为一个目录条目，单档位后缀模型保�
   assert.equal(oss.default_reasoning_level, "medium");
 });
 
+test("agy 四档家族合并 xhigh，目录与请求解析保留最高档", TIMEOUT, () => {
+  const tiers = ["low", "medium", "high", "xhigh"] as const;
+  const data = parseAgyCatalogData({
+    models: Object.fromEntries(tiers.map((tier) => [`gemini-4-hydrogen-${tier}`, {
+      displayName: `Gemini 4 Hydrogen (${tier === "xhigh" ? "XHigh" : tier})`, supportsThinking: true,
+    }])),
+    agentModelSorts: [{ groups: [{ modelIds: ["gemini-4-hydrogen-medium"] }] }],
+    tieredModelIds: Object.fromEntries(tiers.map((tier) => [tier, `gemini-4-hydrogen-${tier}`])),
+  });
+  const catalog = buildAgyCatalog(data);
+  assert.deepEqual(catalog.models.map((entry) => entry.slug), ["agy/gemini-4-hydrogen"]);
+  assert.equal(catalog.models[0]!.display_name, "AGY/Gemini 4 Hydrogen");
+  assert.deepEqual((catalog.models[0]!.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort), tiers);
+  assert.equal(catalog.models[0]!.default_reasoning_level, "medium");
+  for (const tier of tiers) {
+    assert.equal(resolveAgyFamilyModel(data.families[0]!, tier), `gemini-4-hydrogen-${tier}`);
+  }
+  assert.equal(resolveAgyFamilyModel(data.families[0]!, "max"), "gemini-4-hydrogen-xhigh");
+});
+
+test("agy 缺档家族按距离优先、等距偏高回退且默认档位一致", TIMEOUT, () => {
+  const data = parseAgyCatalogData({ models: {
+    "gemini-4-hydrogen-xhigh": { displayName: "Gemini 4 Hydrogen (XHigh)" },
+    "gemini-4-hydrogen-low": { displayName: "Gemini 4 Hydrogen (Low)" },
+  } });
+  const family = data.families[0]!;
+  assert.equal(family.displayName, "Gemini 4 Hydrogen");
+  assert.equal(resolveAgyFamilyModel(family, "high"), "gemini-4-hydrogen-xhigh");
+  assert.equal(resolveAgyFamilyModel(family, undefined), "gemini-4-hydrogen-low");
+  assert.equal(buildAgyCatalog(data).models[0]!.default_reasoning_level, "low");
+});
+
 test("agy 家族基名与显式无后缀模型冲突时不合并，避免重复 slug", TIMEOUT, () => {
   const data = parseAgyCatalogData({
     models: {
@@ -275,7 +307,11 @@ test("agy 家族信息随目录缓存落盘，磁盘缓存回退时仍可解析�
     const credentials = () => Promise.resolve(loadAgyCredentials({ credentialFile, os: "linux" }));
     const first = createAgyCatalogStore({
       cacheDirectory: directory, credentials, now: () => 0,
-      fetchCatalog: async () => tieredModelsResponse(),
+      fetchCatalog: async () => {
+        const response = tieredModelsResponse();
+        (response.models as Record<string, unknown>)["gemini-3.8-flash-xhigh"] = { displayName: "Gemini 3.8 Flash (XHigh)" };
+        return response;
+      },
     });
     await first.refresh();
     const disk = JSON.parse(fs.readFileSync(path.join(directory, "agy-catalog.json"), "utf8")) as { families: Array<{ base: string }> };
@@ -289,6 +325,9 @@ test("agy 家族信息随目录缓存落盘，磁盘缓存回退时仍可解析�
     assert.deepEqual(models.map((entry) => entry.slug),
       ["agy/gemini-3.8-flash", "agy/gemini-3.7-pro", "agy/gpt-oss-120b-medium"]);
     assert.equal(resolveAgyFamilyModel(families[0]!, "low"), "gemini-3.8-flash-low");
+    assert.equal(resolveAgyFamilyModel(families[0]!, "xhigh"), "gemini-3.8-flash-xhigh");
+    assert.deepEqual((models[0]!.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),
+      ["low", "medium", "high", "xhigh"]);
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

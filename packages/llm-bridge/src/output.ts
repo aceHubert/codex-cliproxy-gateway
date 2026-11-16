@@ -419,6 +419,12 @@ function toolNameSkeleton(name: string): string {
  * 分隔符/哈希不同的调用名（实测 DeepSeek 腿：`tool_functions___x___<hash>` 被
  * 改写为 `tool_functions__.x__<另一 hash>`）。骨架与唯一声明名一致时返回该
  * 声明名（映射表 key），零个或多个匹配返回 undefined，由调用方降级处理。
+ *
+ * 骨架全名不匹配时再按声明身份的原始工具名骨架做唯一兜底：上游可能给平铺
+ * 声明名（如 exec_command）套自家的命名空间前缀回吐（实测 CodeBuddy 腿：
+ * `tool_functions__exec_command`），也可能反向剥掉折叠前缀只回吐裸名。调用名
+ * 骨架与原始名骨架相等或以 `_原始名骨架` 结尾且唯一时采用；多个候选同样返回
+ * undefined，不猜测。
  */
 export function remapUndeclaredToolName(name: string, identities: ToolIdentityMap): string | undefined {
   const skeleton = toolNameSkeleton(name);
@@ -429,7 +435,15 @@ export function remapUndeclaredToolName(name: string, identities: ToolIdentityMa
     if (matched !== undefined) return undefined;
     matched = key;
   }
-  return matched;
+  if (matched !== undefined) return matched;
+  let fallback: string | undefined;
+  for (const [key, identity] of identities) {
+    const core = toolNameSkeleton(identity.name);
+    if (!core || (skeleton !== core && !skeleton.endsWith(`_${core}`))) continue;
+    if (fallback !== undefined) return undefined;
+    fallback = key;
+  }
+  return fallback;
 }
 
 /** 上游调用了完全无法对应的工具时，注入流内的可见提示；模型下一轮可据此自纠。 */

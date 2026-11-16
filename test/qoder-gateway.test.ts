@@ -11,6 +11,7 @@ import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade, routingPluginFamily } from "./plugin-routing-fixture.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
@@ -94,8 +95,7 @@ interface Fixture {
 
 async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-gateway-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: false, qoder: true,
@@ -116,13 +116,15 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
     await run({ directory, config, calls, fetched: () => fetches,
       create(overrides = {}, dependencies = {}) {
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
-          { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined,
-          { credentials: async () => credential(), cacheDirectory: directory, refreshCatalogOnStart: false,
+          new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile, undefined,
+          { file: paths.stdoutLog, maxBytes: 100_000 }, undefined,
+          { credentials: async () => credential(), cacheDirectory: directory, codexModelsCacheFile: paths.modelsCacheFile,
+            refreshCatalogOnStart: false,
             transport: {
               fetchCatalog: async () => { fetches++; return catalogData(); },
               infer: async (_credential, payload) => { calls.push(payload); return upstream(); },
-            }, ...dependencies });
+            }, ...dependencies, cn: { credentials: async () => null, ...dependencies.cn } },
+          undefined, undefined, paths);
         handlers.push(handler);
         return handler;
       },
@@ -130,8 +132,6 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -329,7 +329,7 @@ test("网关禁用 Qoder 时不创建插件、不读授权、不发请求或注�
           transport: { fetchCatalog: async () => { operations++; return catalogData(); }, infer: async () => { operations++; return upstream(); } },
           setInterval: (() => { operations++; throw new Error("禁用插件不应启动 timer"); }) as typeof setInterval,
         },
-      });
+      }, undefined, gatewayFixturePaths(directory));
       try {
         assert.equal(agentConfigEnabled(current, "qoder"), false);
         assert.deepEqual(registry.plugins, []);
@@ -358,12 +358,12 @@ test("Qoder 手动目录保留启动一次刷新并等待结果，显式刷新�
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const upstreamOnlyConfig = { ...config, upstreamOnly: true };
-    const adapter = createQoderAdapter(upstreamOnlyConfig, {
+    const adapter = withFixtureAdapterHost(upstreamOnlyConfig, gatewayFixturePaths(directory), () => createQoderAdapter(upstreamOnlyConfig, {
       catalogMode: "manual", cacheDirectory: directory, credentials: async () => credential(),
       cn: { credentials: async () => null },
       setInterval: (() => { throw new Error("手动目录不得注册模型 timer"); }) as typeof setInterval,
       transport: { fetchCatalog: async () => { fetches++; await gate; return catalogData(); }, infer: async () => upstream() },
-    });
+    }));
     try {
       assert.equal(agentConfigEnabled(upstreamOnlyConfig, "qoder"), true);
       const listed = adapter.catalog();
@@ -389,11 +389,12 @@ test("Qoder 目录启动刷新及两分钟定时刷新可更新模型并随 clos
     let cleared = 0;
     let interval = 0;
     const timer = { unref() {} } as unknown as ReturnType<typeof setInterval>;
-    const adapter = createQoderAdapter(config, { cacheDirectory: directory, credentials: async () => credential(),
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createQoderAdapter(config, {
+      cacheDirectory: directory, credentials: async () => credential(), cn: { credentials: async () => null },
       setInterval: ((fn: () => void, delay: number) => { callback = fn; interval = delay; return timer; }) as typeof setInterval,
       clearInterval: ((value: unknown) => { assert.equal(value, timer); cleared++; }) as typeof clearInterval,
       transport: { fetchCatalog: async () => catalogData(++fetches === 1 ? "qfmodel" : "new-flash"), infer: async () => upstream() },
-    });
+    }));
     try {
       await new Promise((resolve) => setTimeout(resolve, 0));
       assert.equal(fetches, 1);

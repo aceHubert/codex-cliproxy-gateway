@@ -365,8 +365,9 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     const staticFile = path.join(paths.runtimeHome, "codex-catalog.json");
     const cpaCatalog = JSON.parse(fs.readFileSync(paths.catalogFile, "utf8"));
     assert.deepEqual(cpaCatalog.models.map((model: { slug: string }) => model.slug), ["proxy-model"]);
-    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
-    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models, cpaCatalog.models);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
+    assert.deepEqual(JSON.parse(fs.readFileSync(staticFile, "utf8")).models,
+      cpaCatalog.models.map((model: Record<string, unknown>, index: number) => ({ ...model, priority: index + 1 })));
     const cpaConfig = JSON.parse(fs.readFileSync(paths.gatewayConfig, "utf8"));
     assert.equal("catalogPath" in cpaConfig, false);
     assert.deepEqual(cpaConfig.selectedModels, ["proxy-model"]);
@@ -375,7 +376,6 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     assert.match(auditEntries(), /config changed by `models --sync`/);
     assert.match(auditEntries(), /upstreamOnly: false -> true/);
     assert.match(auditEntries(), /selectedModels: \[\] -> \["proxy-model"\]/);
-    assert.match(auditEntries(), /model_catalog_json \(config.toml\): null -> /);
     assert.deepEqual(clientVersions, ["1.2.3", "1.2.3"]);
 
     // 即使显式传入 ID，隐藏条目也不能重新同步到目录或配置。
@@ -420,7 +420,6 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
     assert.equal(splitConfig.upstreamOnly, false);
     assert.equal("catalogPath" in splitConfig, false);
     assert.match(auditEntries(), /upstreamOnly: true -> false/);
-    assert.match(auditEntries(), /model_catalog_json \(config.toml\): .+ -> null/);
 
     // 动态模式仍允许空选择：不访问上游目录，不生成静态目录指向，也不改变模式。
     const fetchesBeforeDynamicNone = fetchCount;
@@ -443,11 +442,11 @@ test("config 切换模式，models --sync 保持模式并更新独立静态目�
       /Refusing to replace unmanaged model_catalog_json: \/tmp\/user-catalog\.json/,
     );
 
-    // 单引号的受管路径同样被识别，可正常 patch 回双引号形式。
+    // 单引号的受管路径同样被识别：受管历史指向被移除，目录统一经网关 /models 提供。
     fs.writeFileSync(paths.configToml, `model_catalog_json = '${paths.catalogFile}'\n`);
     await runCli(["config", "--upstream-only", "on"]);
     await runCli(["models", "--sync", "--select", "proxy-model"]);
-    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), staticFile);
+    assert.equal(readRootTomlString(fs.readFileSync(paths.configToml, "utf8"), "model_catalog_json"), undefined);
 
     // modelMergeJson 带 token 的 URL 在审计中脱敏为 origin+path?…。
     await runCli([
