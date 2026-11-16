@@ -1,0 +1,182 @@
+packages/agy/src/catalog.ts
+  s_9a1788f84bfeb9::t_e22ccd605d898d 300
+  s_081bbd4cf273aa::t_aa643373df4e7c 421
+  s_9a1788f84bfeb9::t_e18043ab4f127f 110-116,221,277-280
+  s_9a1788f84bfeb9::t_85a1568f52f2ca 12
+  s_9a1788f84bfeb9::t_7183ce3e93592d 165-166,258,265,270,296,329,545
+  s_9a1788f84bfeb9::t_7d6d89236cb179 288-292,298,527,540-544
+  s_081bbd4cf273aa::t_b2dbd728baba6c 264,266
+  s_9a1788f84bfeb9::t_7514d51a3928d2 163,353-354
+  s_9a1788f84bfeb9::t_8e6d0f81a2ab07 275-276
+  s_9a1788f84bfeb9::t_4e2a1b25e110df 173-177,179-188,190,192-193,283-284
+  s_9a1788f84bfeb9::t_2f9ec6f01ad0e0 449,460,505-506,525-526,528-539,546,560,592,642
+  s_9a1788f84bfeb9::t_72c940d1cc669e 84-85,145,299,301,450,461,489,516-518,547,561,593,637
+  s_9a1788f84bfeb9::t_b5aef0b7b508cd 172,178,189,191,255-257,259-261,285
+  s_9a1788f84bfeb9::t_c2e913541380e6 263
+  s_081bbd4cf273aa::t_fd4afb6a5623c5 501
+  s_9a1788f84bfeb9::t_e8396b3205f0c1 124-125,137,144,217-220,222-224,293-295,297,306-308,369-370,372-374
+  s_9a1788f84bfeb9::t_df2b15c4bcd6ad 20-79,129,250,419
+  s_9a1788f84bfeb9::t_cfc1078a070b0c 304,362
+  s_9a1788f84bfeb9::t_49316086342f34 363,375
+docs/exec-plans/tech-debt-tracker.md
+  s_9a1788f84bfeb9::t_c389419ef10c8e 9
+docs/agy-native-search-research.md
+  s_9a1788f84bfeb9::t_4ed2d612aa3dc8 3,24-57,61-62,64,79-86
+  s_9a1788f84bfeb9::t_9e79e69ea9d0f2 1-2,4-23,58-60,63,65-78
+packages/agy/src/index.ts
+  s_9a1788f84bfeb9::t_b94aa55589f89a 297,299,348
+  s_9a1788f84bfeb9::t_df2b15c4bcd6ad 6,11-12
+  s_9a1788f84bfeb9::t_b5aef0b7b508cd 267
+  s_9a1788f84bfeb9::t_66cbcae524f099 18
+  s_9a1788f84bfeb9::t_2f9ec6f01ad0e0 149,157,280-282
+  s_9a1788f84bfeb9::t_4e44c7d640febf 150,158,293,388-432,466-469
+  s_9a1788f84bfeb9::t_5e14d4378c1ef5 17,284-288,294-296,298,300-302
+  s_9a1788f84bfeb9::t_62f3b9621008ca 289-292,470
+packages/plugin-api/README.md
+  s_9a1788f84bfeb9::t_8ce956fe1a8ffa 20-24
+test/agy-search.test.ts
+  s_9a1788f84bfeb9::t_171263d63531d3 91,95-97
+  s_9a1788f84bfeb9::t_c762352ee6f9df 58
+  s_9a1788f84bfeb9::t_57a574a90794c0 137
+  s_9a1788f84bfeb9::t_d71710a1afd56f 185
+  s_9a1788f84bfeb9::t_cbe8fed7dbe824 122
+  s_9a1788f84bfeb9::t_993c303d17fbd3 100-115
+  s_9a1788f84bfeb9::t_939f9bfc468b7c 1-57,59-90,92-94,98-99,116-121,123-136,138-184,186-199
+test/plugin-search-routing.test.ts
+  s_9a1788f84bfeb9::t_d276ab5a15d9ae 29,32-33,147,175
+  s_9a1788f84bfeb9::t_e345db38228baa 27-28,30-31,36-37,64,107,129,150
+  s_9a1788f84bfeb9::t_a97ba7ed5b2664 157
+  s_9a1788f84bfeb9::t_310a105ebe3819 1-9,11-26,34-35,38-63,65-90,92-106,108-128,130-146,148-149,151-156,158-174,176-190
+  s_9a1788f84bfeb9::t_5afba2f05d113e 91
+  s_9a1788f84bfeb9::t_821f3b95022081 10
+packages/plugin-api/src/types.ts
+  s_9a1788f84bfeb9::t_8c52104ccf5e6e 51-58,158-159
+packages/agy/src/search.ts
+  s_9a1788f84bfeb9::t_993c303d17fbd3 53,67-68
+  s_9a1788f84bfeb9::t_e22ccd605d898d 1-3,5-50,55-57,69-94,100-102,107-113,123-129,131-211,213-214,216-221
+  s_9a1788f84bfeb9::t_1246d1ed9920ba 51-52,54,58-66,114-122,130,215
+  s_9a1788f84bfeb9::t_e630e6f06fa449 4,95-99,103-106,212
+docs/antigravity-cli-upstream-research.md
+  s_9a1788f84bfeb9::t_b4e2ed50b7b52c 412-413,417-449
+  s_9a1788f84bfeb9::t_3d3397c3b7cf9f 383-411,414-416,450-451
+packages/agy/README.md
+  s_9a1788f84bfeb9::t_b4e2ed50b7b52c 24-25
+  s_9a1788f84bfeb9::t_49316086342f34 30
+  s_9a1788f84bfeb9::t_3d3397c3b7cf9f 20-23,26-29,31-33
+  s_9a1788f84bfeb9::t_4ed2d612aa3dc8 34-49
+docs/exec-plans/completed/agy-reasoning-roundtrip.md
+  s_9a1788f84bfeb9::t_a9d590ddae92de 1-46
+  s_9a1788f84bfeb9::t_82ffc9824d2b75 47
+packages/agy/src/request.ts
+  s_9a1788f84bfeb9::t_e4705c06ba00e9 258-272
+  s_9a1788f84bfeb9::t_df2b15c4bcd6ad 2
+  s_9a1788f84bfeb9::t_29c7b4fb545711 32-33,276,282,296-299,310-318,328,756-757
+  s_9a1788f84bfeb9::t_dde931b7e8bff6 34-35,278,283-284,300-309,345,776-780
+  s_9a1788f84bfeb9::t_2f9ec6f01ad0e0 532-534,724-725,727
+  s_9a1788f84bfeb9::t_72123ec7d4bb3e 728
+test/agy-request.test.ts
+  s_9a1788f84bfeb9::t_feed497ecef2ef 289-292,295,297-298,300-303
+  s_9a1788f84bfeb9::t_8041352d8dc117 284-285,287,296
+  s_9a1788f84bfeb9::t_bac131d50d5737 286,288
+  s_9a1788f84bfeb9::t_2c806e51e50e16 299
+  s_9a1788f84bfeb9::t_f3c38f7399e5e6 87,144,324
+docs/histories/2026-11/20261116-1521-agy-native-search.md
+  s_9a1788f84bfeb9::t_c389419ef10c8e 68
+  s_9a1788f84bfeb9::t_288687cbc5892f 1-67,69-73
+test/agy-reasoning.test.ts
+  s_9a1788f84bfeb9::t_febdd9bf7705b5 1-2,5-15,17-52,54-77,80-86,88-100,103,105-128
+  s_9a1788f84bfeb9::t_324e17bb459412 3,53,78-79,87,101-102,104
+  s_9a1788f84bfeb9::t_df2b15c4bcd6ad 4
+  s_9a1788f84bfeb9::t_7183ce3e93592d 16
+packages/agy/src/response.ts
+  s_9a1788f84bfeb9::t_cd38abeccc6b43 737-738
+  s_9a1788f84bfeb9::t_883c0f1c677421 58,703-705,724,736,739-761
+  s_9a1788f84bfeb9::t_e58e5b5c7a1fc3 762
+packages/agy/src/search-loop.ts
+  s_9a1788f84bfeb9::t_883c0f1c677421 1-8,10-23,26-50,52-56,58-73,82,87-91,93-112,115-119,121-137,139-164
+  s_9a1788f84bfeb9::t_1246d1ed9920ba 51,83-86,113-114,138
+  s_9a1788f84bfeb9::t_091b72741ad1f8 57,74-81,92
+  s_9a1788f84bfeb9::t_dde931b7e8bff6 9,24-25,120
+test/agy-gateway.test.ts
+  s_9a1788f84bfeb9::t_9f504c9b4ea1f8 526-529
+  s_9a1788f84bfeb9::t_49316086342f34 511,516
+  s_9a1788f84bfeb9::t_3f2ca992661a2f 517-518,520-525,530-585
+  s_9a1788f84bfeb9::t_8041352d8dc117 436,440,474-475
+  s_9a1788f84bfeb9::t_feed497ecef2ef 428,431,435,437-439,441,446,477
+  s_9a1788f84bfeb9::t_9667899c1c09b8 519
+docs/histories/2026-11/20261116-1130-agy-tier-single-source.md
+  s_9a1788f84bfeb9::t_cbf9cd8da59acc 4-8,13,29,38,58,65-66,73,75
+  s_9a1788f84bfeb9::t_592a5f8a2c4377 19,27-28,45,54
+  s_9a1788f84bfeb9::t_82ffc9824d2b75 20,32-33,43,46-47,52-53,56-57,83
+  s_081bbd4cf273aa::t_df5090dd4568ee 12
+  s_9a1788f84bfeb9::t_e521574ae68e10 15,77
+  s_9a1788f84bfeb9::t_634262a8ce29f3 16,34,78-79
+  s_9a1788f84bfeb9::t_86b8d3821d9b90 74
+  s_9a1788f84bfeb9::t_1b141a4d3d42db 76
+  s_9a1788f84bfeb9::t_07478fbead0a12 81
+  s_9a1788f84bfeb9::t_de2d36a3d18c92 14
+  s_9a1788f84bfeb9::t_a9d590ddae92de 82
+  s_9a1788f84bfeb9::t_207dccf49d2b7c 84
+  s_9a1788f84bfeb9::t_095cc8f6ded1b8 1,17-18,26,30-31,35,39-40,51,55,59,64,68-70,80
+  s_081bbd4cf273aa::t_0720fbf53c5038 2-3,9-11,21-25,36-37,41-42,44,48-50,60-63,67,71-72
+test/agy-catalog.test.ts
+  s_9a1788f84bfeb9::t_03b57f8e6f87bb 376-377
+  s_9a1788f84bfeb9::t_91badb0362dbe3 336-341,345-351,356-359,365,367-370,373-375,378-395,405-408
+  s_9a1788f84bfeb9::t_feed497ecef2ef 310-312
+  s_9a1788f84bfeb9::t_49316086342f34 235-248,396,400-404
+  s_9a1788f84bfeb9::t_8041352d8dc117 268,271,278-279,298,305-306,318-335
+  s_9a1788f84bfeb9::t_df2b15c4bcd6ad 2,18
+  s_9a1788f84bfeb9::t_7183ce3e93592d 342-344,352-355,360-364,366,371-372
+  s_9a1788f84bfeb9::t_ab52647ed524ac 14-15
+  s_9a1788f84bfeb9::t_5e86b36fab751a 397-399
+  s_9a1788f84bfeb9::t_e18043ab4f127f 410-429
+  s_9a1788f84bfeb9::t_f780d1874759ac 409
+apps/gateway/src/gateway.ts
+  s_9a1788f84bfeb9::t_5afba2f05d113e 1132-1139,1148
+  s_9a1788f84bfeb9::t_55b54df5a5cf02 1146-1147
+  s_9a1788f84bfeb9::t_3538f751d59622 4,1118-1131,1140-1145,1149-1178
+  s_9a1788f84bfeb9::t_2f38d35affd126 1179-1180
+packages/agy/src/transport.ts
+  s_9a1788f84bfeb9::t_72c940d1cc669e 75,116-119
+  s_9a1788f84bfeb9::t_f393226a704861 120
+test/agy-search-gateway.test.ts
+  s_9a1788f84bfeb9::t_6d78602e12d5e0 9-11
+  s_9a1788f84bfeb9::t_e345db38228baa 136,202,231
+  s_9a1788f84bfeb9::t_d276ab5a15d9ae 199,257
+  s_9a1788f84bfeb9::t_5736b42d97c794 1-8,12-135,137-198,200-201,203-230,232-256,258-284
+test/agy-native-search-loop.test.ts
+  s_9a1788f84bfeb9::t_cd38abeccc6b43 1-41,48-49,70-97,99-135,154-181,183-221,238
+  s_9a1788f84bfeb9::t_091b72741ad1f8 136-153
+  s_9a1788f84bfeb9::t_42733c37af7c82 98,182
+  s_9a1788f84bfeb9::t_dde931b7e8bff6 42-47,222-237
+  s_9a1788f84bfeb9::t_e4705c06ba00e9 50-69
+docs/exec-plans/completed/agy-native-search-adapter.md
+  s_9a1788f84bfeb9::t_c389419ef10c8e 1-46
+packages/plugin-api/src/registry.ts
+  s_9a1788f84bfeb9::t_8c52104ccf5e6e 2,103-120
+  s_9a1788f84bfeb9::t_6fbe63465af2eb 121-123
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "41d9b1f284a272d81666acf1eb7b92f17949fa25",
+  "prompts": {},
+  "sessions": {
+    "s_081bbd4cf273aa": {
+      "agent_id": {
+        "tool": "zcode",
+        "id": "sess_81c8b340-323c-4bbd-a16e-51f471d444c0",
+        "model": "GLM-5.3"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    },
+    "s_9a1788f84bfeb9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1e2ce-d7d6-7d62-ae46-d167b2c2fb64",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "hubert hubert@lejian.com <hubert@lejian.com>"
+    }
+  }
+}
