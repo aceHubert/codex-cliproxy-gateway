@@ -140,7 +140,7 @@ export function parseQoderCatalogData(value: unknown): QoderCatalogModel[] {
   return models;
 }
 
-/** Codex 行为字段使用快照基底（优先 gpt-5.5，缺失回退首条），模型名与能力仅由当前账号目录决定；条目保留基底官方提示词，Qoder CLI 提示词由请求转换层整体注入。 */
+/** Codex 行为字段使用快照基底（优先 gpt-6-luna，缺失回退首条），模型名与能力仅由当前账号目录决定；条目保留基底官方提示词，Qoder CLI 提示词由请求转换层整体注入。 */
 export function buildQoderCatalog(models: QoderCatalogModel[], region: QoderRegion = "intl"): ModelCatalog {
   const BASE = getCodexBaselineEntry();
   const prefix = region === "cn" ? QODER_CN_PREFIX : QODER_INTL_PREFIX;

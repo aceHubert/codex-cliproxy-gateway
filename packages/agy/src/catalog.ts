@@ -317,7 +317,7 @@ const baseLevelDescriptions = (base: ModelEntry) => new Map(
     .map((level) => [level.effort, level.description]),
 );
 
-/** Codex 行为字段沿用快照基底（优先 gpt-5.5，缺失回退首条）；模型名与能力仅由当前账号目录决定。
+/** Codex 行为字段沿用快照基底（优先 gpt-6-luna，缺失回退首条）；模型名与能力仅由当前账号目录决定。
  *  多档位家族合并为一个 `agy/<base>` 条目（能力/窗口取成员并集或最大值），
  *  `supported_reasoning_levels` 只列家族实际存在的档位；无档位后缀的模型保持
  *  独立条目且不暴露档位选择。 */

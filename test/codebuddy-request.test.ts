@@ -100,9 +100,38 @@ test("history：函数调用/输出配对、custom 调用、reasoning 与服务�
   const customCall = ((messages[4] as Json).tool_calls as Json[])[0]!;
   assert.deepEqual(JSON.parse(String((customCall.function as Json).arguments)), { input: "*** Begin Patch" });
   assert.deepEqual(messages[5], { role: "tool", tool_call_id: "call_2", content: "ok" });
-  // reasoning 被丢弃（上游无需回放），web_search_call 降级为 assistant 文本。
-  assert.match(String((messages[6] as Json).content), /web_search_call/);
+  // reasoning 被丢弃（上游无需回放），无结果的 web_search_call 降级为省略旁白。
+  assert.match(String((messages[6] as Json).content), /已省略服务器内置工具调用 web_search_call/);
   assert.deepEqual(messages[7], { role: "assistant", content: [{ type: "text", text: "完成" }] });
+});
+
+test("history：web_search_call 带结果时按已执行搜索回放来源列表", async () => {
+  const { body } = await translateCodebuddyRequest({
+    model: "codebuddy/gpt-5.6-luna",
+    input: [
+      {
+        type: "web_search_call", id: "ws_1", action: { type: "search", query: "杭州天气" },
+        results: [
+          { title: "天气网", url: "https://weather.example.com/hz?token=secret#frag", snippet: "明日晴" },
+          { url: "https://news.example.org/a" },
+          { title: "坏条目", url: "javascript:alert(1)" },
+          { snippet: "没有 URL 的条目" },
+        ],
+      },
+      { type: "web_search_call", id: "ws_2", action: { type: "search", query: "空结果" }, results: [] },
+    ],
+    tools: [],
+  }, "gpt-5.6-luna");
+  const messages = body.messages as Json[];
+  assert.equal(messages.length, 3, "system + 两条独立的 assistant 搜索旁白");
+  const first = String(messages[1]!.content);
+  assert.ok(first.startsWith("[已执行网页搜索（查询：杭州天气）]"), "标注为已执行而非省略");
+  assert.ok(first.includes("天气网\nhttps://weather.example.com/hz\n明日晴"), "回放标题、净化后 URL 与摘要");
+  assert.ok(!first.includes("token=secret"), "URL 查询参数可能携带 token，必须剥离");
+  assert.ok(!first.includes("#frag"), "URL 片段必须剥离");
+  assert.ok(first.includes("news.example.org\nhttps://news.example.org/a"), "缺 title 时回退 hostname");
+  assert.ok(!first.includes("javascript:") && !first.includes("坏条目"), "非 HTTP(S) 与无 URL 条目丢弃");
+  assert.equal(String(messages[2]!.content), "[已执行网页搜索（查询：空结果）]\n本轮未记录可回放的来源。");
 });
 
 test("history：输出与调用必须配对且不得重复", async () => {

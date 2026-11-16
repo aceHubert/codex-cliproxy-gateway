@@ -86,6 +86,35 @@ function validateToolOutputs(items: unknown[]): unknown[] {
   return items;
 }
 
+/** 来源 URL 不携带用户信息、查询参数和片段；仅允许公开 HTTP(S) 形态。 */
+function searchSourceEntry(raw: unknown): string | undefined {
+  if (!isRecord(raw) || typeof raw.url !== "string") return undefined;
+  let url: URL;
+  try { url = new URL(raw.url); } catch { return undefined; }
+  if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) return undefined;
+  url.search = "";
+  url.hash = "";
+  const title = typeof raw.title === "string" && raw.title ? raw.title : url.hostname;
+  const snippet = typeof raw.snippet === "string" ? raw.snippet.slice(0, 4000) : "";
+  return `${title}\n${url.toString()}${snippet ? `\n${snippet}` : ""}`;
+}
+
+/** 服务器调用历史旁白：web_search_call 带结果时按已执行搜索回放来源列表（对齐 AGY），其余保持省略说明。 */
+function serverCallNarration(item: Json): string {
+  const action = isRecord(item.action) ? item.action : {};
+  const query = [action.query, action.url].find((field): field is string => typeof field === "string" && field.length > 0);
+  const detail = query ? `（查询：${query}）` : "";
+  if (item.type === "web_search_call" && Array.isArray(item.results)) {
+    const sources = item.results.slice(0, 20).flatMap((raw) => {
+      const entry = searchSourceEntry(raw);
+      return entry ? [entry] : [];
+    });
+    // 搜索历史回放为已执行的文本记录，不制造新的函数调用。
+    return `[已执行网页搜索${detail}]${sources.length ? `\n${sources.join("\n\n")}` : "\n本轮未记录可回放的来源。"}`;
+  }
+  return `[已省略服务器内置工具调用 ${String(item.type)}${detail}；本通道不支持该工具]`;
+}
+
 /** 无法在上游执行的服务器调用历史降级为 assistant 文本旁白（保持位置）。 */
 function narrateServerCalls(items: unknown[]): unknown[] {
   let changed = false;
@@ -94,10 +123,7 @@ function narrateServerCalls(items: unknown[]): unknown[] {
     if (item.type === "function_call" || item.type === "custom_tool_call" || item.type === "function_call_output" || item.type === "custom_tool_call_output") return item;
     if (!item.type.endsWith("_call") && item.type !== "mcp_list_tools" && item.type !== "mcp_list_resources") return item;
     changed = true;
-    const action = isRecord(item.action) ? item.action : {};
-    const query = [action.query, action.url].find((field): field is string => typeof field === "string" && field.length > 0);
-    const detail = query ? `（查询：${query}）` : "";
-    return { type: "message", role: "assistant", content: `[已省略服务器内置工具调用 ${item.type}${detail}；本通道不支持该工具]` };
+    return { type: "message", role: "assistant", content: serverCallNarration(item) };
   });
   return changed ? result : items;
 }
