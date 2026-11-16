@@ -17,4 +17,9 @@ bun add @agent-proxy/plugin-api
 在 [@agent-proxy/gateway](https://www.npmjs.com/package/@agent-proxy/gateway)
 中显式装配插件；使用网关 CLI 请安装网关包。
 
+插件可通过可选 `handleSearch(SearchRequestContext)` 接管 Codex 的独立 `/alpha/search`。
+搜索与模型生成采用独立上下文，注册表按模型归属分发；匹配插件未实现该方法时返回
+明确的 501，不回退默认模型上游。宿主在插件边界移除客户端认证信息，插件使用自己的
+凭据执行搜索，并返回客户端搜索协议需要的结果。
+
 [项目源码与文档](https://github.com/aceHubert/codex-cliproxy-gateway)

@@ -48,6 +48,14 @@ export interface HttpRequestContext extends RequestContext, ModelMatch {
   body: RequestBody;
 }
 
+/** Codex standalone alpha/search 请求；使用独立契约，不伪装成模型生成协议。 */
+export interface SearchRequestContext extends ModelMatch {
+  request: Request;
+  url: URL;
+  signal: AbortSignal;
+  body: RequestBody;
+}
+
 export interface PluginWebSocket {
   send(data: string | Uint8Array): number | void;
   close(code?: number, reason?: string): void;
@@ -147,6 +155,8 @@ export interface GatewayPlugin {
   modelPatterns: readonly string[];
   websocket?: boolean;
   handleHttp(context: HttpRequestContext): Response | Promise<Response>;
+  /** 可选的 Codex 原生 alpha/search 执行器；未实现时注册表返回明确 unsupported。 */
+  handleSearch?(context: SearchRequestContext): Response | Promise<Response>;
   handleWebSocket?(context: WebSocketRequestContext): Response | undefined | Promise<Response | undefined>;
   getCatalog(): ModelCatalog | Promise<ModelCatalog>;
   refreshCatalog(): Promise<ModelCatalog>;

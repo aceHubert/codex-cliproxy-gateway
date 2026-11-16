@@ -3,15 +3,19 @@ import path from "node:path";
 import { atomicWrite, bindHostMethods, getHostServices, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol,type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ModelEntry, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import {
   AGY_PREFIX,
+  agyRequestEffort,
   agyUpstreamModel,
   createAgyCatalogStore,
   isAgyModel,
   mergeAgyCatalog,
-  resolveAgyFamilyModel, type AgyModelFamily
+  resolveAgyModel,
+  type AgyModelReasoning,
 } from "./catalog.ts";
 import { AgyCredentialError, agyTokenStale, defaultAgyCredentialFile,loadAgyCredentials, type AgyCredentials } from "./credentials.ts";
 import { AgyRequestError,translateAgyRequest } from "./request.ts";
 import { createAgyClientResponse } from "./response.ts";
+import { createAgyNativeSearchStream } from "./search-loop.ts";
+import { AgySearchError, executeAgySearch, planAgySearchQueries } from "./search.ts";
 import { AgyTransportError,createAgyTransport } from "./transport.ts";
 
 
@@ -140,16 +144,18 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
   /** 已知模型集合（含重定向前的旧 id）；空目录视为不可校验，透传由上游判定。 */
   let knownModels: Set<string> | undefined;
   /** 档位家族与成员 id 集合：合并条目按 effort 解析上游变体，显式档位 id 直连。 */
-  let catalogFamilies: AgyModelFamily[] = [];
   let memberIds = new Set<string>();
   let catalogReroute = new Map<string, string>();
+  let catalogReasoning: Record<string, AgyModelReasoning> = {};
+  let searchModels: string[] = [];
   const updateCatalogMeta = (catalog: Awaited<ReturnType<typeof store["catalog"]>>): ModelCatalog => {
     knownModels = new Set(catalog.models.map((entry) => entry.slug));
-    catalogFamilies = catalog.families;
     memberIds = new Set(catalog.families
       .flatMap((family) => Object.values(family.tiers))
       .filter((id): id is string => typeof id === "string" && id.length > 0));
     catalogReroute = catalog.reroute;
+    catalogReasoning = catalog.reasoning;
+    searchModels = catalog.searchModels;
     return { models: catalog.models };
   };
   /** 尽力加载目录元数据（含磁盘缓存回退）；失败时保持未加载状态，由上游判定。 */
@@ -258,16 +264,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
         if (knownModels === undefined) await loadCatalogMeta();
         resolvedModel = upstreamModel;
         if (knownModels !== undefined && knownModels.size > 0) {
-          if (knownModels.has(normalized) || memberIds.has(upstreamModel)) {
-            // 合并条目（agy/<base>）按 reasoning.effort 选择档位变体；显式档位 id 原样直连。
-            const family = catalogFamilies.find((item) => item.base === upstreamModel);
-            if (family) {
-              const reasoning = input.reasoning;
-              const effort = reasoning !== null && typeof reasoning === "object" && !Array.isArray(reasoning)
-                ? (reasoning as Record<string, unknown>).effort : undefined;
-              resolvedModel = resolveAgyFamilyModel(family, effort);
-            }
-          } else {
+          if (!knownModels.has(normalized) && !memberIds.has(upstreamModel)) {
             // 动态模式沿用请求驱动的重定向更新；manual 只消费已加载元数据。
             if (dependencies.catalogMode !== "manual") {
               try { updateCatalogMeta(await store.catalog()); } catch { /* 无目录时保留 last-good 元数据。 */ }
@@ -280,9 +277,29 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
             }
           }
         }
-        const translated = translateAgyRequest(input, resolvedModel, to);
+        const selected = resolveAgyModel(resolvedModel, agyRequestEffort(input), catalogReasoning[resolvedModel]);
+        resolvedModel = selected.model;
+        const translated = translateAgyRequest(input, selected, to);
         abort.signal.throwIfAborted();
-        const upstream = await transport.streamInfer(credential, translated.wrapper, abort.signal);
+        const searchModel = searchModels[0];
+        if (translated.nativeSearchTool && !searchModel) {
+          cleanup();
+          return fail(503, "Antigravity 目录没有原生搜索专用模型，请刷新目录并确认账号支持搜索", "search_unavailable");
+        }
+        if (translated.nativeSearchTool) {
+          planAgySearchQueries({ settings: translated.nativeSearchSettings, commands: { search_query: [{ q: "validation" }] } });
+          // 官方 CLI 的工具执行闭环属于 agent 请求，搜索子请求另用 web_search。
+          translated.wrapper.requestType = "agent";
+        }
+        const initialUpstream = await transport.streamInfer(credential, translated.wrapper, abort.signal);
+        const upstream = translated.nativeSearchTool ? createAgyNativeSearchStream(initialUpstream, translated.wrapper, translated.nativeSearchTool, {
+          signal: abort.signal,
+          maxSearches: translated.nativeSearchLimit,
+          infer: (body, signal) => transport.streamInfer(credential, body, signal ?? abort.signal),
+          search: (query, domain, signal) => executeAgySearch({ settings: translated.nativeSearchSettings, commands: { search_query: [{ q: query, ...(domain ? { domains: [domain] } : {}) }] } },
+            searchModel!, (body, callSignal) => transport.generate(credential, body, callSignal),
+            AbortSignal.any([signal ?? abort.signal, AbortSignal.timeout(60_000)])),
+        }) : initialUpstream;
         // 流式响应在 forward 返回后由客户端 pull 驱动，下列回调可能在调用上下文之外
         // 触发（Bun 的流调度不继承 withHostServices 的 AsyncLocalStorage）；日志等
         // 宿主服务调用必须重入当前宿主上下文，否则 logExchange 抛错被 safely 吞掉、
@@ -328,6 +345,7 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
         abort.abort();
         cleanup();
         if (error instanceof AgyRequestError) return fail(400, error.message);
+        if (error instanceof AgySearchError) return fail(error.status, error.message, "search_error");
         if (error instanceof AgyCredentialError) return fail(401, error.message, "authentication_error");
         if (error instanceof AgyTransportError) {
           const safe = safeAgyUpstreamError(error.status, error.body);
@@ -367,6 +385,51 @@ function buildAgyAdapter(config: AgentConfig, dependencies: AgyDependencies = {}
         return fail(502, "Antigravity 上游请求失败", "upstream_error");
       }
     },
+    async search(request: Request, input: Record<string, unknown>): Promise<Response> {
+      if (closed) return agyError(503, "Antigravity 入口已关闭", "configuration_error");
+      const start = Date.now();
+      const requestTime = localTime();
+      const abort = new AbortController();
+      const signal = AbortSignal.any([request.signal, abort.signal, AbortSignal.timeout(60_000)]);
+      activeRequests.add(abort);
+      const finish = (status: number, payload: Record<string, unknown>, resultCount?: number) => {
+        logExchange(sink, logGroupFromPath(new URL(request.url).pathname), {
+          requestTime, method: request.method, url: new URL(request.url).pathname,
+          reqHeaders: new Headers(), reqBody: { model: input.model, operation: "search" },
+          status, resHeaders: new Headers({ "content-type": "application/json" }),
+          resBody: JSON.stringify({ status, ...(resultCount !== undefined ? { resultCount } : {}) }), durationMs: Date.now() - start,
+        }, "agy");
+        return Response.json(payload, { status });
+      };
+      try {
+        planAgySearchQueries(input);
+        const model = typeof input.model === "string" ? input.model : "";
+        const upstreamModel = agyUpstreamModel(model);
+        if (!upstreamModel) throw new AgySearchError("Antigravity 搜索模型必须使用 agy/ 前缀");
+        const credential = dependencies.credentials ? await dependencies.credentials() : loadAgyCredentials({ credentialFile });
+        if (!credential) return finish(401, { error: { type: "authentication_error", message: "Antigravity 凭据不可用，请运行 agy 登录后重试" } });
+        if (agyTokenStale(credential)) return finish(401, { error: { type: "authentication_error", message: "Antigravity 令牌已过期，请运行 agy 或 agy remote-control start 后重试" } });
+        await loadCatalogMeta();
+        if (knownModels?.size && !knownModels.has(`${AGY_PREFIX}${upstreamModel}`) && !memberIds.has(upstreamModel) && !catalogReroute.has(upstreamModel)) {
+          return finish(404, { error: { type: "invalid_request_error", message: "此模型不在 Antigravity 当前账号目录中，请刷新模型列表" } });
+        }
+        const searchModel = searchModels[0];
+        if (!searchModel) return finish(503, { error: { type: "search_unavailable", message: "Antigravity 目录没有可用的 webSearchModelIds，请刷新模型目录并确认账号支持原生搜索" } });
+        const payload = await executeAgySearch(input, searchModel, (body, callSignal) => transport.generate(credential, body, callSignal), signal);
+        return finish(200, { ...payload }, payload.results.length);
+      } catch (error) {
+        if (error instanceof AgySearchError) return finish(error.status, { error: { type: error.status === 501 ? "unsupported_operation" : "search_error", message: error.message } });
+        if (error instanceof AgyCredentialError) return finish(401, { error: { type: "authentication_error", message: error.message } });
+        if (error instanceof AgyTransportError) {
+          const safe = safeAgyUpstreamError(error.status, error.body);
+          return finish(error.status === 401 || error.status === 403 || error.status === 429 ? error.status : 502,
+            { error: { type: safe.type, message: safe.message } });
+        }
+        return finish(signal.aborted ? 504 : 502, { error: { type: "search_error", message: signal.aborted ? "Antigravity 搜索已取消或超时" : "Antigravity 原生搜索失败，请稍后重试" } });
+      } finally {
+        activeRequests.delete(abort);
+      }
+    },
     close(): void {
       if (closed) return;
       closed = true;
@@ -399,6 +462,11 @@ export function createAgyPlugin(host: HostServices<AgentConfig>, dependencies: A
         const input = await context.body.json();
         if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "请求正文必须是 JSON 对象" } }, { status: 400 });
         return adapter.forward(context.request, input as Record<string, unknown>, context.to);
+      },
+      async handleSearch(context) {
+        const input = await context.body.json();
+        if (!input || typeof input !== "object" || Array.isArray(input)) return Response.json({ error: { type: "invalid_request_error", message: "搜索请求必须是 JSON 对象" } }, { status: 400 });
+        return adapter.search(context.request, { ...input as Record<string, unknown>, model: context.model });
       },
       getCatalog: () => adapter.catalog(),
       refreshCatalog: () => adapter.refreshCatalog(),

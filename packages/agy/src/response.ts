@@ -55,7 +55,7 @@ function record(value: unknown, label: string): Json {
 }
 
 /** 仅消费一条上游流；严格解析 SSE（多行 data 拼接、注释行忽略）。 */
-async function* readFrames(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<Json> {
+export async function* readAgyFrames(reader: ReadableStreamDefaultReader<Uint8Array>): AsyncGenerator<Json> {
   const decoder = new TextDecoder("utf-8", { fatal: true });
   let buffer = "";
   let data: string[] = [];
@@ -700,7 +700,9 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
           result.push(event("response.reasoning_summary_part.done", { ...base, summary_index: 0, part: { type: "summary_text", text: block.text } }));
         }
       } else {
-        if (block.item.type === "custom_tool_call") {
+        if (block.item.type === "web_search_call") {
+          // 原生搜索由独立本地标记完成，不生成客户端函数参数事件。
+        } else if (block.item.type === "custom_tool_call") {
           result.push(event("response.custom_tool_call_input.done", { ...base, input: block.item.input }));
         } else {
           result.push(event("response.function_call_arguments.done", { ...base, arguments: block.item.arguments }));
@@ -719,7 +721,7 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
       let toolIndex = 0;
       // 独立 thoughtSignature 可能跨帧到达，由紧接的调用消费，包括被忽略的调用。
       let pendingSignature: string | undefined;
-      for await (const frame of readFrames(reader)) {
+      for await (const frame of readAgyFrames(reader)) {
         if (canceled) return;
         if (frame.error !== undefined) {
           const original = record(frame.error, "error");
@@ -730,6 +732,33 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
           });
           if (terminal && !canceled) yield terminal;
           return;
+        }
+        if (frame.agyWebSearch !== undefined) {
+          // 内部调用的签名只在服务器续轮回放，不能误配给下一轮客户端函数。
+          pendingSignature = undefined;
+          const search = record(frame.agyWebSearch, "agyWebSearch");
+          const searchId = typeof search.id === "string" && search.id ? search.id : undefined;
+          const query = typeof search.query === "string" ? search.query : undefined;
+          if (!searchId || !query || !["in_progress", "completed"].includes(String(search.status))) throw new Error("Antigravity 原生搜索标记无效");
+          const key = `search:${searchId}`;
+          let block = blocks.get(key) as ToolBlock | undefined;
+          if (!block) {
+            const item: Json = { id: searchId, type: "web_search_call", status: "in_progress", action: { type: "search", query } };
+            block = { kind: "tool", item, outputIndex: output.length };
+            blocks.set(key, block);
+            output.push(item);
+            yield event("response.output_item.added", { output_index: block.outputIndex, item: structuredClone(item) });
+            yield event("response.web_search_call.in_progress", fields(block));
+          }
+          if (search.status === "completed") {
+            if (closedBlocks.has(block)) throw new Error("Antigravity 原生搜索重复结束");
+            block.item.status = "completed";
+            if (Array.isArray(search.results)) block.item.results = search.results;
+            closedBlocks.add(block);
+            yield event("response.web_search_call.completed", fields(block));
+            yield event("response.output_item.done", { output_index: block.outputIndex, item: structuredClone(block.item) });
+          }
+          continue;
         }
         const inner = frame.response === undefined || frame.response === null ? undefined : record(frame.response, "response");
         if (inner === undefined) continue;

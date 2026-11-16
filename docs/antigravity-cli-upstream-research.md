@@ -380,6 +380,75 @@ gpt-oss-120b-maas  gpt-oss-20b-maas  gpt-image-1
 解析时应用 `deprecatedModelIds` 重定向与 `defaultAgentModelId` 标记；
 无需本地持久化模型清单，网关自有缓存目录（对齐 `upstream-catalog.ts` 模式）。
 
+### 5.6 思考级别与模型还原复核（2026-11-16）
+
+本机官方 CLI 为 1.5.9。只读执行 `agy models`，当前账号返回 Argon 三档、Hydrogen
+四档（含 xhigh）、Flash 三档、Claude Opus/Sonnet 5.5 三档，以及独立 Orchestrator
+与 GPT-OSS Medium。账号目录只表示本账号当前权益，不是所有账号的固定模型清单。
+
+[官方 effort 文档](https://antigravity.google/docs/cli/commands/effort/) 将
+low、medium、high、xhigh、max 定义为统一词汇，但各模型只提供实际存在的档位；
+Orchestrator 等固定模型不可调。选择基名加 effort 会切换到对应的真实变体 ID。
+[模型文档](https://antigravity.google/docs/models) 说明 Hydrogen 的 high 默认值和
+xhigh 变体；[企业文档](https://antigravity.google/docs/enterprise) 列出支持 max 的
+Claude 5.5 场景，不能把 max 作为 xhigh 的别名。
+
+官方二进制内嵌的当前版本说明补充：基名未给 effort 时先采用服务端模型默认值，
+没有默认则 medium，仍不存在则最低可用档；交互选择器中未选家族的初始档位也有
+独立规则。因此不能用推荐排序、上次选择或全局最高档代替每个模型的默认选择。
+`ResolveEffort`、`DefaultEffortForBase`、`ResolveModel` 的函数名在字符串表中可见，
+业务符号已去除，未据此宣称已反汇编出完整实现。不同协议中的枚举字符串只证明
+二进制含有相关定义，不证明当前账号所有模型都接受同一传输参数。
+
+网关的统一还原描述分三类：
+
+- 变体模型：保存可选级别到真实模型 ID 的精确映射及默认级别；选择后不再发送
+  `thinkingLevel`，显式成员也不受矛盾 effort 覆盖。
+- 参数模型：目录明确提供 `supportedThinkingLevels` 时，只发送支持的同名参数。
+- 固定模型：目录中的独立条目未声明参数能力时保留真实 ID，不注入思考级别。
+
+目录不可用时，能力未知的请求保留 ID 与已知级别同名透传，不根据名称后缀猜测。
+未知或不支持的 effort 不做邻近降档；家族使用与未提供 effort 一致的默认选择。
+优先保留基名模型 `thinkingLevel` 的服务端默认值，其次采用属于家族的默认 Agent ID，
+否则 medium/最低档；不把推荐顺序当作默认。
+模型能力与默认值随目录一起缓存、校验及重载。请求转换消费统一选择结果，
+不再自行解释模型后缀或重复生成档位。
+
+**最新分组结构来自 `groupedModels`，不是 `tieredModelIds`**。官方二进制描述符中：
+
+```jsonc
+{
+  "groupedModels": {
+    "gemini-4-hydrogen": {
+      "displayName": "Gemini 4 Hydrogen",
+      "supportedThinkingLevels": [
+        { "thinkingSuffix": "-low", "thinkingDisplayName": "Low" },
+        { "thinkingSuffix": "-medium", "thinkingDisplayName": "Medium" },
+        { "thinkingSuffix": "-high", "thinkingDisplayName": "High" },
+        { "thinkingSuffix": "-xhigh", "thinkingDisplayName": "XHigh" }
+      ]
+    }
+  }
+}
+```
+
+上例说明字段形状，不是原始账号响应快照。`grouped_models` 的值为
+`ModelVariantList`，每个 `SupportedThinkingLevel` 保存 `thinkingSuffix` 与
+`thinkingDisplayName`。网关据此构造候选真实 ID，并校验其确实存在且未被排除；
+同时接受带或不带分隔符的后缀。只有旧目录没有该字段时才按已知后缀聚合。
+目录声明了分组时，不再额外推断未声明的家族。
+
+字符串表还有 `modelFamily.variantForEffort` 与 `modelFamily.effortForModel`，以及
+`modelFamily.efforts/defaultModel`、`SelectorModel.selectedGrouped/effortIndex/overrideFor`
+和 `EffortSelectorModel.effortSelection`。这些字段与函数名支持选择器将基名/档位与
+真实模型 ID 分开维护并双向还原；具体函数体未反汇编。另有 ACP 的
+`nearestEffortModel`，只能证明该兼容路径存在，不能认定截图中的模型选择器也会
+自动降档；本网关按用户要求不使用该策略。
+
+`tieredModelIds` 的 `TieredModelConfig` 包含 flash_lite/flash/pro 性能系列字段，
+解析器保留既有字符串 ID 的选择行为，不将其解释为思考级别。
+本轮未发送真实推理，仅通过模拟上游验证请求还原与各客户端协议。
+
 ## 6. HTTP Headers 清单（重点）
 
 静态可证的全部相关 header 常量 [bin] 及其归属。**网关转发推理请求的最小必备集**
