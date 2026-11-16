@@ -13,8 +13,10 @@ import { OPENCODE_SESSION_PATTERN } from "@agent-proxy/opencode-zen/session";
 import { collectCompatibleModels } from "../apps/gateway/src/cli.ts";
 import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
@@ -56,8 +58,7 @@ async function fixture(
   ]),
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zen-gateway-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/",
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: true,
@@ -99,15 +100,17 @@ async function fixture(
           throw new Error(`未模拟的 zen 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
-          { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined, undefined,
+          new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile, undefined,
+          { file: paths.stdoutLog, maxBytes: 100_000 }, undefined, undefined, undefined,
           {
             cacheDirectory: directory,
+            codexModelsCacheFile: paths.modelsCacheFile,
             refreshCatalogOnStart: false,
+            apiKey: "public",
             projectId: "a".repeat(40),
             ...dependencies,
             fetch: dependencies.fetch ?? defaultFetch,
-          });
+          }, paths);
         handlers.push(handler);
         return handler;
       },
@@ -115,8 +118,6 @@ async function fixture(
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -150,14 +151,16 @@ test("合并排除规则只命中点名模型：未排除的 Zen 可用，其他
 
 test("普通兼容模型列表与排除选择器都包含 Zen", TIMEOUT, async () => {
   await fixture(async ({ config, directory }) => {
+    const paths = gatewayFixturePaths(directory);
     const dependencies = { opencodeZen: {
       cacheDirectory: directory, refreshCatalogOnStart: false,
+      apiKey: "public", projectId: "a".repeat(40),
       fetch: async () => Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }),
       fetchMetadata: async () => ({}), probeModel: async () => "chat-completions" as const,
     } };
-    const listed = await collectCompatibleModels(config, dependencies);
+    const listed = await runWithInstancePaths(paths, () => collectCompatibleModels(config, dependencies, { paths }));
     assert.ok(listed.entries.some((model) => model.slug === MODEL));
-    const selectable = await collectCompatibleModels(config, dependencies, { includeUpstream: false });
+    const selectable = await runWithInstancePaths(paths, () => collectCompatibleModels(config, dependencies, { includeUpstream: false, paths }));
     assert.ok(selectable.entries.some((model) => model.slug === MODEL));
   });
 });
@@ -170,14 +173,15 @@ test("Zen 手动目录只维护客户端指纹，查询和显式刷新等待同�
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const zenUpstreamOnly = { ...config, upstreamOnly: true };
-    const adapter = createOpencodeZenAdapter(zenUpstreamOnly, {
+    const adapter = withFixtureAdapterHost(zenUpstreamOnly, gatewayFixturePaths(directory), () => createOpencodeZenAdapter(zenUpstreamOnly, {
       catalogMode: "manual", cacheDirectory: directory,
+      apiKey: "public", projectId: "a".repeat(40),
       fetch: async () => { fetches++; await gate; return Response.json({ data: [{ id: "nemotron-3.5-lightning-free" }] }); },
       fetchMetadata: async () => ({}),
       userAgentStore: { current: () => OPENCODE_ZEN_CLIENT_USER_AGENT, refresh: async () => { uaRefreshes++; } },
       setInterval: ((fn: () => void) => { callback = fn; return { unref() {} }; }) as unknown as typeof setInterval,
       clearInterval: (() => {}) as typeof clearInterval,
-    });
+    }));
     try {
       const listed = adapter.catalog();
       const explicit = adapter.refreshCatalog();
@@ -211,9 +215,9 @@ test("Zen 启动刷新强制重拉元数据：重启即手动更新窗口，不�
     }, null, 2)}\n`);
     let catalogFetches = 0;
     let metadataFetches = 0;
-    const adapter = createOpencodeZenAdapter(config, {
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createOpencodeZenAdapter(config, {
       cacheDirectory: directory,
-      projectId: "a".repeat(40),
+      apiKey: "public", projectId: "a".repeat(40),
       fetch: async () => { catalogFetches++; return Response.json({ data: ids.map((id) => ({ id })) }); },
       fetchMetadata: async () => {
         metadataFetches++;
@@ -225,7 +229,7 @@ test("Zen 启动刷新强制重拉元数据：重启即手动更新窗口，不�
       userAgentStore: { current: () => OPENCODE_ZEN_CLIENT_USER_AGENT, refresh: async () => {} },
       setInterval: (() => ({ unref() {} })) as unknown as typeof setInterval,
       clearInterval: (() => {}) as typeof clearInterval,
-    });
+    }));
     try {
       const catalog = await adapter.catalog();
       assert.equal(catalogFetches, 1, "启动强制拉模型列表");
@@ -361,9 +365,10 @@ test("chat/completions 转发：指纹标头注入、前缀剥除、占位垫补
 
 test("OPENCODE_API_KEY 环境变量覆盖公共鉴权，未设置时回落 Bearer public", TIMEOUT, async () => {
   await fixture(async (fixture) => {
-    const handler = fixture.create();
     const previous = process.env.OPENCODE_API_KEY;
     try {
+      delete process.env.OPENCODE_API_KEY;
+      const handler = fixture.create(undefined, { apiKey: undefined });
       await handler(chatRequest(MODEL, { stream: true }));
       assert.equal((fixture.upstream as NonNullable<Fixture["upstream"]>).headers.authorization, "Bearer public");
       // 环境变量按请求时读取：设置后无需重建适配器即生效。

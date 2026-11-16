@@ -6,14 +6,14 @@
  * activity"}。2026-11-01 实测（见 docs/zcode-start-plan-research.md）：中继按
  * **当前客户端版本的 system 前缀文本**校验——ZCode 3.17.1 已改写 cli_prefix
  * （"You are ZCode, an interactive agent"）并重排段落结构，官方 3.17.1 形态
- * 实测 200，而 magpie v0.1.40 沿用的 3.14.3 文本实测 405。本模块按 3.17.1 的
+ * 实测 200，而 magpie v0.1.40 沿用的 3.14.3 文本实测 405。本模块按 3.18.0 的
  * `assembleSystemMessages` 结构重组（glm/zcode.cjs）：
  *
  * - system 恰好三段：第一段 cli_prefix（与 `agentSystemPrompt` 同一官方文本）
- *   **不带 cache_control**；第二段 stable（Agent Identity + Desktop Context，
+ *   **不带 cache_control**；第二段 stable（Agent Identity，
  *   ephemeral）；第三段 "\n\n" + dynamic（Dynamic Behavior + Context
  *   Management + 网关旁白，ephemeral）。
- * - Environment / Model / Current Date 在 3.17.1 是 meta_user 附件：合并为首条
+ * - Environment / Desktop Context / Model / Current Date 是 meta_user 附件：合并为首条
  *   user turn（cwd/git/shell 网关不可知，按官方宽容度省略）。
  * - `metadata.user_id` 携带本机设备 ID（telemetry-state.json）。
  * - 官方文本与其余指纹数据同源维护（`fingerprint-data.json` 的
@@ -82,13 +82,14 @@ function environmentSection(family: ZcodeFamily, upstreamModel: string, identity
 }
 
 /**
- * 官方 meta_user 首条 user turn：环境段、模型行与当日日期合并（3.17.1 的
+ * 官方 meta_user 首条 user turn：环境段、桌面上下文、模型行与当日日期合并（3.18.0 的
  * env_info/model/current_date 附件公告形态）。
  */
 function contextUserContent(options: ZcodeStartPlanDressOptions): string {
   const texts = PROMPT.environment;
   return [
     environmentSection(options.family, options.upstreamModel, options.identity),
+    PROMPT.desktopContext,
     texts.poweredByTemplate.replace("{provider}", options.family === "bigmodel" ? "bigmodel-api" : "zai-api").replace("{model}", options.upstreamModel),
     texts.currentDateTemplate.replace("{date}", today(options.now ?? (() => new Date()))),
   ].join("\n\n");
@@ -102,7 +103,7 @@ export interface ZcodeStartPlanSystemBlock {
 
 /**
  * 把请求转换层产出的单段 system（ZCode 官方提示词基底 + 网关旁白，见
- * request.ts）重整为官方 3.17.1 三段块：前两段为官方 stable 文本，第三段以
+ * request.ts）重整为官方 3.18.0 三段块：前两段为官方 stable 文本，第三段以
  * 官方 dynamic 区开头、现有 system 剥离基底句后的剩余（网关旁白）并入末尾。
  * 第一段即官方 cli_prefix——与 `agentSystemPrompt` 同一文本（zcode.cjs uBa），
  * 按 `assembleSystemMessages` 不带 cache_control。
@@ -115,7 +116,7 @@ export function zcodeStartPlanSystemBlocks(options: Pick<ZcodeStartPlanDressOpti
   if (own.trim()) dynamic.push(own);
   return [
     { type: "text", text: ZCODE_AGENT_SYSTEM_PROMPT },
-    { type: "text", text: [PROMPT.identity, PROMPT.desktopContext].join("\n\n"), cache_control: { type: "ephemeral" } },
+    { type: "text", text: PROMPT.identity, cache_control: { type: "ephemeral" } },
     { type: "text", text: `\n\n${dynamic.join("\n\n")}`, cache_control: { type: "ephemeral" } },
   ];
 }

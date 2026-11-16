@@ -11,6 +11,7 @@ import {
 } from "@agent-proxy/zcode/client-signing";
 import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import type { ZcodeFamily, ZcodeProviderSnapshot, ZcodeSelection } from "@agent-proxy/zcode/config";
 import type { ZcodeIdentity } from "@agent-proxy/zcode/request-context";
@@ -241,6 +242,7 @@ async function withGateway(
   run: (harness: GatewayHarness) => Promise<void>,
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-zcode-signing-"));
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: true, upstreamOnly: false,
@@ -252,12 +254,12 @@ async function withGateway(
   const modelCalls: Headers[] = [];
   const currentCache = { get: async () => snapshot(), close: () => {} };
   const handler = createGatewayHandler(config, "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
-    path.join(directory, "models-cache.json"), {
+    paths.modelsCacheFile, {
       planCaches: { "api-key": currentCache } as Partial<Record<ZcodeSelection["kind"], typeof currentCache>>,
       identity: IDENTITY,
       endpointRouting: null,
-      // 自管目录文件（zcode-catalog.json）必须落在测试临时目录，污染真实运行主目录。
       cacheDirectory: directory,
+      codexModelsCacheFile: paths.modelsCacheFile,
       fetch: async (url, init) => {
         const target = String(url);
         if (target.endsWith("/api/paas/c1f3a7e2/v2/client")) {
@@ -277,7 +279,7 @@ async function withGateway(
         }
         throw new Error(`测试未模拟的上游请求：${target}`);
       },
-    });
+    }, undefined, undefined, undefined, undefined, undefined, paths);
   try {
     await run({ handler, handshakes, modelCalls });
   } finally {

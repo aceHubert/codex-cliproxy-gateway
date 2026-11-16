@@ -2,13 +2,13 @@ import fingerprintData from "./fingerprint-data.json";
 import type { AgyCredentials } from "./credentials.ts";
 
 /**
- * Antigravity 客户端指纹（`fingerprint-data.json`，按本机 agy 1.3.1 构建
- * 与内嵌提示词分析提取）：版本与 changelist 成对轮换，UA 格式源自抓包；
+ * Antigravity 客户端指纹（`fingerprint-data.json`）：UA 对齐本机 agy 1.5.7
+ * 实际目录请求，内置提示词沿用已有提取快照；版本与 changelist 成对轮换。
  * 取值依据、差异与更新方法见 docs/fingerprint-data.md。
  */
 interface AgyFingerprint {
   version: string;
-  /** 与 version 成对的构建 changelist（go version -m 的 cl/ 段），UA 内上报。 */
+  /** 与 version 成对的 AGY 构建 changelist，取实际 UA，不使用 Go 编译器构建号。 */
   changelist: string;
   agentSystemPrompt: string;
   agentSystemPromptVariant: string;
@@ -22,8 +22,8 @@ export const AGY_AGENT_SYSTEM_PROMPT = FINGERPRINT.agentSystemPrompt;
 /**
  * Antigravity 上游传输：Cloud Code Assist 内部 REST（`/v1internal:*`）。
  *
- * 本机 CLI 是 daily 通道构建（daily-cloudcode-pa.googleapis.com），网关默认指向
- * stable 通道的 cloudcode-pa.googleapis.com，两者线协议一致；端点可经依赖注入覆盖。
+ * 本机 consumer CLI 与网关默认使用 daily-cloudcode-pa.googleapis.com；
+ * 端点可经依赖注入覆盖。
  * headers 只带最小集：Authorization、Content-Type、User-Agent；客户端指纹的其余
  * 部分按 CLI 形态放在请求 body（metadata / user_agent）里。
  */
@@ -37,8 +37,8 @@ export const AGY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 export const AGY_DEFAULT_PROJECT = "aicode-consumers";
 /**
  * 指纹对齐用的客户端标识。上游鉴权只依赖 Bearer token；UA 与 body 内 userAgent
- * 字段按官方 CLI 形态对齐（版本与 changelist 成对取自本机 agy 构建，见
- * fingerprint-data.json；格式源自 2026-10-06 MITM 抓包）。
+ * 字段按官方 CLI 形态对齐（版本与 changelist 成对取自实际 User-Agent，见
+ * fingerprint-data.json；2026-11-13 核对 1.5.7 目录请求）。
  */
 export const AGY_CLIENT_VERSION = FINGERPRINT.version;
 export const AGY_USER_AGENT =

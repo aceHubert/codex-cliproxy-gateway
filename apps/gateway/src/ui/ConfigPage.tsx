@@ -737,12 +737,6 @@ export function ConfigPage({
                       </div>
                     ))}
                   </div>
-                  {config.readonly.manualCodexConfig.staticCatalogActive
-                    && !config.readonly.manualCodexConfig.keys.some(
-                      (row) => row.key === "model_catalog_json" && row.matches,
-                    ) && (
-                      <p className="field-desc zcode-disabled-hint">{t("config:manualStaticNote")}</p>
-                  )}
                   {config.readonly.manualCodexConfig.removeModelCatalogJson && (
                     <p className="field-desc zcode-disabled-hint">{t("config:manualRemoveCatalogKey")}</p>
                   )}

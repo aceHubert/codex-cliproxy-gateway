@@ -343,27 +343,20 @@ function readCodexConfigManaged(stateFile: string): boolean {
 
 /**
  * 手动模式的 config.toml 配置指引（与 CLI install / models --sync 的提示同源同条件）：
- * 3 个服务键 = 网关地址；static 目录激活时追加合成后的 Codex 目录路径；
- * 非 static 但用户 toml 仍残留该键时提示删除。
- * 只读取 4 个受管键做比对，URL 类当前值过 sanitizeUrlValue，不回显 toml 其他内容。
+ * 3 个服务键 = 网关地址；codexStaticCatalog 开启时追加 model_catalog_json 指引，
+ * 其余情况用户 toml 仍残留该键时提示删除（缺省经网关 /models 实时拉取）。
+ * 只读取受管键做比对，URL 类当前值过 sanitizeUrlValue，不回显 toml 其他内容。
  */
 function manualCodexConfigGuidance(
   paths: ResolvedPaths,
   config: GatewayConfig,
 ): {
   gatewayBaseUrl: string;
-  staticCatalogActive: boolean;
   removeModelCatalogJson: boolean;
   keys: ManualCodexKeyRow[];
 } {
   const gatewayBaseUrl = `http://${config.host}:${config.port}${MOUNT_PATH}`;
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  let staticCatalogAvailable = false;
-  try {
-    const catalog = JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")) as { models?: unknown };
-    staticCatalogAvailable = Array.isArray(catalog.models) && catalog.models.length > 0;
-  } catch {}
-  const staticCatalogActive = config.upstreamOnly === true && staticCatalogAvailable;
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
   const serviceKeys = ["openai_base_url", "experimental_realtime_ws_base_url", "experimental_realtime_webrtc_call_base_url"];
   const keys: ManualCodexKeyRow[] = serviceKeys.map((key) => {
@@ -375,7 +368,9 @@ function manualCodexConfigGuidance(
       matches: current === gatewayBaseUrl,
     };
   });
-  if (staticCatalogActive) {
+  // 与 updateCodexModelCatalog 同一判定：静态指向只在 upstream-only 下生效。
+  const staticCatalog = config.upstreamOnly === true && config.codexStaticCatalog === true;
+  if (staticCatalog) {
     keys.push({
       key: "model_catalog_json",
       expected: codexCatalogFile(paths),
@@ -385,8 +380,7 @@ function manualCodexConfigGuidance(
   }
   return {
     gatewayBaseUrl: String(sanitizeUrlValue(gatewayBaseUrl)),
-    staticCatalogActive,
-    removeModelCatalogJson: !staticCatalogActive && configuredCatalog !== undefined,
+    removeModelCatalogJson: !staticCatalog && configuredCatalog !== undefined,
     keys,
   };
 }

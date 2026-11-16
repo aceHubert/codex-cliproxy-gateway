@@ -33,6 +33,12 @@ export interface GatewayConfig extends AgentConfig {
   upstreamType?: UpstreamType;
   /** default 是否仅使用第三方上游裸模型 ID；不影响 agent 启用，Codex 使用合并静态目录。 */
   upstreamOnly?: boolean;
+  /**
+   * upstream-only 下是否让 Codex 经 model_catalog_json 静态文件加载目录：true 时
+   * 受管写入指向 codex-catalog.json（Codex 仅重启时读取，插件目录热更新不反映）；
+   * 缺省 false：Codex 经网关 /models 实时拉取。动态模式下该值被忽略。
+   */
+  codexStaticCatalog?: boolean;
   modelMergeJson?: string;
   selectedModels?: string[];
   /** 上次确认的推送排除 ID；缺失时首次使用 excludedModels，确认后独立保存，[] 表示不排除。 */

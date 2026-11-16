@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { test as testOutsideHostScope } from "node:test";
+import { getHostServices } from "@agent-proxy/plugin-api";
 import { createQoderAdapter, safeQoderUpstreamError, validateQoderConfig, type QoderDependencies } from "@agent-proxy/qoder";
 import { QoderCredentialError, type QoderCredentials } from "@agent-proxy/qoder/credentials";
 import { decodeQoderBody, QODER_AGENT_SYSTEM_PROMPT, type QoderInferPayload } from "@agent-proxy/qoder/transport";
@@ -9,6 +11,7 @@ import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade, routingPluginFamily } from "./plugin-routing-fixture.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
@@ -92,8 +95,7 @@ interface Fixture {
 
 async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "qoder-gateway-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: false, qoder: true,
@@ -114,13 +116,15 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
     await run({ directory, config, calls, fetched: () => fetches,
       create(overrides = {}, dependencies = {}) {
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
-          { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined,
-          { credentials: async () => credential(), cacheDirectory: directory, refreshCatalogOnStart: false,
+          new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile, undefined,
+          { file: paths.stdoutLog, maxBytes: 100_000 }, undefined,
+          { credentials: async () => credential(), cacheDirectory: directory, codexModelsCacheFile: paths.modelsCacheFile,
+            refreshCatalogOnStart: false,
             transport: {
               fetchCatalog: async () => { fetches++; return catalogData(); },
               infer: async (_credential, payload) => { calls.push(payload); return upstream(); },
-            }, ...dependencies });
+            }, ...dependencies, cn: { credentials: async () => null, ...dependencies.cn } },
+          undefined, undefined, paths);
         handlers.push(handler);
         return handler;
       },
@@ -128,8 +132,6 @@ async function fixture(run: (context: Fixture) => Promise<void>): Promise<void> 
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -327,7 +329,7 @@ test("网关禁用 Qoder 时不创建插件、不读授权、不发请求或注�
           transport: { fetchCatalog: async () => { operations++; return catalogData(); }, infer: async () => { operations++; return upstream(); } },
           setInterval: (() => { operations++; throw new Error("禁用插件不应启动 timer"); }) as typeof setInterval,
         },
-      });
+      }, undefined, gatewayFixturePaths(directory));
       try {
         assert.equal(agentConfigEnabled(current, "qoder"), false);
         assert.deepEqual(registry.plugins, []);
@@ -356,12 +358,12 @@ test("Qoder 手动目录保留启动一次刷新并等待结果，显式刷新�
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const upstreamOnlyConfig = { ...config, upstreamOnly: true };
-    const adapter = createQoderAdapter(upstreamOnlyConfig, {
+    const adapter = withFixtureAdapterHost(upstreamOnlyConfig, gatewayFixturePaths(directory), () => createQoderAdapter(upstreamOnlyConfig, {
       catalogMode: "manual", cacheDirectory: directory, credentials: async () => credential(),
       cn: { credentials: async () => null },
       setInterval: (() => { throw new Error("手动目录不得注册模型 timer"); }) as typeof setInterval,
       transport: { fetchCatalog: async () => { fetches++; await gate; return catalogData(); }, infer: async () => upstream() },
-    });
+    }));
     try {
       assert.equal(agentConfigEnabled(upstreamOnlyConfig, "qoder"), true);
       const listed = adapter.catalog();
@@ -387,11 +389,12 @@ test("Qoder 目录启动刷新及两分钟定时刷新可更新模型并随 clos
     let cleared = 0;
     let interval = 0;
     const timer = { unref() {} } as unknown as ReturnType<typeof setInterval>;
-    const adapter = createQoderAdapter(config, { cacheDirectory: directory, credentials: async () => credential(),
+    const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createQoderAdapter(config, {
+      cacheDirectory: directory, credentials: async () => credential(), cn: { credentials: async () => null },
       setInterval: ((fn: () => void, delay: number) => { callback = fn; interval = delay; return timer; }) as typeof setInterval,
       clearInterval: ((value: unknown) => { assert.equal(value, timer); cleared++; }) as typeof clearInterval,
       transport: { fetchCatalog: async () => catalogData(++fetches === 1 ? "qfmodel" : "new-flash"), infer: async () => upstream() },
-    });
+    }));
     try {
       await new Promise((resolve) => setTimeout(resolve, 0));
       assert.equal(fetches, 1);
@@ -519,10 +522,11 @@ test("Qoder 上游认证失败和错误信封不回显凭据且日志不记录�
   });
 });
 
-test("Qoder 成功请求日志使用专属文件名且清理上游不会将成功抢先记录为 499", TIMEOUT, async () => {
+testOutsideHostScope("Qoder 在宿主作用域外消费时写入专属日志且清理上游不会将成功抢先记录为 499", TIMEOUT, async () => {
   await fixture(async ({ create, directory }) => {
     const handler = create({ requestLogging: true });
     const response = await handler(request(MODEL, { stream: true, input: "私有请求内容" }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
     assert.equal((await decode(response)).status, "completed");
     const processLog = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
     assert.equal(processLog.split("\n").filter((line) => line.includes("POST /v1/responses ->")).length, 1);
@@ -594,7 +598,7 @@ test("Qoder 等待上游响应头期间无数据超时返回 504 并中止推理
   });
 });
 
-test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记录 504", TIMEOUT, async () => {
+testOutsideHostScope("Qoder 在宿主作用域外消费时报告超时失败并在专属日志中记录 504", TIMEOUT, async () => {
   await fixture(async ({ create, directory }) => {
     const encoder = new TextEncoder();
     const handler = create({ requestLogging: true }, { idleTimeoutMs: 40, transport: {
@@ -606,6 +610,7 @@ test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记�
       }), { headers: { "content-type": "text/event-stream" } }),
     } });
     const response = await handler(request(MODEL, { stream: true }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
     assert.equal(response.status, 200, "流式头已发送后用终态事件报告失败");
     const body = await response.text();
     assert.match(body, /event: response.failed/);
@@ -621,6 +626,39 @@ test("Qoder 流式响应停顿产生超时失败事件并在专属日志中记�
     assert.ok(!content.includes("部分输出"));
     const processLog = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
     assert.match(processLog, /POST \/v1\/responses -> 504/);
+  });
+});
+
+testOutsideHostScope("Qoder 在宿主作用域外取消响应时中止上游且只记录一次 499", TIMEOUT, async () => {
+  await fixture(async ({ create, directory }) => {
+    const encoder = new TextEncoder();
+    let cancellations = 0;
+    let upstreamSignal: AbortSignal | undefined;
+    const handler = create({ requestLogging: true }, { transport: {
+      fetchCatalog: async () => catalogData(),
+      infer: async (_credential, _payload, signal) => {
+        upstreamSignal = signal;
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(envelope({ choices: [{ index: 0, delta: { content: "部分输出" }, finish_reason: null }] })));
+          },
+          cancel() { cancellations++; },
+        }), { headers: { "content-type": "text/event-stream" } });
+      },
+    } });
+    const response = await handler(request(MODEL, { stream: true }));
+    assert.throws(getHostServices, /插件主机上下文未初始化/);
+    await response.body!.cancel();
+    assert.equal(upstreamSignal?.aborted, true);
+    assert.equal(cancellations, 1);
+    const files = fs.readdirSync(path.join(directory, "logs"));
+    assert.equal(files.length, 1);
+    const exchange = fs.readFileSync(path.join(directory, "logs", files[0]!), "utf8");
+    assert.equal(exchange.match(/--- response status: /g)?.length, 1);
+    assert.match(exchange, /--- response status: 499/);
+    const summary = fs.readFileSync(path.join(directory, "gateway.log"), "utf8");
+    assert.equal(summary.match(/POST \/v1\/responses -> \d{3}/g)?.length, 1);
+    assert.match(summary, /POST \/v1\/responses -> 499/);
   });
 });
 

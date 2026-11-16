@@ -551,7 +551,7 @@ function teamFetch(keys: Record<string, string>, calls: { method?: string; url: 
       if (init?.method === "POST") return Response.json({ code: 0, data: { apiKey, keyType: 2, name: "zcode-team-api-key" } });
       return Response.json({ code: 0, data: [{ apiKey, keyType: 2, name: "zcode-team-api-key" }] });
     }
-    if (/\/api_keys\/copy\//.test(url)) return Response.json({ code: 0, data: { secretKey: `${apiKey}-secret` } });
+    if (url.endsWith("/access_tokens")) return Response.json({ code: 200, data: { accessToken: `${apiKey}-token`, expiresIn: 3600 } });
     throw new Error(`测试未模拟团队凭据接口: ${url}`);
   }) as typeof fetch;
 }
@@ -603,7 +603,7 @@ function individualMintFetch(options: {
       return Response.json({ code: 200, data: { organizations: [{ organizationId: "organization-d", organizationName: "默认机构", projects: [{ projectId: "project-d", projectName: "默认项目", projectType: 1 }] }] } });
     }
     if (/\/api_keys$/.test(url)) {
-      return Response.json({ code: 200, data: [{ apiKey: "discovered-key-id", name: "default", keyType: 2 }] });
+      return Response.json({ code: 200, data: [{ apiKey: "discovered-key-id", name: "zcode-api-key", keyType: 2 }] });
     }
     throw new Error(`测试未模拟个人套餐令牌接口: ${url}`);
   }) as typeof fetch;
@@ -624,7 +624,7 @@ test("ZCode 3.12.3 connectionSelections 把已知 kind 归一化为 legacy provi
           const snapshot = await cache.get();
           assert.equal(snapshot.family, "zai");
           assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
-          assert.equal(snapshot.apiKey, kind === "individual-coding-plan" ? "test-coding-key" : "test-team-key.test-team-key-secret");
+          assert.equal(snapshot.apiKey, kind === "individual-coding-plan" ? "test-coding-key" : "test-team-key-token");
         });
       }
       json(path.join(home, "setting.json"), connectionSettings("start-plan"));
@@ -886,7 +886,7 @@ test("ZCode 个人与团队项目切换使用相互隔离的当前凭据", { tim
         await eventually(async () => {
           const snapshot = await cache.get();
           assert.equal(snapshot.providerID, "builtin:zai-coding-plan");
-          assert.equal(snapshot.apiKey, `${team.projectId === TEAM_A.projectId ? "team-a-key" : "team-b-key"}.team-${team.projectId === TEAM_A.projectId ? "a" : "b"}-key-secret`);
+          assert.equal(snapshot.apiKey, `${team.projectId === TEAM_A.projectId ? "team-a-key" : "team-b-key"}-token`);
         });
       }
       json(path.join(home, "setting.json"), connectionSettings("individual-coding-plan"));
@@ -896,7 +896,37 @@ test("ZCode 个人与团队项目切换使用相互隔离的当前凭据", { tim
       assert.ok(calls.some((call) => call.url.includes(TEAM_A.organizationId) && call.url.includes(TEAM_A.projectId)));
       assert.ok(calls.some((call) => call.url.includes(TEAM_B.organizationId) && call.url.includes(TEAM_B.projectId)));
       assert.ok(calls.every((call) => !call.url.includes("product-a") && !call.url.includes("product-b")));
-      assert.ok(calls.filter((call) => call.url.includes(TEAM_B.projectId)).every((call) => call.headers.get("authorization") === "test-team-oauth"));
+      assert.ok(calls.filter((call) => call.url.includes(TEAM_B.projectId)).every((call) => call.headers.get("authorization") === (call.url.endsWith("/access_tokens") ? "Bearer test-team-oauth" : "test-team-oauth")));
+    } finally { cache.close(); }
+  });
+});
+
+test("ZCode 团队短期令牌保留到期时间并在过期后重签", { timeout: 60_000 }, async () => {
+  await fixture(async (home) => {
+    const mock = mockWatch();
+    let clock = Date.now();
+    let minted = 0;
+    const fetch: typeof globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("/access_tokens")) {
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer test-team-oauth");
+        assert.deepEqual(JSON.parse(String(init?.body)), { clientType: "zcode", clientVersion: "3.18.0" });
+        return Response.json({ code: 200, data: { accessToken: `team-token-${++minted}`, expiresIn: 3600 } });
+      }
+      assert.ok(!String(input).includes("/copy/"));
+      return teamFetch({ "project-a": "team-key-id" })(input, init);
+    }) as typeof fetch;
+    json(path.join(home, "setting.json"), teamSettings(TEAM_A));
+    json(path.join(home, "config.json"), planConfig());
+    json(path.join(home, "credentials.json"), teamCredentials());
+    const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch, now: () => clock, clientVersion: "3.18.0" });
+    try {
+      const first = await cache.get();
+      assert.equal(first.apiKey, "team-token-1");
+      assert.equal(first.expiresAt, clock + 3_600_000);
+      assert.equal((await cache.get()).apiKey, "team-token-1");
+      clock += 3_600_001;
+      assert.equal((await cache.get()).apiKey, "team-token-2");
+      assert.equal(minted, 2);
     } finally { cache.close(); }
   });
 });
@@ -914,17 +944,17 @@ test("ZCode 团队字段缺失、凭据损坏或文件变化不会回退旧快�
     json(path.join(home, "credentials.json"), teamCredentials());
     const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch, env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" } });
     try {
-      assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+      assert.equal((await cache.get()).apiKey, "team-a-key-token");
       json(path.join(home, "credentials.json"), { ...teamCredentials(), audit: 1 });
       mock.change(home, "credentials.json");
       const callsAfterInitial = calls;
       await eventually(async () => {
-        assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+        assert.equal((await cache.get()).apiKey, "team-a-key-token");
         assert.ok(calls > callsAfterInitial);
       });
       json(path.join(home, "credentials.json"), { "oauth:zai:access_token": "enc:v1:bad" });
       mock.change(home, "credentials.json");
-      await eventually(async () => await assert.rejects(cache.get(), /团队凭据/));
+      await eventually(async () => await assert.rejects(cache.get(), /解密失败/));
       json(path.join(home, "setting.json"), connectionSettings("team-coding-plan", "zai", {
         providerFamilyConnectionSelections: { zai: { kind: "team-coding-plan", organizationId: "organization-a", projectId: "project-a" } },
       }));
@@ -952,7 +982,7 @@ test("ZCode 团队套餐删除 credentials.json 后失效且恢复后重建 Key"
       onCredentialBuild() { builds++; },
     });
     try {
-      assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+      assert.equal((await cache.get()).apiKey, "team-a-key-token");
       const callsAfterInitial = calls.length;
       fs.unlinkSync(path.join(home, "credentials.json"));
       mock.change(home, "credentials.json");
@@ -963,11 +993,11 @@ test("ZCode 团队套餐删除 credentials.json 后失效且恢复后重建 Key"
       json(path.join(home, "credentials.json"), teamCredentials("restored-team-oauth"));
       mock.change(home, "credentials.json");
       await eventually(async () => {
-        assert.equal((await cache.get()).apiKey, "team-a-key.team-a-key-secret");
+        assert.equal((await cache.get()).apiKey, "team-a-key-token");
         assert.ok(calls.length > callsAfterInitial);
       });
       assert.equal(builds, 2);
-      assert.ok(calls.slice(callsAfterInitial).every((call) => call.authorization === "restored-team-oauth"));
+      assert.ok(calls.slice(callsAfterInitial).every((call) => ["restored-team-oauth", "Bearer restored-team-oauth"].includes(call.authorization ?? "")));
     } finally { cache.close(); }
   });
 });
@@ -987,10 +1017,10 @@ test("ZCode 团队凭据支持 enc:v1 并在项目 Key 缺失时按官方流程�
     }) as typeof fetch;
     const cache = createZcodeConfigCache(home, { watch: mock.watch, fetch, env: { ZCODE_CREDENTIAL_SECRET: "test-zcode-secret" } });
     try {
-      assert.equal((await cache.get()).apiKey, "created-team-key.created-team-key-secret");
+      assert.equal((await cache.get()).apiKey, "created-team-key-token");
       const created = calls.find((call) => call.method === "POST");
       assert.ok(created?.url.endsWith(`/api/biz/v1/organization/${TEAM_A.organizationId}/projects/${TEAM_A.projectId}/api_keys`));
-      assert.deepEqual(created?.body, { keyType: 2, name: "zcode-team-api-key" });
+      assert.deepEqual(created?.body, { keyType: 2, name: "zcode-team-api-key", usageScene: 1 });
     } finally { cache.close(); }
   });
 });
@@ -1012,7 +1042,7 @@ test("ZCode BigModel 团队读取实际 OAuth 键且忽略旧个人停用镜像"
       const snapshot = await cache.get();
       assert.equal(snapshot.family, "bigmodel");
       assert.equal(snapshot.providerID, "builtin:bigmodel-coding-plan");
-      assert.equal(snapshot.apiKey, "bigmodel-team-key.bigmodel-team-key-secret");
+      assert.equal(snapshot.apiKey, "bigmodel-team-key-token");
       assert.deepEqual(snapshot.modelIds, ["glm-5"]);
     } finally { cache.close(); }
   });
@@ -1149,7 +1179,7 @@ test("ZCode 套餐槽位汇总两个渠道的连接，plan 缓存固定解析各
       assert.equal(teamSnapshot.family, "bigmodel");
       assert.equal(teamSnapshot.providerID, "builtin:bigmodel-coding-plan");
       assert.equal(teamSnapshot.plan, "team-coding-plan");
-      assert.equal(teamSnapshot.apiKey, "test-team-key.test-team-key-secret");
+      assert.equal(teamSnapshot.apiKey, "test-team-key-token");
       assert.equal((await startPlan.get()).providerID, "builtin:zai-start-plan");
       assert.equal((await startPlan.get()).apiKey, "test-zcode-jwt");
       assert.equal((await startPlan.get()).plan, "start-plan");
@@ -1331,7 +1361,7 @@ test("ZCode 仅保留仍有 OAuth 凭证的套餐连接槽位", { timeout: 60_00
       await assert.rejects(() => individual.get(), /没有可用的个人 Coding Plan 连接/);
       const snapshot = await team.get();
       assert.equal(snapshot.family, "bigmodel");
-      assert.equal(snapshot.apiKey, "test-team-key.test-team-key-secret");
+      assert.equal(snapshot.apiKey, "test-team-key-token");
     } finally { individual.close(); team.close(); }
   });
 });

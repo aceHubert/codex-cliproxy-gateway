@@ -128,6 +128,9 @@ from 为上游 endpoint 协议、to 为调用方 route 协议，同协议直通�
 被剥离的服务器内置工具以 `strippedTools` 结构化返回。default 零转换与
 AGY 独立转换边界维持不变。）
 
+2026-11-09：AGY 响应层复用 `@agent-proxy/llm-bridge` 的工具名唯一匹配函数。
+请求转换、CloudCodeAssist 响应解析和客户端输出仍由 AGY 自身完成。
+
 ## WebSocket 与 HTTP 回落
 
 同一模式表用于 HTTP 与 WS 归属。

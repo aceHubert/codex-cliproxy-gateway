@@ -5,7 +5,7 @@ import { filterExcludedModels, normalizeCatalog } from "./catalog.ts";
 import { managedCatalogFiles } from "./paths.ts";
 import { logConfigChange } from "./process-log.ts";
 import { atomicWrite, hasRootTomlKey, patchRootToml, readRootTomlString, restoreRootTomlKeys } from "./toml.ts";
-import { configuredCatalogFile } from "./upstream-catalog.ts";
+import { configuredCatalogFile, configuredUpstreamType } from "./upstream-catalog.ts";
 import type { GatewayConfig, ModelCatalog, ModelEntry, ResolvedPaths } from "./types.ts";
 
 export interface ModelCatalogSource {
@@ -33,7 +33,10 @@ export async function rebuildStaticCatalog(
 /** 网关复用自身已加载的适配器发布静态目录，避免构造第二批目录缓存与计时器。 */
 export function writeStaticCatalog(paths: ResolvedPaths, config: GatewayConfig, adapterModels: ModelEntry[], ownsModel: (model: string) => boolean = () => false): ModelCatalog {
   const upstream = normalizeCatalog(JSON.parse(fs.readFileSync(configuredCatalogFile(paths, config), "utf8")));
-  const merged = [...upstream.models, ...adapterModels];
+  // Codex 按 priority 排序模型选择框：上游与各插件目录的 priority 各自计数，直接拼接
+  // 会让各渠道同优先级条目互相穿插。统一按「上游在前、插件按组合顺序在后」重排为连续值。
+  let priority = 0;
+  const merged = [...upstream.models, ...adapterModels].map((entry) => ({ ...entry, priority: ++priority }));
   const seen = new Set<string>();
   for (const entry of merged) {
     if (!entry || typeof entry.slug !== "string" || !entry.slug.trim()) throw new Error("模型目录存在缺少 slug 的条目，未发布静态目录");
@@ -47,15 +50,16 @@ export function writeStaticCatalog(paths: ResolvedPaths, config: GatewayConfig, 
 }
 
 /**
- * 只改写受管目录指向；遇到不可解析或用户自管的值时拒绝覆盖。
+ * Codex 目录加载方式由 staticCatalog 参数配置：true 时把 model_catalog_json 指向合成
+ * 静态目录（Codex 只在重启时读取，插件目录热更新不会反映）；false（缺省）时不写指向，
+ * Codex 经网关 /models 实时拉取。两种模式下历史受管值都允许改写，用户自管的值拒绝覆盖。
  * managedFiles 是受管目录文件全集（网关自有 + 已装配插件产物），由调用方注入；
  * 本模块保持叶子地位，不 import 组合层，历史插件目录指向仍须被识别为受管值。
  */
 export function applyModelCatalogToml(
   source: string,
-  active: boolean,
+  staticCatalog: boolean,
   paths: ResolvedPaths,
-  catalogFile: string,
   managedFiles: string[],
 ): { patchedToml: string; previousCatalog: string | null } {
   const configuredCatalog = readRootTomlString(source, "model_catalog_json");
@@ -67,7 +71,9 @@ export function applyModelCatalogToml(
     throw new Error("model_catalog_json exists but its value cannot be parsed; fix ~/.codex/config.toml manually");
   }
   return {
-    patchedToml: active ? patchRootToml(source, { model_catalog_json: catalogFile }) : restoreRootTomlKeys(source, "", ["model_catalog_json"]),
+    patchedToml: staticCatalog
+      ? patchRootToml(source, { model_catalog_json: codexCatalogFile(paths) })
+      : restoreRootTomlKeys(source, "", ["model_catalog_json"]),
     previousCatalog: configuredCatalog ?? null,
   };
 }
@@ -98,10 +104,13 @@ export async function updateCodexModelCatalog(
   const source = tomlExisted ? fs.readFileSync(paths.configToml, "utf8") : "";
   const catalogPath = codexCatalogFile(paths);
   const active = config.upstreamOnly === true;
+  // 静态指向只在 upstream-only 下有意义（动态模式不维护合成静态目录）；
+  // 缺省关闭：Codex 经网关 /models 实时拉取，插件目录热更新即时生效。
+  const staticCatalog = active && config.codexStaticCatalog === true;
   // 先执行受管值守卫，拒绝后不发网络请求也不写入任何目录快照。
   const { patchedToml, previousCatalog } = manual
     ? { patchedToml: source, previousCatalog: readRootTomlString(source, "model_catalog_json") ?? null }
-    : applyModelCatalogToml(source, active, paths, catalogPath, managedFiles);
+    : applyModelCatalogToml(source, staticCatalog, paths, managedFiles);
   const tomlChanged = patchedToml !== source;
   const previousSnapshot = fs.existsSync(catalogPath) ? fs.readFileSync(catalogPath, "utf8") : undefined;
   let snapshotWritten = false;
@@ -153,11 +162,14 @@ export async function updateCodexModelCatalog(
   }
   if (tomlChanged) logConfigChange(paths.stdoutLog, {
     command: "model catalog update",
-    changes: [{ field: "model_catalog_json (config.toml)", before: previousCatalog, after: active ? catalogPath : null }],
+    changes: [{ field: "model_catalog_json (config.toml)", before: previousCatalog, after: staticCatalog ? catalogPath : null }],
   }, config.maxGatewayLogBytes ?? 0);
   if (manual) {
-    if (active) console.log(`手动配置模式：请在 ${paths.configToml} 根表设置 model_catalog_json = ${JSON.stringify(catalogPath)}，再完全退出并重启 Codex。`);
-    else if (hasRootTomlKey(source, "model_catalog_json")) console.log(`手动配置模式：请从 ${paths.configToml} 根表移除 model_catalog_json，再完全退出并重启 Codex。`);
+    if (staticCatalog && !hasRootTomlKey(source, "model_catalog_json")) {
+      console.log(`手动配置模式：请在 ${paths.configToml} 根表设置 model_catalog_json = ${JSON.stringify(catalogPath)}，再完全退出并重启 Codex。`);
+    } else if (!staticCatalog && hasRootTomlKey(source, "model_catalog_json")) {
+      console.log(`手动配置模式：请从 ${paths.configToml} 根表移除 model_catalog_json（目录统一经网关 /models 提供），再完全退出并重启 Codex。`);
+    }
   }
   return { catalogPath, count, manual, tomlChanged };
 }

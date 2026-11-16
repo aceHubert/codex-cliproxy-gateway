@@ -26,6 +26,7 @@ const LOG_PREFIX = "cliproxy";
 const SENSITIVE_HEADERS = new Set([
   "authorization",
   "x-api-key",
+  "x-zcode-authorization",
   "x-goog-api-key",
   "chatgpt-account-id",
   "cookie",

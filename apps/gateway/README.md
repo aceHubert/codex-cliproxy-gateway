@@ -116,9 +116,15 @@ Web 界面的 upstream-only 路由模式只读，Web API 不接受该字段的�
 
 模型更新按已保存的 `upstreamOnly` 决定是否更新 Codex 静态目录。
 静态文件位于运行主目录的 `codex-catalog.json`，与原始上游目录分开管理。
+Codex 缺省经网关 `/models` 实时拉取目录（各兼容端模型的热更新即时生效），
+不向 `~/.codex/config.toml` 写入 `model_catalog_json`；需要静态文件加载时用
+`config --codex-static-catalog on` 开启受管指向（Codex 仅重启时读取），
+历史安装写入的受管值会在下一次模型更新或配置切换时按当前开关改写或移除。
+静态目录按「上游模型在前、兼容端在后」重排 `priority`，
+避免各渠道目录各自计数导致模型选择框乱序。
 手动模式（`install --manual-codex-config`）下，后续命令读取安装状态决定管理权限，
-无需重复携带安装参数；工具自管目录照常更新，用户 TOML 保持不变。
-命令会打印 `model_catalog_json` 的添加或删除指引、期望值与当前匹配情况。
+无需重复携带安装参数；工具自管目录照常更新，用户 TOML 保持不变，
+按当前开关打印 `model_catalog_json` 的添加或删除指引。
 `status` 的 `codexConfigManaged` 字段可查看管理状态。
 
 也可以直接指定选择：

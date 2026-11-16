@@ -10,7 +10,7 @@ import {
   buildCompactionRequest, compactionError, compactV1Output,   createPluginGatewayHandler, hasCompactionTrigger,
   isCompletedCompactionPayload, noCompactionSummaryError, responseText,
   rewriteCompactionHistory, startPluginGateway,
-syntheticCompactionResponse,
+  syntheticCompactionResponse, type GatewayStartOptions,
 } from "./gateway.ts";
 import { createGatewayHostServices } from "./host-services.ts";
 import { readApiKey } from "./keychain.ts";
@@ -160,10 +160,13 @@ export function startGateway(
   qoderDependencies?: QoderDependencies,
   agyDependencies?: AgyDependencies,
   opencodeZenDependencies?: OpencodeZenDependencies,
+  options: GatewayStartOptions = {},
 ) {
+  const runtimePaths = options.runtimePaths ?? resolvePaths();
   const registry = createConfiguredPluginRegistry(config, {
     zcode: zcodeDependencies, codebuddy: codebuddyDependencies, qoder: qoderDependencies,
     agy: agyDependencies, opencodeZen: opencodeZenDependencies,
-  }, processLog);
-  return startPluginGateway(config, registry, realtimeProviderMode, clientVersionFile, processLog, isInstalledPluginModel);
+  }, processLog, runtimePaths, options.apiKey);
+  return startPluginGateway(config, registry, realtimeProviderMode, clientVersionFile, processLog, isInstalledPluginModel,
+    { ...options, runtimePaths });
 }

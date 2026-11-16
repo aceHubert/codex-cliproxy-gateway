@@ -73,6 +73,19 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 
 ## zcode
 
+2026-11-11 已按本机 3.18.0.10300 安装包核对。快照升级为 3.18.0，
+Desktop Context 放在首条环境附件中、模型说明之前，第二段 system 仅保留
+Agent Identity。没有可视化目录时省略 Interactive views。SDK 后缀仍为 3.0.81。
+项目 JWT 使用完整令牌派生签名密钥并以 accessToken 字段握手，目录映射只上报
+项目 Key ID。映射可指定 X-ZCode-Authorization，但仅允许配置服务同源的
+ultra 与 ultra-zai 子树，并在请求日志及错误正文中遮蔽该凭据。
+
+凭据读取支持 enc:v2 的 OS、环境及密钥文件来源。团队套餐使用带到期时间的
+项目访问令牌。协议验证覆盖模拟上游与本机只读解密，线上服务端策略另需实网验证。
+系统解密密钥按凭据路径在网关进程内缓存。指纹不匹配或解密失败时重新读取一次，
+密钥变化则更新缓存并重试一次，未变化或仍失败则明确报错。Ultra 必需 JWT
+无法读取时返回配置错误，个人项目指针解密失败同样终止鉴权发现流程。
+
 - **source**：ZCode.app 3.14.5（`/Applications/ZCode.app/Contents/Info.plist`）+ 本机会话请求日志
   `~/.zcode/cli/rollout/model-io-*.jsonl`（179 条真实请求：agent 177 / 标题生成 1 / 网页搜索 1）。
 - **notes**：
@@ -146,17 +159,19 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 
 ## agy
 
-- **source**：`~/.local/bin/agy` 1.3.1（`go version -m`：`go1.28-20260921-RC02 cl/985595000`）
-  内嵌提示词提取；UA 格式源自 2026-10-06 MITM 抓包。
+- **source**：UA 取自 2026-11-13 官方 `agy models` 的实际请求：1.5.7 / cl=1019769835。
+  提示词仍沿用 1.3.1 的内嵌提取快照，本轮仅修正目录所需的客户端版本标识。
 - **notes**：
   - `agentSystemPrompt` 原为 Go text/template 原文（含 `{{if .IsAutonomous}}` 等指令），已按上文
     「模板变量剥离方法」处理：627 → 454 字符（inline if/else 保留 else 的「pair programming with」、
     autonomous 守卫块整块删除）。`agentSystemPromptVariant` 是另一处短身份行（无变量，原样保留）。
-  - 版本与 changelist **必须成对更新**：本次按同一构建取 1.3.1 / cl=985595000，替换 2026-10-06
-    抓包的 1.2.17 / cl=993434119；只改其一会出现跨构建的无效组合。
+  - 版本与 changelist **必须成对更新**：当前为 1.5.7 / cl=1019769835。
+    只读对照中，仅替换 UA 即让 `fetchAvailableModels` 返回 `gemini-pro-orchestrator-g1-pro`。
+    `go version -m` 的 cl/1012564305 属于 Go 编译器，不能用作 AGY 的 UA 构建号。
   - UA 格式 `antigravity/cli/<ver> (aidev_client; os_type=…; arch=…; cl=…; auth_method=consumer)`
     经抓包固定，`os_type`/`arch` 按运行平台动态生成。
-- **更新方法**：`agy --version` 取新版本号，`go version -m $(which agy)` 取同构建的 `cl/` 段，
+- **更新方法**：`agy --version` 取新版本号，观察官方只读目录请求的 User-Agent，
+  或核对二进制实际 UA 构造路径中的版本与 changelist；不从 Go 工具链版本推导。
   成对写入 `version` 与 `changelist`；提示词变化时按二进制内嵌原文重新提取三个字段，并按上文
   「模板变量剥离方法」去掉变量指令后写入。
 
@@ -294,6 +309,7 @@ Codex，下一条请求即用新值（响应侧不受影响）。仅当改动目
 
 | 日期 | 客户端 | 变更 |
 | --- | --- | --- |
+| 2026-11-13 | agy | UA 更新为官方目录请求实测的 1.5.7 / 1019769835，恢复 Orchestrator (Argon)；纠正从 Go 编译器构建号推导 AGY changelist 的方法。仅更换 UA 即获得新目录条目，提示词快照保持原值 |
 | 2026-10-09 | 全部 | 初版：四客户端指纹数据拆分到各自模块，source/notes 收敛至本文件 |
 | 2026-10-09 | zcode | UA 去掉 `ai-sdk/anthropic/3.0.81` 后缀（3.14.5 实流已无）；校准 appVersion 3.14.5；补 agent/标题/网页搜索三个内置提示词 |
 | 2026-10-09 | codebuddy | CLI 版本 2.151.0 → 2.157.0（本机安装包）；主提示词从 product.json prompts 表提取（cli-agent-prompt 19,627 字符 + 身份行 + 标题生成器），纠正初版「无静态字面量」误判 |

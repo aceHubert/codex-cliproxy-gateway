@@ -8,11 +8,11 @@ import path from "node:path";
 import { mock } from "bun:test";
 import { runCli } from "../apps/gateway/src/cli.ts";
 import { GATEWAY_CONFIG_SCHEMA_URL, GATEWAY_CONFIG_VERSION } from "../apps/gateway/src/config.ts";
-import { startGateway } from "../apps/gateway/src/gateway-composition.ts";
 import { codexCatalogFile, updateCodexModelCatalog } from "../apps/gateway/src/model-composition.ts";
 import { instanceMarker, resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
 import { requestLogDir } from "../apps/gateway/src/request-log.ts";
 import { ensureUiToken, handleWebUiRequest, startWebUiServer, webUiContextForInstance, type WebUiContext } from "../apps/gateway/src/webui.ts";
+import { startTestGateway } from "./gateway-start-fixture.ts";
 import test from "./host-test.ts";
 import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
@@ -343,7 +343,6 @@ test("GET /ui/api/config 手动模式返回逐键期望值与 config.toml 当前
         codexConfigManaged: boolean;
         manualCodexConfig: {
           gatewayBaseUrl: string;
-          staticCatalogActive: boolean;
           removeModelCatalogJson: boolean;
           keys: Array<{ key: string; expected: string; current: string | null; matches: boolean }>;
         };
@@ -351,7 +350,6 @@ test("GET /ui/api/config 手动模式返回逐键期望值与 config.toml 当前
     };
     assert.equal(payload.readonly.codexConfigManaged, false);
     assert.equal(payload.readonly.manualCodexConfig.gatewayBaseUrl, gatewayBaseUrl);
-    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, false);
     assert.equal(payload.readonly.manualCodexConfig.removeModelCatalogJson, false);
     const byKey = new Map(payload.readonly.manualCodexConfig.keys.map((row) => [row.key, row]));
     // 匹配 / 不一致（URL 当前值过 sanitize，query 不外发）/ 未配置 三种状态齐全。
@@ -370,7 +368,7 @@ test("GET /ui/api/config 手动模式返回逐键期望值与 config.toml 当前
       current: null,
       matches: false,
     });
-    // 静态目录未激活时不包含 model_catalog_json；toml 其他内容（profiles）不外发。
+    // 目录统一经网关 /models 提供，指引不再包含 model_catalog_json；toml 其他内容（profiles）不外发。
     assert.equal(byKey.has("model_catalog_json"), false);
     const text = JSON.stringify(payload);
     assert.ok(!text.includes("supersecret"), "config.toml 当前值里的 query token 不得外发");
@@ -380,7 +378,7 @@ test("GET /ui/api/config 手动模式返回逐键期望值与 config.toml 当前
   }
 });
 
-test("GET /ui/api/config 手动模式 static 目录激活时追加 model_catalog_json 指引", async () => {
+test("GET /ui/api/config 手动模式残留 model_catalog_json 时只提示删除且不回显键值", async () => {
   const { handler, paths, config, home } = await makeFixture({
     config: { upstreamOnly: true, selectedModels: ["glm-5.3"] },
   });
@@ -389,63 +387,23 @@ test("GET /ui/api/config 手动模式 static 目录激活时追加 model_catalog
     fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "glm-5.3" }] }));
     type ManualPayload = {
       readonly: { manualCodexConfig: {
-        staticCatalogActive: boolean;
         removeModelCatalogJson: boolean;
-        keys: Array<{ key: string; expected: string }>;
+        keys: Array<{ key: string }>;
       } };
     };
     let payload = await (await handler(authedRequest("/ui/api/config"))).json() as ManualPayload;
-    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, true);
-    const catalogRow = payload.readonly.manualCodexConfig.keys.find((row) => row.key === "model_catalog_json");
-    assert.equal(catalogRow?.expected, codexCatalogFile(paths));
+    assert.equal(payload.readonly.manualCodexConfig.removeModelCatalogJson, false);
+    assert.equal(payload.readonly.manualCodexConfig.keys.some((row) => row.key === "model_catalog_json"), false);
 
-    // 切回 split（upstreamOnly=false）但 config.toml 仍残留该键时提示删除。
+    // config.toml 残留目录键（任意模式）时提示删除；键值不进响应，token 不外发。
     const live = { ...config, upstreamOnly: false } as GatewayConfig;
     fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(live, null, 2)}\n`);
-    fs.writeFileSync(paths.configToml, `model_catalog_json = "${config.catalogPath}"\n`);
+    fs.writeFileSync(paths.configToml, 'model_catalog_json = "https://catalog.example/models.json?token=catalog-secret"\n');
     const handlerLive = (request: Request) => handleWebUiRequest(request, live, { paths, uiHtmlPath: path.join(home, "ui-index.html") }, live.port);
-    payload = await (await handlerLive(authedRequest("/ui/api/config"))).json() as ManualPayload;
-    assert.equal(payload.readonly.manualCodexConfig.staticCatalogActive, false);
+    const text = await (await handlerLive(authedRequest("/ui/api/config"))).text();
+    payload = JSON.parse(text) as ManualPayload;
     assert.equal(payload.readonly.manualCodexConfig.removeModelCatalogJson, true);
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("GET /ui/api/config 手动模式 static 目录当前值遮蔽 URL 查询且保留本地路径比对", async () => {
-  const { handler, paths, config, home } = await makeFixture({
-    config: { upstreamOnly: true, selectedModels: ["glm-5.3"] },
-  });
-  try {
-    fs.writeFileSync(paths.stateFile, JSON.stringify({ version: 4, codexConfigManaged: false }));
-    fs.writeFileSync(codexCatalogFile(paths), JSON.stringify({ models: [{ slug: "glm-5.3" }] }));
-    const cases = [
-      {
-        current: "https://catalog.example/models.json?token=catalog-secret&session=query-secret#hash-secret",
-        displayed: "https://catalog.example/models.json?…",
-        matches: false,
-      },
-      { current: codexCatalogFile(paths), displayed: codexCatalogFile(paths), matches: true },
-      { current: "/tmp/other-catalog.json", displayed: "/tmp/other-catalog.json", matches: false },
-    ];
-    for (const { current, displayed, matches } of cases) {
-      fs.writeFileSync(paths.configToml, `model_catalog_json = "${current}"\n`);
-      const response = await handler(authedRequest("/ui/api/config"));
-      assert.equal(response.status, 200);
-      const text = await response.text();
-      assert.ok(!text.includes("catalog-secret"), "目录 URL 的 token 不得进入响应");
-      assert.ok(!text.includes("query-secret"), "目录 URL 的查询参数不得进入响应");
-      assert.ok(!text.includes("hash-secret"), "目录 URL 的片段不得进入响应");
-      const payload = JSON.parse(text) as {
-        readonly: { manualCodexConfig: {
-          keys: Array<{ key: string; expected: string; current: string | null; matches: boolean }>;
-        } };
-      };
-      const row = payload.readonly.manualCodexConfig.keys.find((item) => item.key === "model_catalog_json");
-      assert.deepEqual(row, {
-        key: "model_catalog_json", expected: codexCatalogFile(paths), current: displayed, matches,
-      });
-    }
+    assert.ok(!text.includes("catalog-secret"), "残留目录键的 URL token 不得进入响应");
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
@@ -1122,6 +1080,8 @@ test("Web UI 空上游选择允许 agent 静态目录，手动配置不写 TOML"
         reloadModels: async () => ({ loaded: true, revision: "agent-only" }),
         updateCodexCatalog: (modelPaths, config, _deps, options) => updateCodexModelCatalog(modelPaths, config, {
           opencodeZen: {
+            apiKey: "public",
+            projectId: "temporary-test-instance",
             fetch: async (url) => {
               if (url.endsWith("/models")) agentFetches++;
               return Response.json({ data: [{ id: "one-free" }] });
@@ -1145,9 +1105,10 @@ test("Web UI 空上游选择允许 agent 静态目录，手动配置不写 TOML"
     assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")).models.map((m: { slug: string }) => m.slug), ["opencode-zen/one-free"]);
     assert.equal(fs.readFileSync(paths.configToml, "utf8"), originalToml);
     const guidance = await (await handler(authedRequest("/ui/api/config"))).json() as {
-      readonly: { manualCodexConfig: { staticCatalogActive: boolean } };
+      readonly: { manualCodexConfig: { removeModelCatalogJson: boolean; keys: Array<{ key: string }> } };
     };
-    assert.equal(guidance.readonly.manualCodexConfig.staticCatalogActive, true);
+    assert.equal(guidance.readonly.manualCodexConfig.removeModelCatalogJson, false);
+    assert.equal(guidance.readonly.manualCodexConfig.keys.some((row) => row.key === "model_catalog_json"), false);
   } finally { fs.rmSync(home, { recursive: true, force: true }); }
 });
 
@@ -1207,7 +1168,11 @@ test("Web UI 按已保存的静态模式组合保存选择与配置，等待新�
     assert.equal(response.status, 200, await response.clone().text());
     assert.equal((await response.json() as { restarting: boolean }).restarting, false);
     assert.deepEqual(calls, ["gateway", "ready", "static:false"]);
-    assert.ok(fs.readFileSync(paths.configToml, "utf8").includes(codexCatalogFile(paths)));
+    // 目录统一经网关 /models 提供：静态文件发布，但不再写 model_catalog_json。
+    assert.deepEqual(JSON.parse(fs.readFileSync(codexCatalogFile(paths), "utf8")).models.map(
+      (model: { slug: string }) => model.slug,
+    ), ["selected-one"]);
+    assert.equal(fs.existsSync(paths.configToml), false);
     assert.equal((await handler(authedRequest("/ui/api/codex/restart", { method: "POST" }))).status, 200);
     assert.deepEqual(calls, ["gateway", "ready", "static:false", "ready", "codex"]);
   } finally { await upstream.close(); fs.rmSync(home, { recursive: true, force: true }); }
@@ -1839,9 +1804,17 @@ test("websocket upgrade requests to /ui never bridge upstream, on either port", 
     fs.writeFileSync(paths.gatewayConfig, `${JSON.stringify(config, null, 2)}\n`);
     fs.writeFileSync(paths.uiTokenFile, `${TOKEN}\n`, { mode: 0o600 });
     // 网关默认不启动 UI：两个服务显式分开启动，模拟生产形态。
-    const server = startGateway(config, "invalid");
+    const server = startTestGateway(config, paths);
     const uiServer = startWebUiServer(config, { paths });
     assert.ok(uiServer, "loopback config must start the ui server");
+    const originalWebSocket = globalThis.WebSocket;
+    let upstreamDials = 0;
+    globalThis.WebSocket = new Proxy(originalWebSocket, {
+      construct() {
+        upstreamDials++;
+        throw new Error("UI 路径不得拨号上游 WebSocket");
+      },
+    });
     const requestStatus = (port: number, requestPath: string): Promise<number> =>
       new Promise<number>((resolve, reject) => {
         // 带 Upgrade 头的 /ui 请求曾会被 responsesWebSocketTarget 桥接转发上游（426），
@@ -1864,7 +1837,9 @@ test("websocket upgrade requests to /ui never bridge upstream, on either port", 
       assert.equal(await requestStatus(modelPort, "/ui/api/config"), 404);
       // UI 端口（网关端口 + 1）上由 UI 处理器接管：按缺令牌回 401，而不是升级连接。
       assert.equal(await requestStatus(uiServer.port!, "/ui/api/config"), 401);
+      assert.equal(upstreamDials, 0);
     } finally {
+      globalThis.WebSocket = originalWebSocket;
       uiServer?.stop(true);
       server.stop(true);
     }

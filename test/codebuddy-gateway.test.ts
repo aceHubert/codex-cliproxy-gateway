@@ -2,15 +2,19 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { test as testOutsideHostScope } from "node:test";
 import { createCodebuddyAdapter, validateCodebuddyConfig } from "@agent-proxy/codebuddy";
 import { createCodebuddyCatalogStore } from "@agent-proxy/codebuddy/catalog";
 import { CodebuddyCredentialError, type CodebuddyCredential } from "@agent-proxy/codebuddy/credentials";
 import fingerprintData from "@agent-proxy/codebuddy/fingerprint-data.json";
 import { CODEBUDDY_AGENT_SYSTEM_PROMPT, CODEBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_CLI_VERSION, CODEBUDDY_WORKBUDDY_VERSION } from "@agent-proxy/codebuddy/request-context";
+import { getHostServices, withHostServices } from "@agent-proxy/plugin-api";
 import { agentConfigEnabled } from "../apps/gateway/src/config.ts";
 import { createConfiguredPluginRegistry, createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
+import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts";
 import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
@@ -32,7 +36,7 @@ test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求�
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", codebuddy: true, upstreamOnly: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   };
-  const adapter = createCodebuddyAdapter(config, {
+  const adapter = withFixtureAdapterHost(config, gatewayFixturePaths(directory), () => createCodebuddyAdapter(config, {
     cacheDirectory: directory, catalogMode: "manual",
     credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
     setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
@@ -42,7 +46,7 @@ test("CodeBuddy manual 等待启动目录且不挂心跳，reload 更新请求�
       await ready;
       return Response.json(configData());
     },
-  });
+  }));
   try {
     const initial = adapter.catalog();
     const explicit = adapter.refreshCatalog();
@@ -77,11 +81,11 @@ test("CodeBuddy manual 显式刷新无缓存失败会报错", { timeout: 60_000 
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", codebuddy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   };
-  const adapter = createCodebuddyAdapter(adapterConfig, {
+  const adapter = withFixtureAdapterHost(adapterConfig, gatewayFixturePaths(directory), () => createCodebuddyAdapter(adapterConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
     credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
     fetch: async () => { throw new Error("network down"); },
-  });
+  }));
   try {
     await assert.rejects(adapter.refreshCatalog(), /没有可用的本地缓存/);
   } finally {
@@ -197,8 +201,7 @@ interface FixtureContext {
 
 async function fixture(run: (context: FixtureContext) => Promise<void>): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-gateway-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const paths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: true, upstreamOnly: false,
@@ -229,7 +232,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
           "fake-cpa-key",
           "invalid",
           new ThreadRoutingState(), new Set<string>(),
-          path.join(directory, "models-cache.json"),
+          paths.modelsCacheFile,
           undefined,
           undefined,
           {
@@ -250,6 +253,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
               close: () => {},
             },
             cacheDirectory: directory,
+            codexModelsCacheFile: paths.modelsCacheFile,
             fetch: async (url, init) => {
               if (url.endsWith("/v3/config")) {
                 catalogFetches.push(new Headers(init.headers));
@@ -261,7 +265,7 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
               }
               throw new Error(`测试未模拟的上游请求: ${url}`);
             },
-          },
+          }, undefined, undefined, undefined, paths,
         );
         handlers.push(handler);
         return handler;
@@ -271,8 +275,6 @@ async function fixture(run: (context: FixtureContext) => Promise<void>): Promise
   } finally {
     globalThis.fetch = originalFetch;
     handlers.forEach((handler) => handler.close());
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -431,8 +433,10 @@ test("旧无地域前缀本地拒绝；显式地域缺凭据不回退", async ()
 
 test("凭据错误返回 503 configuration_error，带重新登录指引", async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-gw-cred-"));
+  const paths = gatewayFixturePaths(directory);
+  let handler: ReturnType<typeof createGatewayHandler> | undefined;
   try {
-    const handler = createGatewayHandler(
+    handler = createGatewayHandler(
       {
         qoder: false, agy: false, opencodeZen: false,
         host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: true, upstreamOnly: false,
@@ -440,7 +444,7 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
         catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
       },
       "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
-      path.join(directory, "models-cache.json"), undefined, undefined,
+      paths.modelsCacheFile, undefined, undefined,
       {
         credentialCache: {
           forProduct: async () => { throw new CodebuddyCredentialError("CodeBuddy 凭据已过期；请在桌面端重新登录"); },
@@ -449,15 +453,15 @@ test("凭据错误返回 503 configuration_error，带重新登录指引", async
         },
         cacheDirectory: directory,
         fetch: async () => { throw new Error("不得发起上游请求"); },
-      },
+      }, undefined, undefined, undefined, paths,
     );
     const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 503);
     const payload = await response.json() as Json;
     assert.match(payload.error.message, /重新登录/);
     assert.equal(payload.error.type, "configuration_error");
-    handler.close();
   } finally {
+    handler?.close();
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -597,6 +601,7 @@ async function retryFixture(
   chat?: (authorization: string | null, writeLogin: (file: string, accessToken: string, domain: string, issuer: string) => void) => Response,
 ): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cb-gw-retry-"));
+  const paths = gatewayFixturePaths(directory);
   const authDir = path.join(directory, "auth");
   fs.mkdirSync(authDir);
   const chats: ChatCall[] = [];
@@ -616,10 +621,11 @@ async function retryFixture(
       catalogPath: path.join(directory, "catalog.json"), logDir: path.join(directory, "logs"),
     },
     "fake-cpa-key", "invalid", new ThreadRoutingState(), new Set<string>(),
-    path.join(directory, "models-cache.json"), undefined, undefined,
+    paths.modelsCacheFile, undefined, undefined,
     {
       authDirectory: authDir,
       cacheDirectory: directory,
+      codexModelsCacheFile: paths.modelsCacheFile,
       fetch: async (url, init) => {
         if (url.endsWith("/v3/config")) return Response.json(configData());
         if (url.endsWith("/v2/chat/completions")) {
@@ -629,7 +635,7 @@ async function retryFixture(
         }
         throw new Error(`测试未模拟的上游请求: ${url}`);
       },
-    },
+    }, undefined, undefined, undefined, paths,
   );
   try {
     await run({ handler, authDir, chats, writeLogin });
@@ -734,9 +740,77 @@ test("请求日志不落 token 明文", async () => {
   });
 });
 
+testOutsideHostScope("CodeBuddy 在宿主作用域外交错消费两个实例的响应时写入各自日志", { timeout: 60_000 }, async () => {
+  await fixture(async ({ config, directory }) => {
+    const enabled = { ...config, requestLogging: true };
+    const model = "codebuddy-intl/gpt-5.6-luna";
+    let aborts = 0;
+    const instances = ["甲", "乙", "关闭请求日志", "上游失败", "取消响应"].map((marker, index) => {
+      const home = path.join(directory, marker);
+      const paths = gatewayFixturePaths(home);
+      const instanceConfig = { ...enabled, requestLogging: index !== 2 };
+      const processLog = { file: path.join(home, "gateway.log"), maxBytes: 100_000 };
+      const host = createGatewayHostServices(instanceConfig, processLog, paths);
+      const adapter = withHostServices(host, () => createCodebuddyAdapter(instanceConfig, {
+        processLog, cacheDirectory: home, refreshCatalogOnStart: false,
+        credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
+        fetch: async (_url, init) => {
+          if (index === 4) init?.signal?.addEventListener("abort", () => { aborts++; }, { once: true });
+          if (index === 3) {
+            return new Response(`data: ${JSON.stringify({ error: { message: `${marker}: ${ACCESS_TOKEN}` } })}\n\n`,
+              { headers: { "content-type": "text/event-stream" } });
+          }
+          return chatUpstream(marker);
+        },
+      }));
+      return { adapter, marker, paths, processLog };
+    });
+    try {
+      // 使用原生 node:test，避免测试宿主掩盖适配器回调丢失上下文。
+      assert.throws(getHostServices, /插件主机上下文未初始化/);
+      const responses = await Promise.all(instances.map(({ adapter }) =>
+        adapter.forward(request(model), { model, stream: true, input: "你好" }),
+      ));
+      assert.throws(getHostServices, /插件主机上下文未初始化/);
+      const results = await Promise.all(responses.map((response, index) =>
+        index === 4 ? response.body!.cancel() : index === 3 ? response.text() : decoded(response),
+      ));
+      assert.equal(aborts, 1);
+      for (const [index, { marker, paths, processLog }] of instances.entries()) {
+        if (index === 3) {
+          assert.match(results[index] as string, /event: response.failed/);
+          assert.ok(!(results[index] as string).includes(ACCESS_TOKEN));
+        } else if (index !== 4) {
+          assert.equal((results[index] as Json).output[0].content[0].text, marker);
+        }
+        if (index === 2) {
+          assert.equal(fs.existsSync(paths.logDir), false);
+          assert.equal(fs.existsSync(processLog.file), false);
+          continue;
+        }
+        const files = fs.readdirSync(paths.logDir);
+        assert.equal(files.length, 1);
+        assert.match(files[0]!, /^codebuddy-v1-responses-http-\d{14}\.log$/);
+        const log = fs.readFileSync(path.join(paths.logDir, files[0]!), "utf8");
+        assert.equal(log.match(/--- response status: /g)?.length, 1);
+        assert.match(log, index === 4 ? /--- response status: 499/ : /--- response status: 200/);
+        assert.ok(log.includes(index === 4 ? "response_cancelled" : marker));
+        for (const other of instances) if (other.marker !== marker) assert.ok(!log.includes(other.marker));
+        for (const token of [ACCESS_TOKEN, REFRESH_TOKEN, INBOUND_OAUTH, "private-account"]) assert.ok(!log.includes(token));
+        const summary = fs.readFileSync(processLog.file, "utf8");
+        assert.equal(summary.match(/POST \/v1\/responses -> \d{3}/g)?.length, 1);
+        assert.ok(summary.includes(`POST /v1/responses -> ${index === 4 ? 499 : index === 3 ? 502 : 200}`));
+        assert.ok(!summary.includes(ACCESS_TOKEN));
+      }
+    } finally {
+      for (const { adapter } of instances) adapter.close();
+    }
+  });
+});
+
 test("upstream-only 模式下 CodeBuddy 消费静态目录并拦截插件请求", async () => {
   await fixture(async ({ create, directory }) => {
-    // 独立 handler 不负责生产运行目录发布；模拟模型命令已完成静态合成。
+    // 先模拟模型命令已发布的静态快照，再验证启动刷新只改写当前实例。
     fs.writeFileSync(path.join(directory, "codex-catalog.json"), JSON.stringify({ models: [
       { slug: "test-cpa", priority: 0 },
       { slug: "codebuddy-intl/gpt-5.6-luna", priority: 100 },
@@ -747,11 +821,14 @@ test("upstream-only 模式下 CodeBuddy 消费静态目录并拦截插件请求"
       chatResponse: () => chatUpstream(),
       catalogResponse: () => { fetched++; return Response.json(configData()); },
     });
-    await handler.modelsReady();
     const models = await handler(new Request("http://127.0.0.1:8320/v1/models"));
     const catalog = await models.json() as Json;
     assert.ok(JSON.stringify(catalog).includes("codebuddy-intl/"), "插件目录不受 default 模式影响");
     assert.deepEqual(catalog.data.map((model: Json) => model.id), ["test-cpa", "codebuddy-intl/gpt-5.6-luna"]);
+    await handler.modelsReady();
+    const published = JSON.parse(fs.readFileSync(path.join(directory, "codex-catalog.json"), "utf8")) as Json;
+    assert.deepEqual(published.models.map((model: Json) => model.slug),
+      ["test-cpa", "codebuddy-intl/gpt-5.6-luna", "workbuddy-intl/gpt-5.6-luna"]);
     const response = await handler(request("codebuddy-intl/gpt-5.6-luna", { stream: false }));
     assert.equal(response.status, 200);
     assert.equal(fetched, 2, "两个产品各刷新一次，启动与目录查询复用同一轮刷新");
@@ -822,7 +899,9 @@ test("适配器目录投影与网关关闭时不装配插件", async () => {  co
       host: "127.0.0.1", port: 8320, mountPath: "/v1", prefix: "cliproxy/",
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
     };
-    const enabled = createCodebuddyAdapter({ ...base, codebuddy: true }, {
+    const paths = gatewayFixturePaths(directory);
+    const enabledConfig = { ...base, codebuddy: true };
+    const enabled = withFixtureAdapterHost(enabledConfig, paths, () => createCodebuddyAdapter(enabledConfig, {
       credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       refreshCatalogOnStart: false,
@@ -830,13 +909,15 @@ test("适配器目录投影与网关关闭时不装配插件", async () => {  co
         if (url.endsWith("/v3/config")) return Response.json(configData());
         return chatUpstream("ok");
       },
-    });
-    const catalog = await enabled.catalog();
-    assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/gpt-5.6-luna"]);
-    enabled.close();
-    const disabled = createConfiguredPluginRegistry({ ...base, codebuddy: false });
-    assert.deepEqual(disabled.plugins, []);
-    await disabled.close();
+    }));
+    try {
+      const catalog = await enabled.catalog();
+      assert.deepEqual(catalog.models.map((model) => model.slug).sort(), ["codebuddy-intl/gpt-5.6-luna"]);
+    } finally { enabled.close(); }
+    const disabled = createConfiguredPluginRegistry({ ...base, codebuddy: false }, {}, undefined, paths);
+    try {
+      assert.deepEqual(disabled.plugins, []);
+    } finally { await disabled.close(); }
     const cbUpstreamOnly = { ...base, codebuddy: true, upstreamOnly: true };
     assert.equal(agentConfigEnabled(cbUpstreamOnly, "codebuddy"), true);
     assert.equal(agentConfigEnabled({ ...base, codebuddy: true }, "codebuddy"), true);
@@ -858,7 +939,8 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
       officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1",
       catalogPath: path.join(directory, "catalog.json"),
     };
-    const adapter = createCodebuddyAdapter({ ...base, codebuddy: true }, {
+    const adapterConfig = { ...base, codebuddy: true };
+    const adapter = withFixtureAdapterHost(adapterConfig, gatewayFixturePaths(directory), () => createCodebuddyAdapter(adapterConfig, {
       credentialCache: { forProduct: internationalCredential, refresh: () => {}, close: () => {} },
       cacheDirectory: directory,
       setInterval: ((callback: () => void, delay: number) => {
@@ -871,7 +953,7 @@ test("适配器启动即刷新目录，并注册可回收的定时刷新", async
         fetches++;
         return Response.json(configData());
       },
-    });
+    }));
     // 启动刷新是 fire-and-forget：等待一轮微任务后应已落到磁盘缓存。
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(fetches, 1, "构造适配器时强制刷新一次");
@@ -894,9 +976,11 @@ test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "cb-cli-"));
   const oldHome = process.env.HOME;
   const oldCodexHome = process.env.CODEX_HOME;
+  const oldRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
   const oldLog = console.log;
   process.env.HOME = home;
   delete process.env.CODEX_HOME;
+  delete process.env.CODEX_CLIPROXY_HOME;
   const printed: string[] = [];
   console.log = (value?: unknown) => { printed.push(String(value)); };
   const oldWrite = process.stdout.write.bind(process.stdout);
@@ -987,6 +1071,8 @@ test("config --codebuddy 只管开关并写入审计；codebuddy --switch 是账
     else process.env.HOME = oldHome;
     if (oldCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = oldCodexHome;
+    if (oldRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
+    else process.env.CODEX_CLIPROXY_HOME = oldRuntimeHome;
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

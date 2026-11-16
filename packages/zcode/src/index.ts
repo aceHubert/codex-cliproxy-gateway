@@ -12,7 +12,7 @@ import {
   zcodeUpstreamModel,
 } from "./catalog.ts";
 import { clientSigningVerifyRejection, ZcodeClientSigning } from "./client-signing.ts";
-import { createZcodeConfigCache, readZcodeAPIKeyProviders, ZcodeConfigError,zcodeConfigPresent, type ZcodeAPIKeyProvider, type ZcodeConfigCache, type ZcodeFamily, type ZcodeProviderSnapshot, type ZcodeSelection } from "./config.ts";
+import { createZcodeConfigCache, readZcodeAPIKeyProviders, readZcodeJwt, ZcodeConfigError,zcodeConfigPresent, type ZcodeAPIKeyProvider, type ZcodeConfigCache, type ZcodeFamily, type ZcodeProviderSnapshot, type ZcodeSelection } from "./config.ts";
 import { ZcodeEndpointRouting } from "./endpoint-routing.ts";
 import { zcodeStartPlanEntitledFromLog } from "./plans.ts";
 import { buildZcodeModelHeaders, createZcodeContexts, decorateZcodeBody, readZcodeIdentity, zcodePlan, type ZcodeIdentity } from "./request-context.ts";
@@ -249,6 +249,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
     ? dependencies.endpointRouting ?? new ZcodeEndpointRouting({
       identity,
       fetch: (url, init) => fetchUpstream(url, init),
+      readZcodeJwt: () => readZcodeJwt(home),
     })
     : undefined;
   // coding plan 官方客户端签名：逐请求补 X-Client-* 签名头；fail-open，失败按未签名继续。
@@ -338,27 +339,31 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
       // 渠道（zai/bigmodel）只在转发时按当前套餐快照判定，用于鉴权与日志分流；模型 ID 不携带渠道。
       let family: ZcodeFamily | undefined;
       let key = "";
+      let routingAuthorization = "";
       let upstreamUrl: string | undefined;
       let upstreamRequestHeaders: Headers | undefined;
       let upstreamRequestBody: unknown;
       let logged = false;
       const redact = (text: string) => {
-        if (!key) return text;
         // 错误正文可能以任意 JSON 转义形式回显 key（\/、\uXXXX 及多层反斜杠嵌套）：
         // 固定枚举变体漏掉转义形式时，客户端反序列化 JSON 即可还原完整密钥。逐字符
         // 生成四种互斥形式（裸字符、反斜杠+字符、反斜杠+u 十六进制两种大小写），
         // 保证每个字符位置的匹配分解唯一，避免灾难性回溯。
-        const pattern = [...key].map((char) => {
-          const escaped = char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
-          const hex = char.codePointAt(0)!.toString(16).padStart(4, "0");
-          return `(?:${escaped}|\\\\{1,4}${escaped}|\\\\{1,4}u${hex}|\\\\{1,4}u${hex.toUpperCase()})`;
-        }).join("");
-        let result = text.replace(new RegExp(pattern, "gu"), "***");
-        let variant = key;
-        // 错误正文可能把请求又序列化成 JSON 字符串，连同转义形式一起遮蔽。
-        for (let depth = 0; depth < 4; depth++) {
-          result = result.replaceAll(variant, "***");
-          variant = JSON.stringify(variant).slice(1, -1);
+        let result = text;
+        for (const secret of [key, routingAuthorization.replace(/^Bearer\s+/iu, "")]) {
+          if (!secret) continue;
+          const pattern = [...secret].map((char) => {
+            const escaped = char.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+            const hex = char.codePointAt(0)!.toString(16).padStart(4, "0");
+            return `(?:${escaped}|\\\\{1,4}${escaped}|\\\\{1,4}u${hex}|\\\\{1,4}u${hex.toUpperCase()})`;
+          }).join("");
+          result = result.replace(new RegExp(pattern, "gu"), "***");
+          let variant = secret;
+          // 错误正文可能把请求又序列化成 JSON 字符串，连同转义形式一起遮蔽。
+          for (let depth = 0; depth < 4; depth++) {
+            result = result.replaceAll(variant, "***");
+            variant = JSON.stringify(variant).slice(1, -1);
+          }
         }
         return result;
       };
@@ -447,17 +452,20 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
         // 该请求的全部上游调用（含视觉续跑腿）统一走选定的传输。
         const send = startPlan ? startPlanFetch : fetchUpstream;
         const baseUpstreamUrl = `${snapshot.baseURL}${snapshot.baseURL.endsWith("/v1") ? "/messages" : "/v1/messages"}`;
-        const routedUrl = startPlan
+        const routing = startPlan
           // start-plan 中继地址固定且校验请求形态，不参与端点重映射；query 按官方形态剥离。
-          ? startPlanUpstreamUrl(baseUpstreamUrl)
+          ? { url: startPlanUpstreamUrl(baseUpstreamUrl) }
           : endpointRouting
             // 跟随 z.ai 服务端下发的端点映射（如 zcode.z.ai ultra 中继）；resolve 内部 fail-open，失败保持原 URL。
-            ? (await endpointRouting.resolve(baseUpstreamUrl, key)).url
-            : baseUpstreamUrl;
+            ? await endpointRouting.resolve(baseUpstreamUrl, key)
+            : { url: baseUpstreamUrl };
+        const routedUrl = routing.url;
         upstreamUrl = routedUrl;
         // 从当前快照重建协议头与会话归因，不采信入站客户端的 ZCode 身份或授权头。
         const context = contexts.resolve(request, snapshot);
         const headers = buildZcodeModelHeaders(identity, context, zcodePlan(snapshot), key);
+        for (const [name, value] of Object.entries("headers" in routing ? routing.headers ?? {} : {})) headers.set(name, value);
+        routingAuthorization = headers.get("x-zcode-authorization") ?? "";
         // 中继按官方形态校验 start-plan 请求；官方 start-plan 流量不带 anthropic-beta。
         if (!startPlan) {
           const beta = request.headers.get("anthropic-beta")?.trim();
@@ -499,6 +507,7 @@ function buildZcodeAdapter(config: AgentConfig, dependencies: ZcodeDependencies 
                   prompt,
                   headers: async () => {
                     const requestHeaders = buildZcodeModelHeaders(identity, context, zcodePlan(snapshot), key);
+                    for (const [name, value] of Object.entries("headers" in routing ? routing.headers ?? {} : {})) requestHeaders.set(name, value);
                     if (signable) await clientSigning!.decorate(requestHeaders, signingScope);
                     return requestHeaders;
                   },

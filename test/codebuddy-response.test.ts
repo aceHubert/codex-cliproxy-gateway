@@ -196,6 +196,59 @@ test("上游改写过的折叠工具名按骨架唯一映射回声明工具", as
   assert.equal(call.arguments, "{\"cmd\":\"ls\"}");
 });
 
+test("上游给平铺声明名套命名空间前缀回吐时按唯一后缀映射回声明工具", async () => {
+  // 实测 CodeBuddy 腿：客户端声明平铺名（安全名直通，无前缀无哈希），模型按
+  // 自家命名空间风格回吐 `tool_functions__<name>`，骨架全名不匹配。
+  const tools = toolsMap([
+    ["exec_command", { name: "exec_command", custom: false }],
+  ]);
+  const prefixed = sse([
+    chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "tool_functions__exec_command", arguments: "{\"cmd\":\"ls\"}" } }] }),
+    chunk({}, "tool_calls"),
+  ]);
+  const response = await createCodebuddyResponse("responses", prefixed, { model: "m", tools, stream: false });
+  const result = await response.json() as Json;
+  assert.equal(result.status, "completed");
+  const call = result.output.find((item: Json) => item.type === "function_call");
+  assert.ok(call, "带命名空间前缀的调用名应映射回平铺声明工具");
+  assert.equal(call.name, "exec_command");
+  assert.equal(call.namespace, undefined);
+});
+
+test("声明折叠名而上游只回吐裸名时同样映射回声明工具", async () => {
+  const tools = toolsMap([
+    ["tool_functions___exec_command___09e59a0e69fd", { name: "exec_command", custom: false, namespace: "functions" }],
+  ]);
+  const bare = sse([
+    chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "exec_command", arguments: "{\"cmd\":\"ls\"}" } }] }),
+    chunk({}, "tool_calls"),
+  ]);
+  const response = await createCodebuddyResponse("responses", bare, { model: "m", tools, stream: false });
+  const result = await response.json() as Json;
+  assert.equal(result.status, "completed");
+  const call = result.output.find((item: Json) => item.type === "function_call");
+  assert.ok(call, "裸调用名应映射回折叠声明的命名空间工具");
+  assert.equal(call.name, "exec_command");
+  assert.equal(call.namespace, "functions");
+});
+
+test("后缀兜底匹配歧义时不猜测，调用被忽略且流正常完成", async () => {
+  const tools = toolsMap([
+    ["exec_command", { name: "exec_command", custom: false }],
+    ["command", { name: "command", custom: false }],
+  ]);
+  // `tool_functions__exec_command` 的骨架同时以 _exec_command 与 _command 结尾
+  const ambiguous = sse([
+    chunk({ tool_calls: [{ index: 0, id: "c1", type: "function", function: { name: "tool_functions__exec_command", arguments: "{}" } }] }),
+    chunk({}, "tool_calls"),
+  ]);
+  const response = await createCodebuddyResponse("responses", ambiguous, { model: "m", tools, stream: false });
+  const result = await response.json() as Json;
+  assert.equal(result.status, "completed");
+  assert.ok(!result.output.some((item: Json) => item.type === "function_call"), "后缀歧义名不得映射到任何工具");
+  assert.match(JSON.stringify(result.output), /未声明的工具/);
+});
+
 test("骨架匹配歧义时不猜测，调用被忽略且流正常完成", async () => {
   const tools = toolsMap([
     ["fn_a", { name: "dup", custom: false }],

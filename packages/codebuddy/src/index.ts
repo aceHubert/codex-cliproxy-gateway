@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import path from "node:path";
-import { bindHostMethods, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol, type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
+import { bindHostMethods, getHostServices, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol, type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import {
   codebuddyModelProduct,
   codebuddyModelRegion,
@@ -183,6 +183,7 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
       return updateCatalogMeta(await catalogStore.reload());
     },
     async forward(request: Request, input: Record<string, unknown>, to: ClientProtocol = "responses", mapResult?: (payload: Record<string, unknown>) => Response): Promise<Response> {
+      const host = getHostServices();
       const start = Date.now();
       const requestTime = localTime();
       const incoming = new URL(request.url);
@@ -229,22 +230,27 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
         logged = true;
         const durationMs = Date.now() - start;
         const at = incoming.pathname + incoming.search;
-        logExchange(sink, group, {
-          requestTime, method: request.method, url: at,
-          reqHeaders: request.headers, reqBody: redactValue(input),
-          status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
-        }, family);
-        if (status >= 400 || logicalError) {
-          logGatewayError(sink?.processLog, {
-            requestTime, method: request.method, url: at,
-            status: logicalError && status < 400 ? 502 : status,
-            message: redact(logicalError ?? body), upstreamUrl, durationMs,
+        try {
+          // 响应体由调用方消费，流式收尾时显式回到当前请求所属的主机。
+          withHostServices(host, () => {
+            logExchange(sink, group, {
+              requestTime, method: request.method, url: at,
+              reqHeaders: request.headers, reqBody: redactValue(input),
+              status, resHeaders: headers, resBody: redact(body), upstreamUrl, upstreamRequestHeaders, upstreamRequestBody, durationMs,
+            }, family);
+            if (status >= 400 || logicalError) {
+              logGatewayError(sink?.processLog, {
+                requestTime, method: request.method, url: at,
+                status: logicalError && status < 400 ? 502 : status,
+                message: redact(logicalError ?? body), upstreamUrl, durationMs,
+              });
+            } else {
+              logRequestSummary(sink?.processLog, {
+                requestTime, method: request.method, url: at, status, upstreamUrl, durationMs,
+              });
+            }
           });
-        } else {
-          logRequestSummary(sink?.processLog, {
-            requestTime, method: request.method, url: at, status, upstreamUrl, durationMs,
-          });
-        }
+        } catch { /* 观测失败不能改变业务响应。 */ }
       };
       const fail = (status: number, message: string, type?: string) => {
         const response = codebuddyError(status, redact(message), type);
@@ -348,20 +354,24 @@ function buildCodebuddyAdapter(config: AgentConfig, dependencies: CodebuddyDepen
           return fail(upstream.status, guidance, "upstream_error");
         }
         let chunks = "";
+        let cancelled = false;
         // anthropic 源默认非流式；responses/chat 源仅在客户端声明 stream 时流式返回。
         const stream = !mapResult && input.stream === true;
         const response = await createCodebuddyResponse(to, upstream, {
           model: String(input.model), tools: translated.tools, stream, signal: abort.signal,
-          sanitizeError: (error) => ({
-            code: typeof error.code === "string" ? redact(error.code) : "upstream_error",
-            message: typeof error.message === "string" ? redact(error.message) : "CodeBuddy 上游响应失败",
-          }),
+          sanitizeError: (error) => {
+            cancelled = error.code === "response_cancelled" && error.upstream_error === undefined;
+            return {
+              code: typeof error.code === "string" ? redact(error.code) : "upstream_error",
+              message: typeof error.message === "string" ? redact(error.message) : "CodeBuddy 上游响应失败",
+            };
+          },
           abort: () => { abort.abort(); cleanup(); },
           onChunk: (chunk) => { if (sink) chunks += chunk; },
           onComplete: (payload) => {
             cleanup();
             const stripped = translated.dropped.length ? `\n--- stripped built-in tools: ${translated.dropped.join(", ")} ---` : "";
-            if (!mapResult) log(stream ? 200 : payload.status === "failed" ? 502 : 200,
+            if (!mapResult) log(cancelled ? 499 : stream ? 200 : payload.status === "failed" ? 502 : 200,
               stream ? `${chunks}${stripped}\n--- response.${payload.status} ---\n${JSON.stringify(redactValue(payload))}` : `${JSON.stringify(redactValue(payload))}${stripped}`,
               new Headers({ "content-type": stream ? "text/event-stream" : "application/json" }),
               payload.status === "failed" ? JSON.stringify(payload.error ?? "响应失败") : undefined);

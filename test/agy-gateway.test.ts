@@ -13,10 +13,11 @@ import { createGatewayHostServices } from "../apps/gateway/src/host-services.ts"
 import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { validateConfiguredPlugins } from "../apps/gateway/src/plugin-config.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { gatewayFixturePaths, withFixtureAdapterHost } from "./gateway-fixture-paths.ts";
 import test from "./host-test.ts";
 import { matchesPluginUpgrade } from "./plugin-routing-fixture.ts";
 import type { AgyCredentials } from "@agent-proxy/agy/credentials";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import type { GatewayConfig, ResolvedPaths } from "../apps/gateway/src/types.ts";
 
 type Json = Record<string, any>;
 const TIMEOUT = { timeout: 60_000 };
@@ -34,7 +35,7 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   };
-  const adapter = createAgyAdapter(wideConfig, {
+  const adapter = withFixtureAdapterHost(wideConfig, gatewayFixturePaths(directory), () => createAgyAdapter(wideConfig, {
     cacheDirectory: directory, catalogMode: "manual", credentials: async () => credential(),
     setInterval: (() => { schedules++; throw new Error("manual 不应创建心跳"); }) as typeof setInterval,
     fetch: async (url, init) => {
@@ -46,7 +47,7 @@ test("agy manual 等待启动目录、不挂心跳，reload 同时更新档位�
       inferred.push((JSON.parse(String(init.body)) as Json).model);
       return upstream();
     },
-  });
+  }));
   try {
     const initial = adapter.catalog();
     const explicit = adapter.refreshCatalog();
@@ -86,10 +87,10 @@ test("agy manual 显式刷新无缓存失败会报错", TIMEOUT, async () => {
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true,
     officialBaseUrl: "https://official.invalid/v1", upstreamBaseUrl: "https://cpa.invalid/v1", catalogPath: path.join(directory, "catalog.json"),
   };
-  const adapter = createAgyAdapter(baseConfig, {
+  const adapter = withFixtureAdapterHost(baseConfig, gatewayFixturePaths(directory), () => createAgyAdapter(baseConfig, {
     cacheDirectory: directory, catalogMode: "manual", refreshCatalogOnStart: false,
     credentials: async () => credential(), fetch: async () => { throw new Error("network down"); },
-  });
+  }));
   try {
     await assert.rejects(adapter.refreshCatalog(), /没有可用的本地缓存/);
   } finally {
@@ -136,15 +137,14 @@ function upstream(text = "TIME_WAIT 是主动关闭方等待 2MSL 的状态", pa
 interface Fixture {
   directory: string;
   config: GatewayConfig;
-  create: (overrides?: Partial<GatewayConfig>, dependencies?: Partial<AgyDependencies>) => ReturnType<typeof createGatewayHandler>;
+  create: (overrides?: Partial<GatewayConfig>, dependencies?: Partial<AgyDependencies>, paths?: ResolvedPaths) => ReturnType<typeof createGatewayHandler>;
   inferBodies: Json[];
   inferCredentials: Array<AgyCredentials | null>;
 }
 
 async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamResponse: () => Response = upstream): Promise<void> {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-gateway-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = directory;
+  const fixturePaths = gatewayFixturePaths(directory);
   const config: GatewayConfig = {
     opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", zcode: false, codebuddy: false, qoder: false, agy: true,
@@ -163,7 +163,7 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
   try {
     await run({
       directory, config, inferBodies, inferCredentials,
-      create(overrides = {}, dependencies = {}) {
+      create(overrides = {}, dependencies = {}, paths = fixturePaths) {
         const defaultFetch = async (url: string, init?: RequestInit): Promise<Response> => {
           const target = String(url);
           if (target.includes(":fetchAvailableModels")) {
@@ -179,15 +179,16 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
           throw new Error(`未模拟的 agy 上游调用：${target}`);
         };
         const handler = createGatewayHandler({ ...config, ...overrides }, "fake-cpa-key", "invalid",
-          new ThreadRoutingState(), new Set<string>(), path.join(directory, "models-cache.json"), undefined,
-          { file: path.join(directory, "gateway.log"), maxBytes: 100_000 }, undefined, undefined,
+          new ThreadRoutingState(), new Set<string>(), paths.modelsCacheFile, undefined,
+          { file: paths.stdoutLog, maxBytes: 100_000 }, undefined, undefined,
           {
-            cacheDirectory: directory,
+            cacheDirectory: paths.runtimeHome,
+            codexModelsCacheFile: paths.modelsCacheFile,
             refreshCatalogOnStart: false,
             ...dependencies,
             fetch: dependencies.fetch ?? defaultFetch,
             credentials: dependencies.credentials ?? (async () => credential()),
-          });
+          }, undefined, paths);
         handlers.push(handler);
         return handler;
       },
@@ -195,8 +196,6 @@ async function fixture(run: (fixture: Fixture) => Promise<void>, upstreamRespons
   } finally {
     handlers.forEach((handler) => handler.close());
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(directory, { recursive: true, force: true });
   }
 }
@@ -368,22 +367,16 @@ test("agy 上游 400 的调试转储受 debug 开关控制并写入日志目录"
   }, failing);
 
   await fixture(async ({ directory, create }) => {
-    // logDir 未配置时回退运行主目录（CODEX_CLIPROXY_HOME 可重定向），目录不存在也能直写。
+    // 显式解析环境覆盖的运行目录，未创建日志目录时也能直接写入调试转储。
     const envHome = path.join(directory, "env-home");
-    const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-    process.env.CODEX_CLIPROXY_HOME = envHome;
-    try {
-      const handler = create({ debug: true, logDir: undefined });
-      await handler(new Request("http://127.0.0.1:8327/v1/models"));
-      const response = await handler(request(MODEL));
-      assert.equal(response.status, 502);
-      assert.ok(fs.existsSync(path.join(envHome, "logs", "agy-debug-400.json")));
-      // 不再从 catalogPath 位置倒推：catalog 同目录不产生调试文件。
-      assert.equal(fs.existsSync(path.join(directory, "agy-debug-400.json")), false);
-    } finally {
-      if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-      else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    }
+    const paths = resolvePaths({ HOME: directory, CODEX_CLIPROXY_HOME: envHome });
+    const handler = create({ debug: true, logDir: undefined }, {}, paths);
+    await handler(new Request("http://127.0.0.1:8327/v1/models"));
+    const response = await handler(request(MODEL));
+    assert.equal(response.status, 502);
+    assert.ok(fs.existsSync(path.join(envHome, "logs", "agy-debug-400.json")));
+    // 不再从 catalogPath 位置倒推：catalog 同目录不产生调试文件。
+    assert.equal(fs.existsSync(path.join(directory, "agy-debug-400.json")), false);
   }, failing);
 });
 
@@ -443,6 +436,74 @@ test("agy 合并条目按 reasoning effort 选择档位，显式档位 slug 兼�
     const explicit = await handler(request("agy/gemini-3.8-flash-high", { reasoning: { effort: "low" } }));
     assert.equal(explicit.status, 200);
     assert.equal(inferBodies.at(-1)!.model, "gemini-3.8-flash-high");
+  });
+});
+
+test("agy 四档目录经网关转发保留 xhigh 模型，显式变体同样可调用", TIMEOUT, async () => {
+  await fixture(async ({ create, inferBodies }) => {
+    const tiers = ["low", "medium", "high", "xhigh"];
+    const handler = create(undefined, {
+      fetch: async (url, init) => {
+        if (url.includes(":fetchAvailableModels")) return Response.json({ models: Object.fromEntries(
+          tiers.map((tier) => [`gemini-4-hydrogen-${tier}`, { displayName: `Gemini 4 Hydrogen (${tier})` }]),
+        ) });
+        if (url.includes(":streamGenerateContent")) {
+          inferBodies.push(JSON.parse(String(init.body)));
+          return upstream();
+        }
+        throw new Error(`未模拟调用 ${url}`);
+      },
+    });
+    const catalogResponse = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=1.0.0"));
+    const models = (await catalogResponse.json() as Json).models as Json[];
+    const hydrogen = models.filter((model) => String(model.slug).startsWith("agy/"));
+    assert.deepEqual(hydrogen.map((model) => model.slug), ["agy/gemini-4-hydrogen"]);
+    assert.deepEqual(hydrogen[0]!.supported_reasoning_levels.map((level: Json) => level.effort), tiers);
+    for (const effort of [...tiers, "max"]) {
+      const response = await handler(request("agy/gemini-4-hydrogen", { reasoning: { effort } }));
+      assert.equal(response.status, 200);
+      await response.text();
+      const tier = effort === "max" ? "xhigh" : effort;
+      assert.equal(inferBodies.at(-1)!.model, `gemini-4-hydrogen-${tier}`);
+      assert.equal(inferBodies.at(-1)!.request.generationConfig.thinkingConfig.thinkingLevel,
+        tier === "xhigh" ? undefined : tier);
+    }
+    const explicit = await handler(request("agy/gemini-4-hydrogen-xhigh"));
+    assert.equal(explicit.status, 200);
+    await explicit.text();
+    assert.equal(inferBodies.at(-1)!.model, "gemini-4-hydrogen-xhigh");
+  });
+});
+
+test("agy 新版客户端指纹获取 Orchestrator 并保留真实模型 ID 转发", TIMEOUT, async () => {
+  await fixture(async ({ create, inferBodies }) => {
+    const modelId = "gemini-pro-orchestrator-g1-pro";
+    const handler = create(undefined, {
+      fetch: async (url, init) => {
+        const userAgent = new Headers(init.headers).get("user-agent")!;
+        assert.match(userAgent, /^antigravity\/cli\/1\.5\.7 \(/);
+        assert.match(userAgent, /; cl=1019769835; auth_method=consumer\)/);
+        if (url.includes(":fetchAvailableModels")) return Response.json({
+          models: { [modelId]: { displayName: "Orchestrator (Argon)", supportsThinking: true,
+            supportsImages: true, maxTokens: 1_048_576 } },
+          agentModelSorts: [{ groups: [{ modelIds: [modelId] }] }],
+        });
+        if (url.includes(":streamGenerateContent")) {
+          inferBodies.push(JSON.parse(String(init.body)));
+          return upstream();
+        }
+        throw new Error(`未模拟调用 ${url}`);
+      },
+    });
+    const response = await handler(new Request("http://127.0.0.1:8327/v1/models?client_version=1.0.0"));
+    const models = (await response.json() as Json).models as Json[];
+    const orchestrator = models.find((model) => model.slug === `agy/${modelId}`)!;
+    assert.equal(orchestrator.display_name, "AGY/Orchestrator (Argon)");
+    assert.deepEqual(orchestrator.supported_reasoning_levels, []);
+    const result = await handler(request(`agy/${modelId}`));
+    assert.equal(result.status, 200);
+    await result.text();
+    assert.equal(inferBodies.at(-1)!.model, modelId);
   });
 });
 
@@ -556,7 +617,7 @@ function runOutsideHostScope<T>(task: () => Promise<T>): Promise<T> {
 
 test("agy 流式响应在宿主作用域外消费仍写入请求日志", TIMEOUT, async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-stream-logging-"));
-  const paths = resolvePaths(process.env, directory);
+  const paths = gatewayFixturePaths(directory);
   const wideConfig: GatewayConfig = {
     zcode: false, codebuddy: false, qoder: false, opencodeZen: false,
     host: "127.0.0.1", port: 8327, mountPath: "/v1", prefix: "cliproxy/", agy: true, upstreamOnly: true,

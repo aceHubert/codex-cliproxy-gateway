@@ -6,7 +6,7 @@ import test from "node:test";
 import { PluginRegistry, type GatewayPlugin,type HttpRequestContext } from "@agent-proxy/plugin-api";
 import { createPluginGatewayHandler, responsesWebSocketTarget,startPluginGateway } from "../apps/gateway/src/gateway.ts";
 import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { checkFrameRouting } from "../apps/gateway/src/realtime.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import type { GatewayConfig } from "../apps/gateway/src/types.ts";
@@ -155,7 +155,8 @@ test("声明 WS 能力的插件收到真实服务器升级与会话事件", TIME
       message: (socket, data) => { handledMessages++; socket.send(`插件回声：${data}`); },
     }) ? undefined : new Response("升级失败", { status: 400 }),
   })]);
-  const server = runWithInstancePaths(paths, () => startPluginGateway(config, registry));
+  const server = startPluginGateway(config, registry, "invalid", undefined, undefined, undefined,
+    { runtimePaths: paths, apiKey: "" });
   try {
     const socket = new WebSocket(`ws://127.0.0.1:${server.port}/v1/responses`, {
       headers: { "x-codex-routing-hint": "model=example/model" },

@@ -19,29 +19,29 @@ import { buildZcodeModelHeaders, readZcodeIdentity,ZCODE_AGENT_SYSTEM_PROMPT, ty
 
 
 const identity: ZcodeIdentity = {
-  appVersion: "3.17.1", language: "zh-CN", timezone: "Asia/Shanghai",
+  appVersion: "3.18.0", language: "zh-CN", timezone: "Asia/Shanghai",
   platform: "darwin", arch: "arm64", osVersion: "24.0.0", deviceId: "device-mid-fixture",
 };
 const context = { requestId: "req", traceId: "trace", queryId: "query", sessionId: "session", sessionType: "main" as const };
 
-test("start-plan 官方提示词文本与 3.17.1 提取校验值逐字节一致", () => {
+test("start-plan 官方提示词文本与 3.18.0 提取校验值逐字节一致", () => {
   const sha8 = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
   // cli_prefix 与 agentSystemPrompt 是同一官方文本，单一来源（fingerprint-data.json）。
   assert.equal(sha8(fingerprintData.agentSystemPrompt), "7779642ea44a4696");
   assert.equal(sha8(promptTexts.identity), "aac4ba4cc7b555b3");
-  assert.equal(sha8(promptTexts.desktopContext), "86e0396775d5ed0e");
+  assert.equal(sha8(promptTexts.desktopContext), "39a1e86c93452c01");
   assert.equal(sha8(promptTexts.dynamicBehavior), "7d843753f3adae93");
   assert.equal(sha8(promptTexts.contextManagement), "406a0480d88086cd");
 });
 
-test("start-plan system 重组为官方 3.17.1 三段块，网关旁白并入第三段末尾", () => {
+test("start-plan system 重组为官方 3.18.0 三段块，网关旁白并入第三段末尾", () => {
   const blocks = zcodeStartPlanSystemBlocks({ family: "zai", upstreamModel: "GLM-5.3-Flash", identity },
     `${ZCODE_AGENT_SYSTEM_PROMPT}\n\n本通道无法执行以下服务器内置工具`);
   assert.equal(blocks.length, 3);
   assert.equal(blocks[0]!.text, fingerprintData.agentSystemPrompt);
   // 官方 assembleSystemMessages：cli_prefix 段不带 cache_control，stable/dynamic 段带。
   assert.equal(blocks[0]!.cache_control, undefined);
-  assert.equal(blocks[1]!.text, `${promptTexts.identity}\n\n${promptTexts.desktopContext}`);
+  assert.equal(blocks[1]!.text, promptTexts.identity);
   assert.equal(blocks[1]!.cache_control!.type, "ephemeral");
   assert.ok(blocks[2]!.text.startsWith(`\n\n${promptTexts.dynamicBehavior}`));
   assert.ok(blocks[2]!.text.includes(promptTexts.contextManagement));
@@ -70,6 +70,10 @@ test("start-plan 正文重整：官方 meta_user 环境turn 前置、三段块�
   assert.equal(messages[0]!.role, "user");
   const contextText = messages[0]!.content[0]!.text;
   assert.ok(contextText.startsWith("# Environment\n"));
+  assert.ok(contextText.includes(promptTexts.desktopContext));
+  assert.ok(contextText.indexOf("# ZCode Desktop Context") < contextText.indexOf("You are powered by"));
+  assert.ok(!contextText.includes("### Interactive views"));
+  assert.ok(!system.some((block) => block.text.includes("# ZCode Desktop Context")));
   assert.ok(contextText.includes("You are powered by the model named zai-api/GLM-5.3-Flash."));
   assert.ok(contextText.includes("Today's date is 2026-10-29."));
   const metadata = body.metadata as { user_id: string };
@@ -108,7 +112,7 @@ test("start-plan 模型请求头携带官方归因头与 ai-sdk UA，不携带 x
   assert.equal(headers.get("x-api-key"), null);
   assert.equal(headers.get("accept"), null);
   assert.equal(headers.get("x-query-id"), null);
-  assert.equal(headers.get("user-agent"), "ZCode/3.17.1 ai-sdk/anthropic/3.0.81");
+  assert.equal(headers.get("user-agent"), "ZCode/3.18.0 ai-sdk/anthropic/3.0.81");
   const coding = buildZcodeModelHeaders(identity, context, "coding-plan", "business-key");
   assert.equal(coding.get("x-zcode-query-source"), null);
   assert.equal(coding.get("x-api-key"), "business-key");

@@ -133,6 +133,11 @@
       "description": "未登录 ChatGPT、只将请求转发到上游，不使用本地授权账号配置模型。",
       "type": "boolean"
     },
+    "codexStaticCatalog": {
+      "description": "仅在 upstreamOnly=true 时生效：true 时受管写入 model_catalog_json 指向 codex-catalog.json，Codex 只在重启时读取静态目录（插件目录热更新不会反映到已打开的选择器）；缺省 false：Codex 经网关 /models 实时拉取目录。动态模式下该值被忽略。",
+      "type": "boolean",
+      "default": false
+    },
     "zcode": {
       "description": "是否启用 ZCode；默认开启, 开启后自动发现 ZCode Desktop 登录。",
       "type": "boolean",

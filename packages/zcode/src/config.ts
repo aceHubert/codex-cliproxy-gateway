@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { decryptZcodeCredential } from "./credential-cipher.ts";
+import { decryptZcodeCredential, resolveZcodeCredentialPath, ZcodeCredentialError, type ZcodeCredentialCipherDependencies } from "./credential-cipher.ts";
 import { readZcodeIndividualCredential } from "./individual-credentials.ts";
 import {
   readZcodeIndividualProjectLocation,
@@ -129,22 +129,28 @@ function isPlan(selection: ZcodeSelection): boolean {
  * biz JWT（credentials 的 zcodejwttoken）。实测 OAuth access token 会被 zcode-plan
  * 中继与 billing 一并 401；镜像里的旧 JWT 仅作官方同款回退（readRoute 提供）。
  */
-function startPlanApiKey(credentials: Record<string, unknown>, _family: ZcodeFamily, env: NodeJS.ProcessEnv = process.env): string {
+function startPlanApiKey(credentials: Record<string, unknown>, env: NodeJS.ProcessEnv = process.env, cipherDependencies: ZcodeCredentialCipherDependencies = {}): string {
   const value = credentials.zcodejwttoken;
   if (typeof value !== "string" || !value.trim()) return "";
   try {
-    return decryptZcodeCredential(value, env).trim();
-  } catch {
+    return decryptZcodeCredential(value, env, cipherDependencies).trim();
+  } catch (error) {
+    if (error instanceof ZcodeCredentialError) throw new ZcodeConfigError(error.message);
     invalid("Start Plan 凭据解密失败");
   }
 }
+/** 端点目录只使用当前本地业务 JWT，不触发 OAuth 换票或写回配置。 */
+export function readZcodeJwt(home: string, env: NodeJS.ProcessEnv = process.env): string {
+  return startPlanApiKey(readOptionalPreferred(home, "credentials.json"), env, { filePath: resolveZcodeCredentialPath(home) });
+}
 /** 个人套餐项目令牌签发的登录态来源；解密失败必须明确报错，不能静默降级。 */
-function oauthAccessToken(credentials: Record<string, unknown>, family: ZcodeFamily, env: NodeJS.ProcessEnv = process.env): string {
+function oauthAccessToken(credentials: Record<string, unknown>, family: ZcodeFamily, env: NodeJS.ProcessEnv = process.env, cipherDependencies: ZcodeCredentialCipherDependencies = {}): string {
   const value = credentials[`oauth:${family}:access_token`];
   if (typeof value !== "string" || !value.trim()) return "";
   try {
-    return decryptZcodeCredential(value, env).trim();
-  } catch {
+    return decryptZcodeCredential(value, env, cipherDependencies).trim();
+  } catch (error) {
+    if (error instanceof ZcodeCredentialError) throw new ZcodeConfigError(error.message);
     invalid("ZCode 个人套餐 OAuth 凭据解密失败；请在 ZCode 中重新登录当前账号");
   }
 }
@@ -533,7 +539,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
   let route: (Omit<ZcodeProviderSnapshot, "expiresAt" | "apiKey"> & { apiKey?: string }) | undefined;
   let routeFailure: ZcodeConfigError | undefined;
   let oauthProjection: string | undefined;
-  let teamCredential: { identity: string; fingerprint: string; apiKey: string } | undefined;
+  let teamCredential: { identity: string; fingerprint: string; apiKey: string; expiresAt: number } | undefined;
   let teamCredentialFingerprint: string;
   let teamForceRefresh = false;
   /** 个人套餐项目令牌（ZCode 3.16+）：落盘 Key 缺失时按 OAuth 在线签发并缓存。 */
@@ -725,7 +731,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         try {
           const credentials = readOptionalPreferred(home, "credentials.json");
           if (selection.kind === "team-coding-plan") {
-            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
+            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env, { filePath: resolveZcodeCredentialPath(home) });
             const nextFingerprint = teamInputs.fingerprint;
             if (teamCredentialFingerprint !== nextFingerprint) {
               teamCredentialFingerprint = nextFingerprint;
@@ -734,19 +740,19 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           } else {
             // 只保存当前计划渠道的授权字段与个人账号 Key 投影；全局 active_provider 不能改变模型选择。
             const individual = selection.kind === "individual-coding-plan"
-              ? readZcodeIndividualCredential(credentials, selection.family, dependencies.env)
+              ? readZcodeIndividualCredential(credentials, selection.family, dependencies.env, { filePath: resolveZcodeCredentialPath(home) })
               : undefined;
             if (individual?.state === "unavailable") {
               // ZCode 3.16 起个人套餐 Key 不再落盘 credentials.json：账号身份与
               // OAuth 登录态仍可解析时改为在线签发项目令牌；镜像回退禁令不变，
               // config.json 里的旧 Key 可能属于上一账号。
               const identity = individual.identity ?? "";
-              const oauth = identity ? oauthAccessToken(credentials, selection.family, dependencies.env) : "";
+              const oauth = identity ? oauthAccessToken(credentials, selection.family, dependencies.env, { filePath: resolveZcodeCredentialPath(home) }) : "";
               if (identity && oauth) {
                 individualMintMode = true;
                 individualIdentity = identity;
                 individualOauth = oauth;
-                individualLocation = readZcodeIndividualProjectLocation(credentials, selection.family, identity, dependencies.env);
+                individualLocation = readZcodeIndividualProjectLocation(credentials, selection.family, identity, dependencies.env, { filePath: resolveZcodeCredentialPath(home) });
                 const nextFingerprint = zcodeIndividualTokenFingerprint(oauth, identity, individualLocation);
                 const mintChanged = individualMintFingerprint !== nextFingerprint;
                 individualMintFingerprint = nextFingerprint;
@@ -762,7 +768,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
               const key = individual?.state === "available"
                 ? individual.apiKey
                 : selection.kind === "start-plan"
-                  ? startPlanApiKey(credentials, selection.family, dependencies.env)
+                  ? startPlanApiKey(credentials, dependencies.env, { filePath: resolveZcodeCredentialPath(home) })
                   : "";
               personalApiKey = key || undefined;
               const projection = JSON.stringify([
@@ -777,6 +783,11 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
             }
           }
         } catch (error) {
+          if (error instanceof ZcodeCredentialError) {
+            snapshot = undefined;
+            credential = undefined;
+            throw new ZcodeConfigError(error.message);
+          }
           if (selection.kind === "team-coding-plan") {
             snapshot = undefined;
             credential = undefined;
@@ -820,7 +831,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         if (!teamInputs || !fingerprint || mustResolve) {
           if (!teamInputs || !fingerprint) {
             const credentials = readOptionalPreferred(home, "credentials.json");
-            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env);
+            teamInputs = readZcodeTeamCredentialInputs(credentials, selection.family, dependencies.env, { filePath: resolveZcodeCredentialPath(home) });
             teamCredentialFingerprint = teamInputs.fingerprint;
           }
           const generation = ++credentialGeneration;
@@ -832,11 +843,12 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
           clearTimeout(expiryTimer);
           const promise = (async () => {
             try {
-              const apiKey = await resolveZcodeTeamApiKey(selection, targetInputs, dependencies);
+              const minted = await resolveZcodeTeamApiKey(selection, targetInputs, dependencies);
+              const { apiKey } = minted;
               if (credentialGeneration !== generation || selection.kind !== "team-coding-plan") return;
               dependencies.onCredentialBuild?.();
-              credential = { apiKey, expiresAt: expiresAt(apiKey) };
-              teamCredential = { identity, fingerprint: teamCredentialFingerprint!, apiKey };
+              credential = minted;
+              teamCredential = { identity, fingerprint: teamCredentialFingerprint!, ...minted };
               if (credential.expiresAt !== undefined && credential.expiresAt <= now()) invalid("ZCode 当前业务 Key 已过期");
               const currentRoute = route;
               if (!currentRoute) invalid("ZCode 当前路由不可用");
@@ -862,7 +874,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
         const cachedTeamCredential = teamCredential;
         if (!cachedTeamCredential) invalid("ZCode 团队项目凭据不可用");
         const apiKey = cachedTeamCredential.apiKey;
-        const expires = expiresAt(apiKey);
+        const expires = cachedTeamCredential.expiresAt;
         credential = { apiKey, expiresAt: expires };
         if (expires !== undefined && expires <= now()) {
           expiryCheckedKey = apiKey;
@@ -971,7 +983,7 @@ export function createZcodeConfigCache(homeDirectory: string, dependencies: Zcod
       failure = undefined;
       if (keyChanged || hadFailure) armExpiry();
     } catch (error) {
-      failure = error instanceof ZcodeConfigError ? error : new ZcodeConfigError("无法检查 ZCode 当前配置，请修复配置");
+      failure = error instanceof ZcodeConfigError ? error : new ZcodeConfigError(error instanceof ZcodeCredentialError ? error.message : "无法检查 ZCode 当前配置，请修复配置");
       clearTimeout(expiryTimer);
     } finally {
       // 快照身份变化才通知：watch 驱动的账号/套餐/模型集合变化由此重建对外目录。

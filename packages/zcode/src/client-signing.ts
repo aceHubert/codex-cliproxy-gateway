@@ -4,7 +4,7 @@
  * 官方客户端对 coding plan 且官方域名的模型请求会附加一组逐请求签名头
  * （X-App-Id/X-Client-Ts/X-Client-Version/X-Client-Sig/X-Client-Nonce/X-Client-Pow），
  * 服务端据此把流量归因为官方 ZCode 客户端。签名身份通过握手建立：客户端用
- * `{id}.{secret}` 形态的业务 key 派生 HKDF 密钥，向上游换取一份用该密钥加密的
+ * `{id}.{secret}` 业务 Key 或项目访问 JWT 派生 HKDF 密钥，向上游换取一份加密的
  * Ed25519 私钥，再对每个请求的时间戳/随机数做 Ed25519 签名与轻量 PoW。
  *
  * 本模块逐字节复刻该协议，全部输入来自网关已持有的业务 key；任何一步失败都
@@ -28,8 +28,29 @@ const MAX_KEY_ENTRIES = 32;
 const VERIFY_SIGNATURE_INVALID = "VERIFY_SIGNATURE_INVALID";
 const VERIFY_APIKEY_EXPIRED = "VERIFY_APIKEY_EXPIRED";
 
-/** 业务 key 必须是恰好一个点分隔的 `{id}.{secret}`；账号 JWT（两个点）不适用。 */
-export function parseClientSigningCredential(apiKey: string): { apiKeyId: string; apiKeySecret: string } | undefined {
+interface ClientSigningCredential {
+  apiKeyId: string;
+  apiKeySecret: string;
+  handshakeField?: "accessToken";
+}
+
+/** 官方支持业务 Key 与项目访问令牌；普通账号 JWT 不能用作客户端签名身份。 */
+export function parseClientSigningCredential(apiKey: string): ClientSigningCredential | undefined {
+  const parts = apiKey.split(".");
+  if (parts.length === 3 && parts[2]) {
+    try {
+      const decode = (value: string): unknown => JSON.parse(Buffer.from(atob(value.replace(/-/g, "+").replace(/_/g, "/")), "binary").toString("utf8"));
+      const header = decode(parts[0]!);
+      const payload = decode(parts[1]!);
+      if (header === null || typeof header !== "object" || Array.isArray(header)
+        || payload === null || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+      const format = header as Record<string, unknown>;
+      const claims = payload as Record<string, unknown>;
+      if (format.alg !== "HS256" || format.typ !== "JWT" || format.sign_type !== "SIGN"
+        || claims.token_use !== "project_access" || typeof claims.api_key !== "string" || !claims.api_key.trim()) return undefined;
+      return { apiKeyId: claims.api_key, apiKeySecret: apiKey, handshakeField: "accessToken" };
+    } catch { return undefined; }
+  }
   const separator = apiKey.indexOf(".");
   if (separator <= 0 || separator !== apiKey.lastIndexOf(".")) return undefined;
   if (!apiKey.slice(0, separator).trim() || !apiKey.slice(separator + 1).trim()) return undefined;
@@ -205,7 +226,7 @@ export class ZcodeClientSigning {
     } catch { /* 无效 baseUrl 视为无可作废的缓存。 */ }
   }
 
-  private beginHandshake(cacheKey: string, credential: { apiKeyId: string; apiKeySecret: string; apiKey: string }, origin: string): Promise<CryptoKey> {
+  private beginHandshake(cacheKey: string, credential: ClientSigningCredential & { apiKey: string }, origin: string): Promise<CryptoKey> {
     const promise = this.handshake(credential, origin).catch((error: unknown) => {
       this.keys.delete(cacheKey);
       // 失败不缓存结果，但短冷却避免上游故障时每个模型请求都打一次握手。
@@ -217,7 +238,7 @@ export class ZcodeClientSigning {
     return promise;
   }
 
-  private async handshake(credential: { apiKeyId: string; apiKeySecret: string; apiKey: string }, origin: string): Promise<CryptoKey> {
+  private async handshake(credential: ClientSigningCredential & { apiKey: string }, origin: string): Promise<CryptoKey> {
     const ts = String(this.now());
     const nonce = this.randomHexImpl(NONCE_BYTES);
     const hmacKey = await crypto.subtle.importKey(
@@ -229,7 +250,7 @@ export class ZcodeClientSigning {
     const response = await this.fetchImpl(`${origin}${HANDSHAKE_PATH}`, {
       method: "POST",
       headers: { Authorization: credential.apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ apiKey: credential.apiKey, nonce, sig, ts }),
+      body: JSON.stringify({ [credential.handshakeField ?? "apiKey"]: credential.apiKey, nonce, sig, ts }),
       redirect: "manual",
       signal: AbortSignal.timeout(this.handshakeTimeoutMs),
     });

@@ -18,6 +18,7 @@ import {
 import {
   applyModelCatalogToml,
   applyRoutingMode,
+  codexCatalogFile,
   formatErrorLog,
   parseMaxLogSize,
   parseMaxRequestLogs,
@@ -49,7 +50,8 @@ import { patchRootToml, readRootTomlString, restoreRootTomlKeys } from "../apps/
 import { configuredCatalogFile } from "../apps/gateway/src/upstream-catalog.ts";
 import test from "./host-test.ts";
 import type { ReadStream, WriteStream } from "node:tty";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import type { RealtimeProviderMode } from "../apps/gateway/src/realtime.ts";
+import type { GatewayConfig, ProcessLogTarget } from "../apps/gateway/src/types.ts";
 
 test("error logs include a timestamp separator and omit blank lines", () => {
   assert.equal(
@@ -280,29 +282,29 @@ test("routing mode targets a per-upstream catalog file", () => {
   assert.equal(config.catalogPath, "/user/custom.json");
 });
 
-test("model catalog toml accepts any managed catalog file and repoints to the active one", () => {
+test("model catalog toml writes or removes the managed pointer by staticCatalog flag", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-catalog-toml-test-"));
   const paths = resolvePaths({ HOME: home });
   const newapiCatalog = path.join(paths.runtimeHome, "newapi-catalog.json");
   try {
-    // 从 newapi 切回 cliproxy：config.toml 指向的 newapi-catalog.json 也是受管值，允许改写指向。
+    // 静态开关开启：受管指向（含 newapi 切换残留）统一改写到合成静态目录。
     const source = `model_catalog_json = "${newapiCatalog}"\n`;
-    const { patchedToml, previousCatalog } = applyModelCatalogToml(source, true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
+    const { patchedToml, previousCatalog } = applyModelCatalogToml(source, true, paths, managedRuntimeCatalogFiles(paths));
     assert.equal(previousCatalog, newapiCatalog);
-    assert.equal(readRootTomlString(patchedToml, "model_catalog_json"), paths.catalogFile);
+    assert.equal(readRootTomlString(patchedToml, "model_catalog_json"), codexCatalogFile(paths));
 
-    // 插件目录缓存也是受管值：历史 install 曾把 model_catalog_json 指向它们，必须允许迁移。
+    // 插件目录缓存也是受管值：历史 install 曾把 model_catalog_json 指向它们，同样允许改写。
     for (const pluginCatalog of installedPluginArtifactFiles(paths)) {
       const pluginSource = `model_catalog_json = "${pluginCatalog}"\n`;
-      const repointed = applyModelCatalogToml(pluginSource, true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
+      const repointed = applyModelCatalogToml(pluginSource, true, paths, managedRuntimeCatalogFiles(paths));
       assert.equal(repointed.previousCatalog, pluginCatalog);
-      assert.equal(readRootTomlString(repointed.patchedToml, "model_catalog_json"), paths.catalogFile);
-      const split = applyModelCatalogToml(pluginSource, false, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths));
-      assert.equal(readRootTomlString(split.patchedToml, "model_catalog_json"), undefined);
+      assert.equal(readRootTomlString(repointed.patchedToml, "model_catalog_json"), codexCatalogFile(paths));
+      const removed = applyModelCatalogToml(pluginSource, false, paths, managedRuntimeCatalogFiles(paths));
+      assert.equal(readRootTomlString(removed.patchedToml, "model_catalog_json"), undefined);
     }
 
     assert.throws(
-      () => applyModelCatalogToml('model_catalog_json = "/Users/test/my-catalog.json"\n', true, paths, paths.catalogFile, managedRuntimeCatalogFiles(paths)),
+      () => applyModelCatalogToml('model_catalog_json = "/Users/test/my-catalog.json"\n', true, paths, managedRuntimeCatalogFiles(paths)),
       /Refusing to replace unmanaged model_catalog_json/,
     );
   } finally {
@@ -989,7 +991,7 @@ async function waitForNewLogFile(
   }
 }
 
-function logTestConfig(logDir: string, maxRequestLogs = 0) {
+function logTestConfig(logDir: string, maxRequestLogs = 0): GatewayConfig & { logDir: string } {
   return {
     zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
     host: "127.0.0.1",
@@ -998,34 +1000,32 @@ function logTestConfig(logDir: string, maxRequestLogs = 0) {
     prefix: "cliproxy/",
     officialBaseUrl: "https://chatgpt.com/backend-api/codex",
     upstreamBaseUrl: "https://cliproxy.example/v1",
-    catalogPath: "/tmp/missing-catalog.json",
+    catalogPath: path.join(path.dirname(logDir), "catalog.json"),
     requestLogging: true,
     logDir,
     maxRequestLogs,
   };
 }
 
+function createLogTestHandler(
+  config: ReturnType<typeof logTestConfig>,
+  provider: RealtimeProviderMode = "invalid",
+  processLog?: ProcessLogTarget,
+) {
+  const directory = path.dirname(config.logDir);
+  const paths = resolvePaths({ HOME: directory, CODEX_HOME: path.join(directory, "codex") }, directory);
+  return createGatewayHandler(config, "proxy-key", provider, undefined, undefined, undefined, undefined,
+    processLog, undefined, undefined, undefined, undefined, paths);
+}
+
 test("request logs start with an ISO request-time separator", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-test-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler({
-      zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
-      host: "127.0.0.1",
-      port: 8320,
-      mountPath: "/v1",
-      prefix: "cliproxy/",
-      officialBaseUrl: "https://chatgpt.com/backend-api/codex",
-      upstreamBaseUrl: "https://cliproxy.example/v1",
-      catalogPath: "/tmp/missing-catalog.json",
-      requestLogging: true,
-      logDir,
-    }, "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: {
@@ -1044,8 +1044,6 @@ test("request logs start with an ISO request-time separator", async () => {
     assert.doesNotMatch(log, /secret-token|secret-account/);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1053,8 +1051,6 @@ test("request logs start with an ISO request-time separator", async () => {
 test("official and live traffic land in their own route log files", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-route-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("sdp-answer", {
@@ -1062,7 +1058,7 @@ test("official and live traffic land in their own route log files", async () => 
     headers: { location: "/v1/realtime/calls/rtc_test" },
   })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key", "builtin");
+    const handler = createLogTestHandler(logTestConfig(logDir), "builtin");
 
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
@@ -1096,8 +1092,6 @@ test("official and live traffic land in their own route log files", async () => 
     assert.equal(fs.readdirSync(logDir).some((name) => name.startsWith("cliproxy-cliproxy-")), false);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1105,13 +1099,11 @@ test("official and live traffic land in their own route log files", async () => 
 test("catalog, health, ui and favicon probes are excluded from request logs", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-skip-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     await handler(new Request("http://127.0.0.1:8320/healthz"));
     await handler(new Request("http://127.0.0.1:8320/v1/models"));
     // /ui 与 /favicon.ico 是浏览器打开 Web UI 时的页面与图标请求，不是模型调用。
@@ -1121,8 +1113,6 @@ test("catalog, health, ui and favicon probes are excluded from request logs", as
     assert.deepEqual(fs.existsSync(logDir) ? fs.readdirSync(logDir) : [], []);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1130,8 +1120,6 @@ test("catalog, health, ui and favicon probes are excluded from request logs", as
 test("requests outside the mount path get a local 404 and never reach the upstream or logs", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-outside-mount-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   let forwarded = 0;
@@ -1140,7 +1128,7 @@ test("requests outside the mount path get a local 404 and never reach the upstre
     return new Response("ok", { status: 200 });
   }) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     // /.well-known/appspecific/* 是 Chrome DevTools 对页面 origin 的自动探测：它曾
     // 被拼进上游 URL 转发并写进请求日志，是收紧边界的直接动因，必须锁死。
     for (const pathname of [
@@ -1159,8 +1147,6 @@ test("requests outside the mount path get a local 404 and never reach the upstre
     assert.deepEqual(fs.existsSync(logDir) ? fs.readdirSync(logDir) : [], []);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1168,8 +1154,6 @@ test("requests outside the mount path get a local 404 and never reach the upstre
 test("web ui paths on the model port stay local and point at the ui port", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-ui-port-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   let forwarded = 0;
@@ -1178,7 +1162,7 @@ test("web ui paths on the model port stay local and point at the ui port", async
     return new Response("ok", { status: 200 });
   }) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     const response = await handler(new Request("http://127.0.0.1:8320/ui"));
     assert.equal(response.status, 404);
     const payload = await response.json() as { error?: { hint?: string } };
@@ -1187,8 +1171,6 @@ test("web ui paths on the model port stay local and point at the ui port", async
     assert.equal(forwarded, 0);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1196,8 +1178,6 @@ test("web ui paths on the model port stay local and point at the ui port", async
 test("failed requests keep the full exchange in the route log and the digest in the process log", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-error-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const processLog = path.join(logDir, "gateway.log");
@@ -1205,16 +1185,7 @@ test("failed requests keep the full exchange in the route log and the digest in 
     throw new Error("upstream exploded");
   }) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(
-      logTestConfig(logDir),
-      "proxy-key",
-      "invalid",
-      new ThreadRoutingState(),
-      undefined,
-      undefined,
-      undefined,
-      { file: processLog, maxBytes: 0 },
-    );
+    const handler = createLogTestHandler(logTestConfig(logDir), "invalid", { file: processLog, maxBytes: 0 });
     const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1239,8 +1210,6 @@ test("failed requests keep the full exchange in the route log and the digest in 
     assert.match(fs.readFileSync(path.join(logDir, routeLog), "utf8"), /--- response status: 502/);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1248,8 +1217,6 @@ test("failed requests keep the full exchange in the route log and the digest in 
 test("logging does not buffer streaming responses", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-stream-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   let release = () => {};
@@ -1263,7 +1230,7 @@ test("logging does not buffer streaming responses", async () => {
     },
   }), { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     const response = await Promise.race([
       handler(new Request("http://127.0.0.1:8320/v1/responses", {
         method: "POST",
@@ -1281,8 +1248,6 @@ test("logging does not buffer streaming responses", async () => {
   } finally {
     release();
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1290,8 +1255,6 @@ test("logging does not buffer streaming responses", async () => {
 test("maxRequestLogs keeps the newest files across the whole directory", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-cap-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
@@ -1308,7 +1271,7 @@ test("maxRequestLogs keeps the newest files across the whole directory", async (
     }
     const before = new Set(fs.readdirSync(logDir));
 
-    const handler = createGatewayHandler(logTestConfig(logDir, 2), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir, 2));
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1323,8 +1286,6 @@ test("maxRequestLogs keeps the newest files across the whole directory", async (
     );
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1332,23 +1293,12 @@ test("maxRequestLogs keeps the newest files across the whole directory", async (
 test("successful requests get one process-log line naming the upstream, without the body", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-summary-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const processLog = path.join(logDir, "gateway.log");
   globalThis.fetch = (async () => new Response("SECRET-UPSTREAM-BODY", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(
-      logTestConfig(logDir),
-      "proxy-key",
-      "invalid",
-      new ThreadRoutingState(),
-      undefined,
-      undefined,
-      undefined,
-      { file: processLog, maxBytes: 0 },
-    );
+    const handler = createLogTestHandler(logTestConfig(logDir), "invalid", { file: processLog, maxBytes: 0 });
     const response = await handler(new Request("http://127.0.0.1:8320/v1/responses?trace=1", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1366,8 +1316,6 @@ test("successful requests get one process-log line naming the upstream, without 
     assert.match(fs.readFileSync(path.join(logDir, routeLog), "utf8"), /SECRET-UPSTREAM-BODY/);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1375,23 +1323,12 @@ test("successful requests get one process-log line naming the upstream, without 
 test("request summaries respect the process log size cap", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-summary-cap-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const processLog = path.join(logDir, "gateway.log");
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(
-      logTestConfig(logDir),
-      "proxy-key",
-      "invalid",
-      new ThreadRoutingState(),
-      undefined,
-      undefined,
-      undefined,
-      { file: processLog, maxBytes: 256 },
-    );
+    const handler = createLogTestHandler(logTestConfig(logDir), "invalid", { file: processLog, maxBytes: 256 });
     for (let i = 0; i < 6; i += 1) {
       await handler(new Request("http://127.0.0.1:8320/v1/responses", {
         method: "POST",
@@ -1408,8 +1345,6 @@ test("request summaries respect the process log size cap", async () => {
     );
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1431,8 +1366,6 @@ test("isRequestLogName recognizes request logs and spares process logs", () => {
 
 test("maxRequestLogs is applied at startup without waiting for new writes", () => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-sweep-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   try {
@@ -1451,7 +1384,7 @@ test("maxRequestLogs is applied at startup without waiting for new writes", () =
     fs.writeFileSync(path.join(logDir, "cliproxy-config-20260101000001.log"), "audit\n");
     fs.writeFileSync(path.join(logDir, "gateway.log"), "process\n");
 
-    createGatewayHandler(logTestConfig(logDir, 2), "proxy-key");
+    createLogTestHandler(logTestConfig(logDir, 2)).close();
 
     assert.deepEqual(fs.readdirSync(logDir).sort(), [
       "cliproxy-config-20260101000001.log",
@@ -1460,16 +1393,12 @@ test("maxRequestLogs is applied at startup without waiting for new writes", () =
       "gateway.log",
     ]);
   } finally {
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
 test("maxRequestLogs never deletes a log file that is still being written", () => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-active-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const active = "cliproxy-v1-responses-ws-live-session.log";
@@ -1486,7 +1415,7 @@ test("maxRequestLogs never deletes a log file that is still being written", () =
     }
     const release = retainLogFile(logDir, { name: active });
 
-    createGatewayHandler(logTestConfig(logDir, 1), "proxy-key");
+    createLogTestHandler(logTestConfig(logDir, 1)).close();
 
     // 保留计数只落在可裁剪的候选上：会话文件被跳过，候选是两个 http 文件，留最新的那个。
     assert.deepEqual(fs.readdirSync(logDir).sort(), [
@@ -1499,16 +1428,12 @@ test("maxRequestLogs never deletes a log file that is still being written", () =
     pruneLogDir(logDir, 1);
     assert.deepEqual(fs.readdirSync(logDir), ["cliproxy-v1-responses-http-20260101000003.log"]);
   } finally {
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
 test("a log file shared by several websocket sessions stays active until the last one releases", () => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-log-shared-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const shared = "cliproxy-v1-responses-ws-live-session.log";
@@ -1534,8 +1459,6 @@ test("a log file shared by several websocket sessions stays active until the las
     pruneLogDir(logDir, 1);
     assert.ok(!fs.existsSync(path.join(logDir, shared)), "pruned after the last release");
   } finally {
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -1543,16 +1466,14 @@ test("a log file shared by several websocket sessions stays active until the las
 test("request logs are unaffected by the gateway log size cap", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-reqcap-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
     // --max-log-size 只约束 gateway.log；请求日志完整写入，不因极小的上限被截断或滚动。
-    const config: GatewayConfig = logTestConfig(logDir);
+    const config = logTestConfig(logDir);
     config.maxGatewayLogBytes = 1;
-    const handler = createGatewayHandler(config, "proxy-key");
+    const handler = createLogTestHandler(config);
     const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1567,8 +1488,6 @@ test("request logs are unaffected by the gateway log size cap", async () => {
     assert.match(text, /--- response body ---/);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -2027,57 +1946,6 @@ test("config 按实例分派：实例未安装时不触碰默认服务", async (
   }
 });
 
-test("config 按实例分派：实例已安装时重启自己的 plist，不动默认 label", async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-instance-restart-"));
-  const previousHome = process.env.HOME;
-  const previousCodexHome = process.env.CODEX_HOME;
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.HOME = home;
-  delete process.env.CODEX_HOME;
-  const instanceA = path.join(home, "instance-a");
-  process.env.CODEX_CLIPROXY_HOME = instanceA;
-  fs.mkdirSync(instanceA, { recursive: true });
-  fs.writeFileSync(path.join(instanceA, "config.json"), JSON.stringify({
-    zcode: false, codebuddy: false, qoder: false, agy: false, opencodeZen: false,
-    host: "127.0.0.1", port: 8399, mountPath: "/v1", prefix: "cliproxy/",
-    officialBaseUrl: "https://official.example/v1", upstreamBaseUrl: "http://127.0.0.1:8317/v1",
-    catalogPath: path.join(instanceA, "catalog.json"), configVersion: GATEWAY_CONFIG_VERSION,
-  }));
-  const suffix = instanceMarker(instanceA);
-  const plistDir = path.join(home, "Library", "LaunchAgents");
-  fs.mkdirSync(plistDir, { recursive: true });
-  // A 已安装：带后缀的 plist 存在（假内容，bootstrap 会失败——只要证明操作打的是
-  // A 的 plist/label 而不是默认服务即可）；默认 plist 同样在场且内容必须原样保留。
-  const instancePlist = path.join(plistDir, `agent-proxy-gateway-${suffix}.plist`);
-  fs.writeFileSync(instancePlist, "instance-a-plist-not-loadable");
-  fs.writeFileSync(path.join(plistDir, "agent-proxy-gateway.plist"), "default-service-plist");
-  const originalLog = console.log;
-  const printed: string[] = [];
-  console.log = (line?: unknown) => { printed.push(String(line)); };
-  try {
-    // 重启走 A 的 plist：launchctl 对假 plist 的报错里必须出现后缀 plist 路径，
-    // 证明没有触碰默认 label；默认 plist 内容原样保留。
-    await assert.rejects(
-      runCli(["config", "--debug", "on"]),
-      (error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        return message.includes(`agent-proxy-gateway-${suffix}.plist`)
-          || message.includes(`agent-proxy-gateway-${suffix}`);
-      },
-    );
-    assert.equal(fs.readFileSync(path.join(plistDir, "agent-proxy-gateway.plist"), "utf8"),
-      "default-service-plist");
-  } finally {
-    console.log = originalLog;
-    process.env.HOME = previousHome;
-    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
-    else process.env.CODEX_HOME = previousCodexHome;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
 test("healthz 携带实例标记，waitForHealth 拒绝别的实例顶包", async () => {
   // 端口被另一个 agent-proxy 实例占用时，它的健康响应不能算作本实例启动成功。
   const intruder = Bun.serve({
@@ -2100,13 +1968,15 @@ test("healthz 携带实例标记，waitForHealth 拒绝别的实例顶包", asyn
     legacy.stop(true);
   }
 
-  // 网关自身的 healthz 输出本进程实例标记（运行主目录哈希）。
-  const handler = createGatewayHandler(logTestConfig("/tmp/ccp-healthz-logs"));
+  // 网关自身的 healthz 输出构造时所属实例的标记。
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "gateway-healthz-"));
+  const handler = createLogTestHandler(logTestConfig(path.join(directory, "logs")));
   try {
     const response = await handler(new Request("http://127.0.0.1:8320/healthz"));
-    assert.equal(response.headers.get("x-ccp-instance"), instanceMarker(resolvePaths().runtimeHome));
+    assert.equal(response.headers.get("x-ccp-instance"), instanceMarker(directory));
   } finally {
     handler.close();
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
@@ -2155,23 +2025,12 @@ test("config audit appends to the gateway log without standalone log files", asy
 test("protocol negotiation 426 is logged but kept out of the error digest", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-426-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   const processLog = path.join(logDir, "gateway.log");
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(
-      logTestConfig(logDir),
-      "proxy-key",
-      "invalid",
-      new ThreadRoutingState(),
-      undefined,
-      undefined,
-      undefined,
-      { file: processLog, maxBytes: 0 },
-    );
+    const handler = createLogTestHandler(logTestConfig(logDir), "invalid", { file: processLog, maxBytes: 0 });
     // Codex Desktop 每次会话都会先试探 Responses over WebSocket，被拒后降级到 HTTPS/SSE。
     const response = await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       headers: {
@@ -2193,8 +2052,6 @@ test("protocol negotiation 426 is logged but kept out of the error digest", asyn
     assert.doesNotMatch(fs.readFileSync(processLog, "utf8"), /!!!/);
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -3007,13 +2864,11 @@ test("completed empty compaction responses stay a structured 502", async () => {
 test("log groups come from the request path and stay filesystem-safe", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-group-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   globalThis.fetch = (async () => new Response("ok", { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     // 同一路径下的两种上游必须落进同一个文件——按上游命名会因 fallback 而误导。
     for (const model of ["gpt-5.6-luna", "cliproxy/claude-opus-4-6"]) {
       await handler(new Request("http://127.0.0.1:8320/v1/responses", {
@@ -3040,8 +2895,6 @@ test("log groups come from the request path and stay filesystem-safe", async () 
     }
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -3131,8 +2984,6 @@ test("log file names carry the transport, and one WebSocket session maps to one 
 test("request logs keep bodies intact for post-mortem analysis", async () => {
   const originalFetch = globalThis.fetch;
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-gateway-nolimit-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   fs.mkdirSync(logDir, { recursive: true });
   // 真实 Codex 请求体实测约 108KB；此前 50KB 截断会把 instructions 和 input 切掉。
@@ -3141,7 +2992,7 @@ test("request logs keep bodies intact for post-mortem analysis", async () => {
   const bigReply = `${"y".repeat(120_000)}${marker}`;
   globalThis.fetch = (async () => new Response(bigReply, { status: 200 })) as unknown as typeof fetch;
   try {
-    const handler = createGatewayHandler(logTestConfig(logDir), "proxy-key");
+    const handler = createLogTestHandler(logTestConfig(logDir));
     await handler(new Request("http://127.0.0.1:8320/v1/responses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3154,8 +3005,6 @@ test("request logs keep bodies intact for post-mortem analysis", async () => {
     assert.equal(log.match(new RegExp(marker, "g"))?.length, 2, "both request and response tails must survive");
   } finally {
     globalThis.fetch = originalFetch;
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });

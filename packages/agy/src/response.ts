@@ -1,3 +1,4 @@
+import { remapUndeclaredToolName } from "@agent-proxy/llm-bridge";
 import type { ClientProtocol } from "@agent-proxy/plugin-api";
 import type { AgyToolMap } from "./request.ts";
 
@@ -152,7 +153,7 @@ interface ClientRenderState {
 
 /**
  * AGY 自产 Responses SSE → Chat Completions chunks（含 [DONE]）。本渲染器属于
- * agy 插件包（不依赖桥接包）：解析自身产出的受信事件流并重组为客户端协议外壳，
+ * agy 插件包：解析自身产出的受信事件流并重组为客户端协议外壳，
  * 逐帧增量下发（非流式客户端由渲染器聚合）。
  */
 async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
@@ -247,7 +248,7 @@ async function renderChatClient(responsesSse: ReadableStream<Uint8Array>, state:
   return incrementalSseResponse(iterate(), responsesSse);
 }
 
-/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON（零桥接依赖，文本增量下发）。 */
+/** AGY 自产 Responses SSE → Gemini generateContent SSE / 完整 JSON，文本增量下发。 */
 async function renderGeminiClient(responsesSse: ReadableStream<Uint8Array>, state: ClientRenderState): Promise<Response> {
   let finish = "STOP";
   let model = state.model;
@@ -499,7 +500,7 @@ function sseHeaders(): Headers {
 
 /**
  * 四种客户端协议统一入口：responses 源沿用既有 Responses 输出；chat-completions /
- * anthropic / gemini 源由 AGY 自产 Responses SSE 独立渲染为对应协议外壳（零桥接依赖）。
+ * anthropic / gemini 源由 AGY 自产 Responses SSE 独立渲染为对应协议外壳。
  */
 export async function createAgyClientResponse(to: ClientProtocol, upstream: Response, options: AgyResponseOptions): Promise<Response> {
   if (to === "responses") return createAgyResponse(upstream, options);
@@ -644,9 +645,14 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
     const key = `tool:${index}`;
     if (blocks.has(key)) throw new Error(`Antigravity 重复的工具调用序号 ${index}`);
     const name = typeof call.name === "string" ? call.name : "";
-    if (!name) throw new Error("Antigravity functionCall 缺少 name");
-    const mapped = options.tools.get(name);
-    if (!mapped) throw new Error(`Antigravity 返回了未声明的工具：${name}`);
+    if (!name.trim()) throw new Error("Antigravity functionCall 缺少 name");
+    const args = record(call.args ?? {}, "functionCall.args");
+    const declaredName = options.tools.has(name) ? name : remapUndeclaredToolName(name, options.tools);
+    const mapped = declaredName === undefined ? undefined : options.tools.get(declaredName);
+    if (!mapped) {
+      appendMessageText("\n[网关] 已忽略上游调用的未声明工具，请仅使用已声明的工具。\n");
+      return;
+    }
     // 上游要求回放函数调用时携带 thoughtSignature：以 agn1: 信封放进 reasoning 项的
     // encrypted_content 随调用下发，客户端下一轮回传后由请求侧挂回 functionCall。
     if (signature) {
@@ -658,7 +664,6 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
     }
     const callId = `call_${crypto.randomUUID().replaceAll("-", "").slice(0, 24)}`;
     const itemId = `item_${crypto.randomUUID().replaceAll("-", "")}`;
-    const args = record(call.args ?? {}, "functionCall.args");
     const item: Json = mapped.custom
       ? { id: itemId, type: "custom_tool_call", call_id: callId, name: mapped.name, ...(mapped.namespace === undefined ? {} : { namespace: mapped.namespace }), status: "in_progress", input: "" }
       : { id: itemId, type: "function_call", call_id: callId, name: mapped.name, ...(mapped.namespace === undefined ? {} : { namespace: mapped.namespace }), status: "in_progress", arguments: "" };
@@ -712,6 +717,8 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
       yield event("response.created", { response: snapshot("in_progress") });
       yield event("response.in_progress", { response: snapshot("in_progress") });
       let toolIndex = 0;
+      // 独立 thoughtSignature 可能跨帧到达，由紧接的调用消费，包括被忽略的调用。
+      let pendingSignature: string | undefined;
       for await (const frame of readFrames(reader)) {
         if (canceled) return;
         if (frame.error !== undefined) {
@@ -742,16 +749,14 @@ async function streamResponses(body: ReadableStream<Uint8Array>, options: AgyRes
           for (const value of pending.splice(0)) yield value;
           continue;
         }
-        // thoughtSignature 可能独占一个 part（无 text/functionCall），也可能附着在
-        // functionCall part 上：独立出现的缓存给下一个函数调用，附着的一并下发。
-        let pendingSignature: string | undefined;
         for (const raw of content.parts) {
           const part = record(raw, "candidates[0].content.parts");
           const signature = typeof part.thoughtSignature === "string" && part.thoughtSignature
             ? part.thoughtSignature : undefined;
           if (part.functionCall !== undefined && part.functionCall !== null) {
-            openToolCall(toolIndex++, record(part.functionCall, "functionCall"), signature ?? pendingSignature);
+            const callSignature = signature ?? pendingSignature;
             pendingSignature = undefined;
+            openToolCall(toolIndex++, record(part.functionCall, "functionCall"), callSignature);
             continue;
           }
           if (signature) pendingSignature = signature;

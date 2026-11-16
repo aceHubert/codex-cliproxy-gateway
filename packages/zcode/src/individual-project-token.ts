@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { decryptZcodeCredential } from "./credential-cipher.ts";
+import { decryptZcodeCredential, ZcodeCredentialError, type ZcodeCredentialCipherDependencies } from "./credential-cipher.ts";
 import type { ZcodeFamily } from "./config.ts";
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -7,7 +7,6 @@ const LOCATION_PREFIX = "project-key-location:v1:";
 /** 指针元数据里 Coding Plan 场景的固定序号（客户端 di.CODING_PLAN）。 */
 const CODING_PLAN_SCENE = 1;
 const NON_TEAM_SELECTION = "non-team";
-const API_KEY_TYPE = 2;
 
 /** 项目令牌签发失败；消息面向用户，可直接透传为配置错误。 */
 export class ZcodeProjectTokenError extends Error {}
@@ -51,14 +50,15 @@ function host(family: ZcodeFamily): string {
 /**
  * ZCode 3.16 起个人套餐业务 Key 不再落盘，credentials.json 只保留指向
  * `organization/project/apiKey` 的指针（按账号隔离）。这里按当前账号身份与
- * 渠道解析同账号、非团队、Coding Plan 场景的指针；无法解密或形状不符按缺失
- * 处理，交给发现流程重建，与官方客户端的可恢复语义一致。
+ * 渠道解析同账号、非团队、Coding Plan 场景的指针；解密失败由用户修复，
+ * JSON 或指针结构无效时交给发现流程重建。
  */
 export function readZcodeIndividualProjectLocation(
   credentials: Record<string, unknown>,
   family: ZcodeFamily,
   identity: string,
   env: NodeJS.ProcessEnv = process.env,
+  cipherDependencies: ZcodeCredentialCipherDependencies = {},
 ): ZcodeIndividualProjectLocation | undefined {
   if (!identity) return undefined;
   const expected = host(family);
@@ -74,8 +74,11 @@ export function readZcodeIndividualProjectLocation(
     const value = credentials[key];
     if (typeof value !== "string" || !value.trim()) continue;
     let decoded: unknown;
-    try { decoded = JSON.parse(decryptZcodeCredential(value, env)); }
-    catch { continue; }
+    try { decoded = JSON.parse(decryptZcodeCredential(value, env, cipherDependencies)); }
+    catch (error) {
+      if (error instanceof ZcodeCredentialError) throw error;
+      continue;
+    }
     if (!isRecord(decoded)) continue;
     const organizationId = typeof decoded.organizationId === "string" ? decoded.organizationId.trim() : "";
     const projectId = typeof decoded.projectId === "string" ? decoded.projectId.trim() : "";
@@ -130,9 +133,9 @@ function responseData(envelope: Record<string, unknown>): unknown {
   return envelope.data;
 }
 
-async function mintProjectToken(
+export async function mintZcodeProjectToken(
   family: ZcodeFamily,
-  inputs: ZcodeIndividualTokenInputs,
+  inputs: Pick<ZcodeIndividualTokenInputs, "accessToken">,
   location: ZcodeIndividualProjectLocation,
   dependencies: ZcodeIndividualTokenDependencies,
 ): Promise<ZcodeIndividualApiKey> {
@@ -177,27 +180,34 @@ async function discoverProjectLocation(
   const organizations = isRecord(data) && Array.isArray(data.organizations) ? data.organizations : [];
   const projectIdOf = (item: unknown): string =>
     isRecord(item) && typeof item.projectId === "string" ? item.projectId.trim() : "";
-  // 个人（非团队）场景：与客户端一致取默认机构下第一个业务类型项目，无类型标注时取首个项目。
-  const project = organizations.flatMap((organization): { organizationId: string; projectId: string }[] => {
-    if (!isRecord(organization)) return [];
-    const organizationId = typeof organization.organizationId === "string" ? organization.organizationId.trim() : "";
-    const projects = Array.isArray(organization.projects) ? organization.projects.filter(isRecord) : [];
-    const selected = projects.find((item) => projectIdOf(item) && String(item.projectType ?? "").trim())
-      ?? projects.find((item) => projectIdOf(item));
-    const projectId = selected ? projectIdOf(selected) : "";
-    return organizationId && projectId ? [{ organizationId, projectId }] : [];
-  })[0];
+  // 个人套餐排除团队项目，并优先选择官方默认机构和默认项目。
+  const candidates = organizations.filter(isRecord).map((organization) => ({
+    organizationId: typeof organization.organizationId === "string" ? organization.organizationId.trim() : "",
+    organizationName: typeof organization.organizationName === "string" ? organization.organizationName : "",
+    projects: (Array.isArray(organization.projects) ? organization.projects.filter(isRecord) : [])
+      .filter((item) => projectIdOf(item) && String(item.projectType ?? "").trim() !== "2"),
+  })).filter((organization) => typeof organization.organizationId === "string" && organization.organizationId.trim() && organization.projects.length);
+  const organization = candidates.find((item) => typeof item.organizationName === "string" && item.organizationName.includes("默认机构")) ?? candidates[0];
+  const selected = organization?.projects.find((item) => typeof item.projectName === "string" && item.projectName.includes("默认项目")) ?? organization?.projects[0];
+  const project = organization && selected
+    ? { organizationId: String(organization.organizationId).trim(), projectId: projectIdOf(selected) } : undefined;
   if (!project) invalid("ZCode 个人套餐缺少可用的默认项目；请在 ZCode 中打开一次个人套餐");
   const list = await requestJson(`${apiHost}/api/biz/v1/organization/${encodeURIComponent(project.organizationId)}`
     + `/projects/${encodeURIComponent(project.projectId)}/api_keys`, {
     method: "GET",
-    headers: { Authorization: accessToken, "Content-Type": "application/json" },
+    headers: { Authorization: family === "zai" ? `Bearer ${accessToken}` : accessToken, "Content-Type": "application/json" },
   }, fetchImpl);
   const keys = responseData(list);
   const entries = Array.isArray(keys) ? keys.filter(isRecord) : [];
-  const keyEntry = entries.find((item) => item.keyType === API_KEY_TYPE
-    && typeof item.apiKey === "string" && item.apiKey.trim());
-  const apiKeyId = typeof keyEntry?.apiKey === "string" ? keyEntry.apiKey.trim() : "";
+  const keyEntry = entries.find((item) => item.name === "zcode-api-key"
+    && typeof item.apiKey === "string" && item.apiKey.trim())
+    ?? responseData(await requestJson(`${apiHost}/api/biz/v1/organization/${encodeURIComponent(project.organizationId)}`
+      + `/projects/${encodeURIComponent(project.projectId)}/api_keys`, {
+      method: "POST",
+      headers: { Authorization: family === "zai" ? `Bearer ${accessToken}` : accessToken, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "zcode-api-key", usageScene: CODING_PLAN_SCENE }),
+    }, fetchImpl));
+  const apiKeyId = isRecord(keyEntry) && typeof keyEntry.apiKey === "string" ? keyEntry.apiKey.trim() : "";
   if (!apiKeyId) invalid("ZCode 个人套餐项目缺少可用的 API Key；请在 ZCode 中打开一次个人套餐重建");
   return { ...project, apiKeyId };
 }
@@ -215,7 +225,7 @@ export async function resolveZcodeIndividualApiKey(
 ): Promise<ZcodeIndividualApiKey> {
   if (location) {
     try {
-      return await mintProjectToken(family, inputs, location, dependencies);
+      return await mintZcodeProjectToken(family, inputs, location, dependencies);
     } catch (error) {
       if (error instanceof ZcodeProjectTokenError && error.message === "ZCODE_PROJECT_KEY_UNAVAILABLE") {
         // 指针已失效（服务端 404）：与客户端一致转入发现流程重建。
@@ -225,5 +235,5 @@ export async function resolveZcodeIndividualApiKey(
     }
   }
   const discovered = await discoverProjectLocation(family, inputs.accessToken, dependencies);
-  return mintProjectToken(family, inputs, discovered, dependencies);
+  return mintZcodeProjectToken(family, inputs, discovered, dependencies);
 }

@@ -3,12 +3,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { PluginRegistry,type GatewayPlugin } from "@agent-proxy/plugin-api";
-import { createGatewayHandler, responsesWebSocketTarget, startGateway } from "../apps/gateway/src/gateway-composition.ts";
+import { createGatewayHandler, responsesWebSocketTarget } from "../apps/gateway/src/gateway-composition.ts";
 import { createPluginGatewayHandler } from "../apps/gateway/src/gateway.ts";
 import { requestModelReload } from "../apps/gateway/src/model-reload.ts";
 import { codexCatalogFile } from "../apps/gateway/src/model-state.ts";
-import { resolvePaths, runWithInstancePaths } from "../apps/gateway/src/paths.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import { ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
+import { startTestGateway } from "./gateway-start-fixture.ts";
 import test from "./host-test.ts";
 import { routingRegistry } from "./plugin-routing-fixture.ts";
 import type { ZcodeProviderSnapshot } from "@agent-proxy/zcode/config";
@@ -182,7 +183,7 @@ test("静态首次发布失败后可经显式通知恢复而无需重启网关",
   config.upstreamOnly = true;
   fs.writeFileSync(paths.catalogFile, "invalid");
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify(config));
-  const server = runWithInstancePaths(paths, () => startGateway(config));
+  const server = startTestGateway(config, paths);
   try {
     assert.equal((await fetch(new URL("healthz", server.url))).status, 503);
     assert.equal((await fetch(new URL("ui", server.url))).status, 404);
@@ -205,7 +206,7 @@ test("静态首次发布失败后可经显式通知恢复而无需重启网关",
 test("运行中网关经修订通知重载配置并保持监听服务", TIMEOUT, async () => {
   const { directory, config, paths } = fixture();
   fs.writeFileSync(paths.gatewayConfig, JSON.stringify(config));
-  const server = runWithInstancePaths(paths, () => startGateway(config));
+  const server = startTestGateway(config, paths);
   try {
     const before = await fetch(new URL("healthz", server.url));
     assert.equal(before.status, 200);
@@ -241,10 +242,12 @@ test("动态网关的 default 推理不等待其它 agent 启动目录，健康�
   });
   config.zcode = true;
   config.upstreamBaseUrl = new URL("v1", upstream.url).href;
-  const server = runWithInstancePaths(paths, () => startGateway(config, "invalid", undefined, {
-    cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
-    configCache: { get: () => catalogReady, close: () => { closed++; } },
-  }));
+  const server = startTestGateway(config, paths, "invalid", {
+    zcodeDependencies: {
+      cacheDirectory: paths.runtimeHome, endpointRouting: null, clientSigning: null,
+      configCache: { get: () => catalogReady, close: () => { closed++; } },
+    },
+  });
   let healthCompleted = false;
   let modelsCompleted = false;
   const health = fetch(new URL("healthz", server.url)).then((response) => { healthCompleted = true; return response; });

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { logGatewayError, logRequestSummary } from "./process-log.ts";
 import { httpLogFile, localTime, logGroupFromPath, logRealtimeEvent, type LogFileRef, type RequestLogSink } from "./request-log.ts";
-import { ThreadRoutingError, type ThreadRouteKind } from "./thread-routing.ts";
+import { ThreadRoutingCapacityError, ThreadRoutingError, type ThreadRouteKind } from "./thread-routing.ts";
 import { MOUNT_PATH,OFFICIAL_BASE_URL, type GatewayConfig } from "./types.ts";
 import type { WebSocketSession } from "@agent-proxy/plugin-api";
 
@@ -125,17 +125,18 @@ export function checkFrameRouting(
     return { kind: "reject", model, family };
   }
   if (!prefix) return { kind: "forward", frame };
-  if (!record || typeof model !== "string" || !model || record.type !== "response.create") return { kind: "forward", frame };
-  const prefixed = model.startsWith(prefix);
+  if (!record || record.type !== "response.create") return { kind: "forward", frame };
+  const requestedModel = typeof model === "string" && model ? model : undefined;
+  const prefixed = requestedModel?.startsWith(prefix);
   const metadata = isRecord(record.client_metadata) ? record.client_metadata : undefined;
   const parent = metadata?.["x-codex-parent-thread-id"];
   const parentThreadId = typeof parent === "string" && parent.trim().length <= 128 ? parent.trim() || undefined : undefined;
-  const targetKind = resolveFrameRoute?.(model, record.generate !== false, parentThreadId)
-    ?? (prefixed ? "cliproxy" : "official");
+  const targetKind = resolveFrameRoute?.(requestedModel ?? "", record.generate !== false, parentThreadId)
+    ?? (requestedModel ? prefixed ? "cliproxy" : "official" : routeKind);
   if (targetKind !== routeKind) return { kind: "reconnect" };
-  if (!prefixed) return { kind: "forward", frame };
+  if (!prefixed || !requestedModel) return { kind: "forward", frame };
   // 前缀是网关加的，上游模型表里没有，必须与 HTTP 路径一样剥掉再转发。
-  record.model = model.slice(prefix.length);
+  record.model = requestedModel.slice(prefix.length);
   return { kind: "forward", frame: JSON.stringify(payload) };
 }
 
@@ -612,8 +613,9 @@ export const realtimeWebSocketHandler: Bun.WebSocketHandler<RealtimeSocketData> 
           event: "ws-route-unavailable", url: ws.data.url,
           detail: { routeKind: ws.data.routeKind, error: error.message },
         });
+        ws.close(1012, error instanceof ThreadRoutingCapacityError
+          ? "Thread routing capacity exhausted" : "Thread routing unavailable; retry required");
         upstream?.close(1000, "Thread routing unavailable");
-        ws.close(1012, "Thread routing unavailable; retry required");
         return;
       }
       if (routed.kind === "reconnect") {

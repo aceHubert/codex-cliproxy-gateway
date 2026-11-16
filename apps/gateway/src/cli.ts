@@ -45,7 +45,7 @@ import {
   upstreamClientVersion,
 } from "./upstream-catalog.ts";
 import { createZcodePushTarget } from "./zcode-client-sync.ts";
-export { applyModelCatalogToml } from "./model-state.ts";
+export { applyModelCatalogToml, codexCatalogFile } from "./model-state.ts";
 import { clearPendingRestart, normalizeExcludedModels, parseExcludedModels, parseMaxLogSize, parseMaxRequestLogs, sanitizeUrlValue } from "./config-update.ts";
 import { requestLogDir } from "./request-log.ts";
 import { ensureUiToken, isLoopbackHost, startWebUiServer, webUiContextForInstance, webUiPort } from "./webui.ts";
@@ -96,6 +96,7 @@ const DEFAULTS = {
   maxRequestLogs: 0,
   maxGatewayLogBytes: 0,
   upstreamOnly: false,
+  codexStaticCatalog: false,
   ...AGENT_DEFAULTS,
 } satisfies GatewayConfig;
 
@@ -244,7 +245,14 @@ Config:
                         (5 newest backups kept) and truncates the live file in
                         place; 0 (default) means unlimited
   config --upstream-only on|off [--restart-codex]
-                        change default routing to upstream only and Codex static catalog mode
+                        change default routing to upstream only (models served
+                        live via the gateway /models endpoint)
+  config --codex-static-catalog on|off
+                        with --upstream-only on: point Codex at the static
+                        codex-catalog.json via model_catalog_json instead of
+                        the live /models endpoint (Codex only re-reads it on
+                        restart, so plugin catalog hot reloads are not picked
+                        up); off (default) keeps live loading
   options may be combined; every change restarts the gateway automatically
 
 CodeBuddy:
@@ -716,6 +724,7 @@ const AUDITED_FIELDS = [
   "opencodeZen",
   "codebuddyAccount",
   "upstreamOnly",
+  "codexStaticCatalog",
   "requestLogging",
   "debug",
   "maxRequestLogs",
@@ -965,14 +974,13 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
   config.$schema = GATEWAY_CONFIG_SCHEMA_URL;
   applyRoutingMode(config, paths, upstreamOnly);
   const installSelector = stringOption(options, "select");
-  // 先保留原有的受管 model_catalog_json 守卫；真正是否写入要等选择结果确定。
+  // 先保留原有的受管 model_catalog_json 守卫（写入或移除在后续真正改写时确定）。
   // 手动模式对 config.toml 只读，守卫一并跳过。
   if (!manualCodexConfig) {
     applyModelCatalogToml(
       currentToml,
-      upstreamOnly && !isSelectNone(installSelector),
+      upstreamOnly && config.codexStaticCatalog === true && !isSelectNone(installSelector),
       paths,
-      codexCatalogFile(paths),
       managedRuntimeCatalogFiles(paths),
     );
   }
@@ -1022,14 +1030,13 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
     console.log(`Selected ${selectedModels.length} ${upstreamLabel(config)} models.`);
   }
   config.selectedModels = selectedModels;
-  // 手动模式不增删 config.toml 的 model_catalog_json，patch 产物与原文一致。
+  // 手动模式不增删 config.toml 的 model_catalog_json，改写产物与原文一致。
   const { patchedToml: modelCatalogToml } = manualCodexConfig
     ? { patchedToml: currentToml }
     : applyModelCatalogToml(
       currentToml,
-      upstreamOnly,
+      upstreamOnly && config.codexStaticCatalog === true,
       paths,
-      codexCatalogFile(paths),
       managedRuntimeCatalogFiles(paths),
     );
 
@@ -1240,18 +1247,17 @@ async function installCurrent(options: CliOptions, completeMigration?: () => voi
       ? fs.readFileSync(paths.configToml, "utf8")
       : "";
     const configuredCatalog = readRootTomlString(currentTomlAfterInstall, "model_catalog_json");
-    const staticCatalogActive = upstreamOnly;
     console.log("WARNING: --manual-codex-config keeps ~/.codex/config.toml untouched. Configure it manually:");
     for (const key of MANAGED_CONFIG_KEYS.filter((managedKey) => managedKey !== "model_catalog_json")) {
       console.log(`  ${key} = "${gatewayBaseUrl}"`);
     }
-    if (staticCatalogActive) {
+    if (upstreamOnly && config.codexStaticCatalog === true) {
       if (configuredCatalog !== codexCatalogFile(paths)) {
         console.log(`  model_catalog_json = "${codexCatalogFile(paths)}"`);
         console.log("WARNING: without model_catalog_json Codex will not load the static upstream-only catalog.");
       }
     } else if (configuredCatalog !== undefined) {
-      console.log("WARNING: remove model_catalog_json from ~/.codex/config.toml to leave upstream-only mode.");
+      console.log("WARNING: remove model_catalog_json from ~/.codex/config.toml; the catalog is served live via the gateway /models endpoint.");
     }
     console.log("Uninstall and later commands will not modify ~/.codex/config.toml.");
   }
@@ -1642,17 +1648,16 @@ async function models(options: CliOptions): Promise<void> {
     return;
   }
 
-  // 手动模式（install --manual-codex-config）下 config.toml 属于用户：static（--upstream-only）
-  // 切换照常完成，但不写 model_catalog_json，改为在收尾时以 warning + 设置方法告知用户。
+  // 手动模式（install --manual-codex-config）下 config.toml 属于用户：目录统一经网关
+  // /models 提供，不再写 model_catalog_json；若用户残留该键，收尾时给出移除指引。
   const manualCodexConfig = fs.existsSync(paths.stateFile)
     && !isCodexConfigManaged(loadJson<InstallState>(paths.stateFile));
 
   const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-  const legacyCatalogFile = path.join(paths.codexHome, "cliproxy-catalog.json");
   // 同步前先拒绝非受管 model_catalog_json，避免后续模型覆盖文件下载产生半更新；
   // 手动模式对 config.toml 只读，守卫与改写一并跳过。
   if (!manualCodexConfig) {
-    applyModelCatalogToml(source, upstreamOnly, paths, codexCatalogFile(paths), managedRuntimeCatalogFiles(paths));
+    applyModelCatalogToml(source, upstreamOnly && config.codexStaticCatalog === true, paths, managedRuntimeCatalogFiles(paths));
   }
   const { modelsConfigFile, rules } = await loadModelOverrideRules(paths, config, Boolean(modelMergeJson));
   const selectNone = isSelectNone(selector);
@@ -2124,6 +2129,7 @@ async function writeConfigAndRestart(
  */
 async function configCommand(options: CliOptions): Promise<void> {
   const upstreamOnlyTarget = onOffValue(options, "upstream-only");
+  const codexStaticCatalogTarget = onOffValue(options, "codex-static-catalog");
   const restartCodex = options["restart-codex"] === true;
   const zcodeTarget = onOffValue(options, "zcode");
   const codebuddyTarget = onOffValue(options, "codebuddy");
@@ -2139,7 +2145,7 @@ async function configCommand(options: CliOptions): Promise<void> {
   const config = loadGatewayConfig(paths.gatewayConfig);
   const auditBefore: Record<string, unknown> = { ...config } as unknown as Record<string, unknown>;
 
-  if (upstreamOnlyTarget === undefined && zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && opencodeZenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
+  if (upstreamOnlyTarget === undefined && codexStaticCatalogTarget === undefined && zcodeTarget === undefined && codebuddyTarget === undefined && qoderTarget === undefined && agyTarget === undefined && opencodeZenTarget === undefined && logTarget === undefined && debugTarget === undefined && maxLogsOption === undefined && maxLogSizeOption === undefined) {
     const zcodeActive = agentConfigEnabled(config, "zcode");
     const codebuddyActive = agentConfigEnabled(config, "codebuddy");
     const qoderActive = agentConfigEnabled(config, "qoder");
@@ -2147,6 +2153,7 @@ async function configCommand(options: CliOptions): Promise<void> {
     const opencodeZenActive = agentConfigEnabled(config, "opencodeZen");
     console.log(JSON.stringify({
       upstreamOnly: config.upstreamOnly === true,
+      codexStaticCatalog: config.codexStaticCatalog === true,
       zcode: zcodeActive,
       ...(config.zcode === true && !zcodeActive ? { zcodeConfigured: true } : {}),
       codebuddy: codebuddyActive,
@@ -2177,10 +2184,14 @@ async function configCommand(options: CliOptions): Promise<void> {
     config.upstreamOnly = upstreamOnlyTarget;
     applied.push(`Default upstream-only routing ${upstreamOnlyTarget ? "enabled" : "disabled"}.`);
   }
+  if (codexStaticCatalogTarget !== undefined) {
+    config.codexStaticCatalog = codexStaticCatalogTarget;
+    applied.push(`Codex static catalog loading ${codexStaticCatalogTarget ? "enabled" : "disabled"}.`);
+  }
   const managesCodex = !fs.existsSync(paths.stateFile) || isCodexConfigManaged(loadJson<InstallState>(paths.stateFile));
   if (managesCodex) {
     const source = fs.existsSync(paths.configToml) ? fs.readFileSync(paths.configToml, "utf8") : "";
-    applyModelCatalogToml(source, config.upstreamOnly === true, paths, codexCatalogFile(paths), managedRuntimeCatalogFiles(paths));
+    applyModelCatalogToml(source, config.upstreamOnly === true && config.codexStaticCatalog === true, paths, managedRuntimeCatalogFiles(paths));
   }
   if (zcodeTarget !== undefined) {
     config.zcode = zcodeTarget;
@@ -2233,8 +2244,8 @@ async function configCommand(options: CliOptions): Promise<void> {
           || qoderTarget !== undefined || agyTarget !== undefined || opencodeZenTarget !== undefined),
         logDirLine: logTarget ? `Request logs will be written to: ${requestLogDir(paths)}` : undefined,
       });
-      const changesModels = upstreamOnlyTarget !== undefined || zcodeTarget !== undefined || codebuddyTarget !== undefined
-        || qoderTarget !== undefined || agyTarget !== undefined || opencodeZenTarget !== undefined;
+      const changesModels = upstreamOnlyTarget !== undefined || codexStaticCatalogTarget !== undefined || zcodeTarget !== undefined
+        || codebuddyTarget !== undefined || qoderTarget !== undefined || agyTarget !== undefined || opencodeZenTarget !== undefined;
       if (changesModels) {
         await updateCodexModelCatalog(paths, config, {}, { refreshAdapters: !fs.existsSync(paths.launchAgent) });
       }
@@ -2484,7 +2495,7 @@ const COMMAND_OPTIONS: Record<string, string[]> = {
   restart: ["restart-codex"],
   serve: ["config"],
   models: ["sync", "select", "restart-codex", "model-merge-json", "exclude", "push"],
-  config: ["upstream-only", "restart-codex", "zcode", "codebuddy", "qoder", "agy", "opencode-zen", "log", "debug", "max-request-logs", "max-log-size"],
+  config: ["upstream-only", "codex-static-catalog", "restart-codex", "zcode", "codebuddy", "qoder", "agy", "opencode-zen", "log", "debug", "max-request-logs", "max-log-size"],
   codebuddy: ["switch"],
   web: ["start", "daemon", "status", "stop", "restart"],
 };

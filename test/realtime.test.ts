@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { managedCodexServiceToml, managedCodexToml } from "../apps/gateway/src/cli.ts";
-import { createGatewayHandler, startGateway } from "../apps/gateway/src/gateway-composition.ts";
+import { createGatewayHandler } from "../apps/gateway/src/gateway-composition.ts";
 import { renderLaunchAgent } from "../apps/gateway/src/launchd.ts";
+import { resolvePaths } from "../apps/gateway/src/paths.ts";
 import {
   checkFrameRouting,
   loadRealtimeProviderMode,
@@ -17,9 +18,11 @@ import {
 import { websocketLogFile } from "../apps/gateway/src/request-log.ts";
 import { ThreadRoutingError, ThreadRoutingState } from "../apps/gateway/src/thread-routing.ts";
 import { readRootTomlString, restoreRootTomlKeys } from "../apps/gateway/src/toml.ts";
+import { startTestGateway } from "./gateway-start-fixture.ts";
 import test from "./host-test.ts";
 import { routingPluginFamily } from "./plugin-routing-fixture.ts";
-import type { GatewayConfig } from "../apps/gateway/src/types.ts";
+import type { TestContext } from "node:test";
+import type { GatewayConfig, ProcessLogTarget } from "../apps/gateway/src/types.ts";
 
 function config(officialBaseUrl: string): GatewayConfig {
   return {
@@ -32,6 +35,17 @@ function config(officialBaseUrl: string): GatewayConfig {
     upstreamBaseUrl: "http://127.0.0.1:8317/v1",
     catalogPath: "/tmp/missing-catalog.json",
   };
+}
+
+function startRealtimeTestGateway(
+  context: TestContext,
+  gatewayConfig: GatewayConfig,
+  directory = fs.mkdtempSync(path.join(os.tmpdir(), "ccp-realtime-gateway-")),
+  processLog?: ProcessLogTarget,
+) {
+  context.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const paths = resolvePaths({ HOME: directory, CODEX_HOME: path.join(directory, "codex") }, directory);
+  return startTestGateway({ ...gatewayConfig, catalogPath: paths.catalogFile }, paths, "builtin", { processLog });
 }
 
 test("managed config routes Realtime WebSockets through the gateway and restores prior values", () => {
@@ -674,8 +688,6 @@ test("bridged cliproxy sockets record turn ids for image request routing", () =>
 
 test("WebSocket bridge records lifecycle events into the live route log", () => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-realtime-ws-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   try {
     const upstream = {
@@ -706,8 +718,6 @@ test("WebSocket bridge records lifecycle events into the live route log", () => 
     // 1006 是排查 sideband 静默挂起的关键信号，必须落盘。
     assert.match(log, /\[realtime\] ws-client-close .*"code":1006/);
   } finally {
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
     fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
@@ -867,7 +877,7 @@ test("父路由暂不可用时 WS 不转发请求并要求客户端重试", () =
   assert.deepEqual(closed, [1012]);
 });
 
-test("真实 WS 桥双向重连并让已有子线程跟随根路由，旧握手 hint 不覆盖新选择", { timeout: 15_000 }, async () => {
+test("真实 WS 桥双向重连并让已有子线程跟随根路由，旧握手 hint 不覆盖新选择", { timeout: 15_000 }, async (context) => {
   const OriginalWebSocket = globalThis.WebSocket;
   const connections: Array<{ kind: string; headers: Headers }> = [];
   const received: Array<{ kind: string; model: string }> = [];
@@ -899,7 +909,7 @@ test("真实 WS 桥双向重连并让已有子线程跟随根路由，旧握手 
       return Reflect.construct(target, [address.href, ...argumentsList.slice(1)]);
     },
   });
-  const gateway = startGateway({ ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${cpa.url}v1` }, "builtin");
+  const gateway = startRealtimeTestGateway(context, { ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${cpa.url}v1` });
   const address = new URL("/v1/responses", gateway.url);
   address.protocol = "ws:";
   const Client = OriginalWebSocket as unknown as new (url: URL, options: Bun.WebSocketOptions) => WebSocket;
@@ -1020,7 +1030,7 @@ test("server.upgrade completes after awaiting inside the fetch handler", async (
   }
 });
 
-test("Bun gateway bridges Realtime WebSocket text, binary, headers, and close", async () => {
+test("Bun gateway bridges Realtime WebSocket text, binary, headers, and close", async (context) => {
   let handshakeAuthorization: string | null = null;
   let upstreamClose: { code: number; reason: string } | undefined;
   let resolveUpstreamClose!: () => void;
@@ -1045,10 +1055,9 @@ test("Bun gateway bridges Realtime WebSocket text, binary, headers, and close", 
       },
     },
   });
-  const gateway = startGateway(
-    { ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${upstream.url}v1` },
-    "builtin",
-  );
+  const gateway = startRealtimeTestGateway(context, {
+    ...config("https://chatgpt.com/backend-api/codex"), upstreamBaseUrl: `${upstream.url}v1`,
+  });
   const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
   const ClientWebSocket = WebSocket as unknown as new (
@@ -1135,10 +1144,8 @@ test("bridge closes with 1011 when the upstream socket is missing", () => {
   assert.deepEqual(closed, [{ code: 1011, reason: "Realtime upstream WebSocket is unavailable" }]);
 });
 
-test("responses WebSocket probe is forwarded to the hinted upstream", async () => {
+test("responses WebSocket probe is forwarded to the hinted upstream", async (context) => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-log-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   let handshakeUrl = "";
   let handshakeAuthorization: string | null = null;
@@ -1157,14 +1164,14 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
       message(ws, message) { ws.send(message); },
     },
   });
-  const gateway = startGateway(
+  const gateway = startRealtimeTestGateway(
+    context,
     {
       ...config("https://chatgpt.com/backend-api/codex"),
       upstreamBaseUrl: `${upstream.url}v1`,
       requestLogging: true,
-      logDir,
     },
-    "builtin",
+    logHome,
   );
   const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
@@ -1204,13 +1211,10 @@ test("responses WebSocket probe is forwarded to the hinted upstream", async () =
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
-test("cliproxy WebSocket compacts v2 frames and replays the summary without SSE downgrade", async () => {
+test("cliproxy WebSocket compacts v2 frames and replays the summary without SSE downgrade", async (context) => {
   const upstreamMessages: string[] = [];
   const summaryRequests: Record<string, unknown>[] = [];
   const upstream = Bun.serve({
@@ -1234,10 +1238,10 @@ test("cliproxy WebSocket compacts v2 frames and replays the summary without SSE 
       },
     },
   });
-  const gateway = startGateway({
+  const gateway = startRealtimeTestGateway(context, {
     ...config("https://official.invalid/v1"),
     upstreamBaseUrl: `${upstream.url}v1`,
-  }, "builtin");
+  });
   const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
   const ClientWebSocket = WebSocket as unknown as new (
@@ -1301,7 +1305,7 @@ test("cliproxy WebSocket compacts v2 frames and replays the summary without SSE 
   }
 });
 
-test("cliproxy WebSocket closes cleanly when compaction upstream returns an empty response", async () => {
+test("cliproxy WebSocket closes cleanly when compaction upstream returns an empty response", async (context) => {
   const upstreamMessages: string[] = [];
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -1328,10 +1332,10 @@ test("cliproxy WebSocket closes cleanly when compaction upstream returns an empt
       },
     },
   });
-  const gateway = startGateway({
+  const gateway = startRealtimeTestGateway(context, {
     ...config("https://official.invalid/v1"),
     upstreamBaseUrl: `${upstream.url}v1`,
-  }, "builtin");
+  });
   const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
   const ClientWebSocket = WebSocket as unknown as new (
@@ -1370,10 +1374,8 @@ test("cliproxy WebSocket closes cleanly when compaction upstream returns an empt
   }
 });
 
-test("responses WebSocket close writes a 101 request summary to gateway.log", async () => {
+test("responses WebSocket close writes a 101 request summary to gateway.log", async (context) => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-summary-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   const processLog = path.join(logDir, "gateway.log");
   const upstream = Bun.serve({
@@ -1387,16 +1389,14 @@ test("responses WebSocket close writes a 101 request summary to gateway.log", as
       message(ws, message) { ws.send(message); },
     },
   });
-  const gateway = startGateway(
+  const gateway = startRealtimeTestGateway(
+    context,
     {
       ...config("https://chatgpt.com/backend-api/codex"),
       upstreamBaseUrl: `${upstream.url}v1`,
       requestLogging: true,
-      logDir,
     },
-    "builtin",
-    undefined,
-    undefined,
+    logHome,
     { file: processLog, maxBytes: 0 },
   );
   const url = new URL("/v1/responses", gateway.url);
@@ -1433,9 +1433,6 @@ test("responses WebSocket close writes a 101 request summary to gateway.log", as
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
@@ -1469,10 +1466,8 @@ function rawUpgradeRequest(url: URL, extraHeaders: Record<string, string>): Prom
   });
 }
 
-test("responses WebSocket dial failure falls back to 426 negotiation semantics", async () => {
+test("responses WebSocket dial failure falls back to 426 negotiation semantics", async (context) => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-fail-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
@@ -1481,14 +1476,14 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
       return new Response("no websocket here", { status: 404 });
     },
   });
-  const gateway = startGateway(
+  const gateway = startRealtimeTestGateway(
+    context,
     {
       ...config("https://chatgpt.com/backend-api/codex"),
       upstreamBaseUrl: `${upstream.url}v1`,
       requestLogging: true,
-      logDir,
     },
-    "builtin",
+    logHome,
   );
   try {
     const head = await rawUpgradeRequest(new URL("/v1/responses", gateway.url), {
@@ -1507,17 +1502,11 @@ test("responses WebSocket dial failure falls back to 426 negotiation semantics",
   } finally {
     gateway.stop(true);
     upstream.stop(true);
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
-test("slow upstream handshakes within the dial budget still bridge instead of 426", { timeout: 30_000 }, async () => {
+test("slow upstream handshakes within the dial budget still bridge instead of 426", { timeout: 30_000 }, async (context) => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-responses-ws-slow-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
-  const logDir = path.join(logHome, "logs");
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -1531,14 +1520,14 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
       message(ws, message) { ws.send(message); },
     },
   });
-  const gateway = startGateway(
+  const gateway = startRealtimeTestGateway(
+    context,
     {
       ...config("https://chatgpt.com/backend-api/codex"),
       upstreamBaseUrl: `${upstream.url}v1`,
       requestLogging: true,
-      logDir,
     },
-    "builtin",
+    logHome,
   );
   const url = new URL("/v1/responses", gateway.url);
   url.protocol = "ws:";
@@ -1570,53 +1559,57 @@ test("slow upstream handshakes within the dial budget still bridge instead of 42
     client.close();
     gateway.stop(true);
     upstream.stop(true);
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });
 
-test("realtime sideband dial failure surfaces as 502 instead of a silent 101", async () => {
+test("realtime sideband dial failure surfaces as 502 instead of a silent 101", async (context) => {
   const logHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sideband-fail-"));
-  const previousRuntimeHome = process.env.CODEX_CLIPROXY_HOME;
-  process.env.CODEX_CLIPROXY_HOME = logHome;
   const logDir = path.join(logHome, "logs");
   const processLog = path.join(logDir, "gateway.log");
+  const calls: string[] = [];
   const upstream = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
-    fetch() {
+    fetch(request) {
+      calls.push(new URL(request.url).pathname);
       return new Response("gone", { status: 404 });
     },
   });
-  const gateway = startGateway(
+  const gateway = startRealtimeTestGateway(
+    context,
     {
       ...config("https://chatgpt.com/backend-api/codex"),
       upstreamBaseUrl: `${upstream.url}v1`,
       requestLogging: true,
-      logDir,
     },
-    "builtin",
-    undefined,
-    undefined,
+    logHome,
     { file: processLog, maxBytes: 0 },
   );
+  const originalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = new Proxy(originalWebSocket, {
+    construct(target, argumentsList) {
+      const address = new URL(String(argumentsList[0]));
+      assert.equal(address.hostname, "api.openai.com");
+      address.protocol = "ws:";
+      address.host = upstream.url.host;
+      return Reflect.construct(target, [address.href, ...argumentsList.slice(1)]);
+    },
+  });
   try {
     const head = await rawUpgradeRequest(new URL("/v1/live", gateway.url), {
       authorization: "Bearer sideband-oauth",
     });
     assert.match(head, /^HTTP\/1\.1 502/);
     assert.match(head, /x-agent-proxy: realtime-upstream-unavailable/);
+    assert.deepEqual(calls, ["/v1/live"]);
     // 真实故障必须进错误摘要（原先的表现是 101 后静默断开）：摘要在进程日志里，不再另开文件。
     assert.deepEqual(fs.readdirSync(logDir).filter((name) => name.startsWith("cliproxy-error-")), []);
     const digest = fs.readFileSync(processLog, "utf8");
     assert.match(digest, /-> 502 !!!/);
     assert.match(digest, /Realtime upstream WebSocket failed/);
   } finally {
+    globalThis.WebSocket = originalWebSocket;
     gateway.stop(true);
     upstream.stop(true);
-    if (previousRuntimeHome === undefined) delete process.env.CODEX_CLIPROXY_HOME;
-    else process.env.CODEX_CLIPROXY_HOME = previousRuntimeHome;
-    fs.rmSync(logHome, { recursive: true, force: true });
   }
 });

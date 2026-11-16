@@ -1,6 +1,6 @@
 import { isIP } from "node:net";
 import path from "node:path";
-import { bindHostMethods, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol,type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
+import { bindHostMethods, getHostServices, localTime, logExchange, logGatewayError, logGroupFromPath, logRequestSummary, requestLogDir, resolvePaths, withHostServices, type ClientProtocol,type GatewayPlugin, type HostServices, type RequestLogSink, type AgentConfig, type ModelCatalog, type ProcessLogTarget } from "@agent-proxy/plugin-api";
 import { createQoderCatalogStore, qoderModelConfig, qoderModelSlug } from "./catalog.ts";
 import { loadQoderCredentials, QODER_REGION_LABELS,QoderCredentialError, type QoderCredentials, type QoderRegion } from "./credentials.ts";
 import { createQueueAwareInfer, QoderQueueError } from "./queue.ts";
@@ -190,14 +190,23 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
       const runtime = byRegion.get(slug.region)!;
       const label = runtime.label;
       const modelKey = slug.key;
+      const host = getHostServices();
       const started = Date.now();
       const requestTime = localTime();
       const controller = new AbortController();
       const signal = AbortSignal.any([request.signal, lifecycle.signal, controller.signal]);
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
       let timedOut = false;
-      let result: Record<string, unknown> | undefined;
+      let cancelled = false;
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
+        active.delete(controller);
+      };
       const armTimeout = () => {
+        if (cleaned) return;
         if (idleTimer !== undefined) clearTimeout(idleTimer);
         idleTimer = setTimeout(() => {
           timedOut = true;
@@ -207,22 +216,27 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
       };
       active.add(controller);
       let completed = false;
-      const finish = (status: number) => {
+      const finish = (status: number, result?: Record<string, unknown>) => {
         if (completed) return;
         completed = true;
-        if (idleTimer !== undefined) clearTimeout(idleTimer);
-        active.delete(controller);
-        // 请求日志保留模型、状态和用量，不记录私有认证头、提示词或工具内容。
-        logExchange(sink, logGroupFromPath(new URL(request.url).pathname), {
-          requestTime, method: request.method, url: new URL(request.url).pathname,
-          reqHeaders: new Headers(), reqBody: { model, stream: input.stream === true },
-          status, resHeaders: new Headers(), durationMs: Date.now() - started,
-          resBody: JSON.stringify({ status: result?.status, usage: result?.usage, error: result?.error, timedOut }),
-        }, "qoder");
-        logRequestSummary(dependencies.processLog, {
-          requestTime: localTime(), method: request.method, url: new URL(request.url).pathname,
-          status, durationMs: Date.now() - started,
-        });
+        cleanup();
+        try {
+          // 流式收尾在调用方作用域内触发，日志使用本次请求所属主机。
+          withHostServices(host, () => {
+            const url = new URL(request.url).pathname;
+            const durationMs = Date.now() - started;
+            // 请求日志只保留模型、状态、用量和安全错误摘要。
+            logExchange(sink, logGroupFromPath(url), {
+              requestTime, method: request.method, url,
+              reqHeaders: new Headers(), reqBody: { model, stream: input.stream === true },
+              status, resHeaders: new Headers(), durationMs,
+              resBody: JSON.stringify({ status: result?.status, usage: result?.usage, error: result?.error, timedOut }),
+            }, "qoder");
+            logRequestSummary(dependencies.processLog, {
+              requestTime: localTime(), method: request.method, url, status, durationMs,
+            });
+          });
+        } catch { /* 观测失败不能改变业务响应。 */ }
       };
       try {
         const credential = await runtime.credentials();
@@ -261,15 +275,18 @@ function buildQoderAdapter(config: AgentConfig, dependencies: QoderDependencies 
         const response = await translateQoderResponse(to, observed, {
           model, tools: translated.tools, stream: !mapResult && input.stream === true,
           signal,
-          abort: () => { controller.abort(); },
+          abort: () => { cleanup(); controller.abort(); },
           onComplete: (payload) => {
-            result = payload;
-            finish(timedOut ? 504 : payload.status === "failed" ? request.signal.aborted || lifecycle.signal.aborted ? 499 : 502 : 200);
+            const status = timedOut ? 504 : cancelled ? 499 : payload.status === "failed" ? 502 : 200;
+            finish(status, payload);
           },
           // 私有上游错误可能回显认证字段，公开响应只保留固定指引。
-          sanitizeError: (error) => timedOut
-            ? { code: "qoder_upstream_timeout", message: "Qoder 上游连续无数据超时，请稍后重试" }
-            : safeQoderUpstreamError(error),
+          sanitizeError: (error) => {
+            cancelled = error.code === "response_cancelled" && error.upstream_error === undefined;
+            return timedOut
+              ? { code: "qoder_upstream_timeout", message: "Qoder 上游连续无数据超时，请稍后重试" }
+              : safeQoderUpstreamError(error);
+          },
         });
         if (mapResult) return mapResult(await response.json() as Record<string, unknown>);
         return response;
