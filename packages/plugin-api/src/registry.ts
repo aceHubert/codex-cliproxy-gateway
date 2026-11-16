@@ -1,5 +1,5 @@
 import { compileModelPattern,modelPatternsOverlap, type CompiledModelPattern } from "./patterns.ts";
-import type { CandidateSelector, ClientProtocol, GatewayPlugin, HttpRequestContext, ModelCatalog, ModelMatch, RequestOperation, WebSocketRequestContext } from "./types.ts";
+import type { CandidateSelector, ClientProtocol, GatewayPlugin, HttpRequestContext, ModelCatalog, ModelMatch, RequestOperation, SearchRequestContext, WebSocketRequestContext } from "./types.ts";
 
 export interface PluginMatch extends ModelMatch {
   plugin: GatewayPlugin;
@@ -97,6 +97,27 @@ export class PluginRegistry {
     if (!match) return defaultHandler(context);
     const response = await match.plugin.handleHttp({ ...context, matchedPattern: match.matchedPattern, matchedPrefix: match.matchedPrefix });
     if (!(response instanceof Response)) throw new Error(`插件 ${match.plugin.id} 的 handleHttp 必须返回 Response`);
+    return response;
+  }
+
+  /** 只向模型归属的插件派发搜索；命中插件却未声明搜索能力时不可默认转发。 */
+  async dispatchSearch(context: Omit<SearchRequestContext, "matchedPattern" | "matchedPrefix">): Promise<Response | undefined> {
+    const match = await this.select(context.model);
+    if (!match) return undefined;
+    if (!match.plugin.handleSearch) {
+      return Response.json({
+        error: {
+          type: "unsupported_operation",
+          message: `插件 ${match.plugin.id} 未实现 Codex 原生搜索。`,
+        },
+      }, { status: 501 });
+    }
+    const response = await match.plugin.handleSearch({
+      ...context,
+      matchedPattern: match.matchedPattern,
+      matchedPrefix: match.matchedPrefix,
+    });
+    if (!(response instanceof Response)) throw new Error(`插件 ${match.plugin.id} 的 handleSearch 必须返回 Response`);
     return response;
   }
 

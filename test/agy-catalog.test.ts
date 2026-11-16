@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -10,9 +11,11 @@ import {
   isAgyModel,
   mergeAgyCatalog,
   parseAgyCatalogData,
-  resolveAgyFamilyModel, type AgyModelFamily
+  resolveAgyFamilyModel,
+  resolveAgyModel, type AgyModelFamily
 } from "@agent-proxy/agy/catalog";
 import { loadAgyCredentials } from "@agent-proxy/agy/credentials";
+import { AGY_ENDPOINT } from "@agent-proxy/agy/transport";
 import test from "./host-test.ts";
 
 
@@ -229,7 +232,20 @@ test("agy 多档位家族合并为一个目录条目，单档位后缀模型保�
   const oss = catalog.models[2]!;
   assert.equal(oss.display_name, "AGY/GPT-OSS 120B (Medium)");
   assert.deepEqual((oss.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort), []);
-  assert.equal(oss.default_reasoning_level, "medium");
+  assert.equal(Object.hasOwn(oss, "default_reasoning_level"), false);
+});
+
+test("agy 无可选思考级别的模型不声明默认中档或其他占位档位", TIMEOUT, () => {
+  const catalog = buildAgyCatalog(parseAgyCatalogData({ models: {
+    "gemini-pro-orchestrator-g1-pro": { displayName: "Orchestrator (Argon)", supportsThinking: true },
+    "gpt-oss-120b-medium": { displayName: "GPT-OSS 120B (Medium)", supportsThinking: true },
+    "no-thinking": { supportsThinking: false },
+    "empty-levels": { supportsThinking: true, supportedThinkingLevels: [] },
+  } }));
+  for (const model of catalog.models) {
+    assert.deepEqual(model.supported_reasoning_levels, []);
+    assert.equal(Object.hasOwn(model, "default_reasoning_level"), false, String(model.slug));
+  }
 });
 
 test("agy 四档家族合并 xhigh，目录与请求解析保留最高档", TIMEOUT, () => {
@@ -249,17 +265,18 @@ test("agy 四档家族合并 xhigh，目录与请求解析保留最高档", TIME
   for (const tier of tiers) {
     assert.equal(resolveAgyFamilyModel(data.families[0]!, tier), `gemini-4-hydrogen-${tier}`);
   }
-  assert.equal(resolveAgyFamilyModel(data.families[0]!, "max"), "gemini-4-hydrogen-xhigh");
+  assert.equal(resolveAgyFamilyModel(data.families[0]!, "max"), "gemini-4-hydrogen-medium");
 });
 
-test("agy 缺档家族按距离优先、等距偏高回退且默认档位一致", TIMEOUT, () => {
+test("agy 不支持的档位不生效，使用与目录一致的默认档位", TIMEOUT, () => {
   const data = parseAgyCatalogData({ models: {
     "gemini-4-hydrogen-xhigh": { displayName: "Gemini 4 Hydrogen (XHigh)" },
     "gemini-4-hydrogen-low": { displayName: "Gemini 4 Hydrogen (Low)" },
   } });
   const family = data.families[0]!;
   assert.equal(family.displayName, "Gemini 4 Hydrogen");
-  assert.equal(resolveAgyFamilyModel(family, "high"), "gemini-4-hydrogen-xhigh");
+  assert.equal(resolveAgyFamilyModel(family, "high"), "gemini-4-hydrogen-low");
+  assert.equal(resolveAgyFamilyModel(family, "max"), "gemini-4-hydrogen-low");
   assert.equal(resolveAgyFamilyModel(family, undefined), "gemini-4-hydrogen-low");
   assert.equal(buildAgyCatalog(data).models[0]!.default_reasoning_level, "low");
 });
@@ -278,25 +295,138 @@ test("agy 家族基名与显式无后缀模型冲突时不合并，避免重复 
     ["agy/gemini-3.8-flash", "agy/gemini-3.8-flash-high", "agy/gemini-3.8-flash-low"]);
 });
 
-test("agy 档位按 reasoning effort 解析，缺省 medium、缺档就近回退", TIMEOUT, () => {
+test("agy 档位按 reasoning effort 精确解析，缺省或不支持的档位使用默认变体", TIMEOUT, () => {
   const family: AgyModelFamily = {
     base: "gemini-3.8-flash",
     tiers: { high: "gemini-3.8-flash-high", medium: "gemini-3.8-flash-medium", low: "gemini-3.8-flash-low" },
     displayName: "Gemini 3.8 Flash",
   };
   assert.equal(resolveAgyFamilyModel(family, "high"), "gemini-3.8-flash-high");
-  assert.equal(resolveAgyFamilyModel(family, "xhigh"), "gemini-3.8-flash-high");
+  assert.equal(resolveAgyFamilyModel(family, "xhigh"), "gemini-3.8-flash-medium");
+  assert.equal(resolveAgyFamilyModel(family, "max"), "gemini-3.8-flash-medium");
   assert.equal(resolveAgyFamilyModel(family, "minimal"), "gemini-3.8-flash-low");
   assert.equal(resolveAgyFamilyModel(family, undefined), "gemini-3.8-flash-medium");
   assert.equal(resolveAgyFamilyModel(family, "bogus"), "gemini-3.8-flash-medium");
+  for (const effort of ["toString", "constructor", "__proto__"]) {
+    assert.equal(resolveAgyFamilyModel(family, effort), "gemini-3.8-flash-medium");
+  }
   const proOnly: AgyModelFamily = {
     base: "gemini-3.7-pro",
     tiers: { high: "gemini-3.7-pro-high", low: "gemini-3.7-pro-low" },
     displayName: "Gemini 3.7 Pro",
   };
-  // 无 medium 档的家族：medium 与缺省按「就近偏高」回退到 high。
-  assert.equal(resolveAgyFamilyModel(proOnly, "medium"), "gemini-3.7-pro-high");
-  assert.equal(resolveAgyFamilyModel(proOnly, undefined), "gemini-3.7-pro-high");
+  // 无 medium 档的家族使用目录首档，不按请求强度寻找邻近档位。
+  assert.equal(resolveAgyFamilyModel(proOnly, "medium"), "gemini-3.7-pro-low");
+  assert.equal(resolveAgyFamilyModel(proOnly, undefined), "gemini-3.7-pro-low");
+});
+
+test("agy max 只选择同名变体，不作为 xhigh 的别名", TIMEOUT, () => {
+  const data = parseAgyCatalogData({ models: {
+    "gemini-future-medium": { displayName: "Gemini Future (Medium)" },
+    "gemini-future-xhigh": { displayName: "Gemini Future (XHigh)" },
+    "gemini-future-max": { displayName: "Gemini Future (Max)" },
+  } });
+  assert.equal(data.families.length, 1);
+  assert.equal(resolveAgyFamilyModel(data.families[0]!, "max"), "gemini-future-max");
+  assert.equal(resolveAgyFamilyModel(data.families[0]!, "xhigh"), "gemini-future-xhigh");
+  const entry = buildAgyCatalog(data).models[0]!;
+  assert.equal(entry.display_name, "AGY/Gemini Future");
+  assert.deepEqual((entry.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),
+    ["medium", "xhigh", "max"]);
+});
+
+test("agy 目录保存每个家族自己的默认档位，不将 Hydrogen 默认强制为 medium", TIMEOUT, () => {
+  const data = parseAgyCatalogData({
+    defaultAgentModelId: "gemini-4-hydrogen-high",
+    agentModelSorts: [{ groups: [{ modelIds: ["gemini-4-hydrogen-high", "claude-opus-5-5-medium"] }] }],
+    groupedModels: {
+      "gemini-4-hydrogen": { displayName: "Gemini 4 Hydrogen", supportedThinkingLevels: ["low", "high", "xhigh"].map((thinkingSuffix) => ({ thinkingSuffix })) },
+      "claude-opus-5-5": { displayName: "Claude Opus 5.5", supportedThinkingLevels: ["medium", "max"].map((thinkingSuffix) => ({ thinkingSuffix })) },
+    },
+    models: Object.fromEntries([
+      "gemini-4-hydrogen-low", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
+      "claude-opus-5-5-medium", "claude-opus-5-5-max",
+    ].map((id) => [id, { displayName: id, supportsThinking: true }])),
+  });
+  const catalog = buildAgyCatalog(data);
+  assert.equal(catalog.models.find((model) => model.slug === "agy/gemini-4-hydrogen")!.default_reasoning_level, "high");
+  assert.equal(catalog.models.find((model) => model.slug === "agy/claude-opus-5-5")!.default_reasoning_level, "medium");
+  assert.deepEqual(resolveAgyModel("gemini-4-hydrogen", undefined, data.reasoning["gemini-4-hydrogen"]), { model: "gemini-4-hydrogen-high" });
+  assert.deepEqual(resolveAgyModel("claude-opus-5-5", "max", data.reasoning["claude-opus-5-5"]), { model: "claude-opus-5-5-max" });
+});
+
+test("agy 显式档位映射还原不规则 ID，参数能力优先于名字后缀", TIMEOUT, () => {
+  const data = parseAgyCatalogData({
+    defaultAgentModelId: "custom-deep",
+    groupedModels: { custom: { displayName: "Custom", supportedThinkingLevels: [
+      { thinkingSuffix: "-fast", thinkingDisplayName: "Low" }, { thinkingSuffix: "-deep", thinkingDisplayName: "XHigh" },
+      { thinkingSuffix: "-missing", thinkingDisplayName: "Max" },
+    ] } },
+    models: {
+      "custom-fast": { supportsThinking: true }, "custom-deep": { supportsThinking: true },
+      "custom-max": { supportsThinking: true, supportedThinkingLevels: ["LOW", "THINKING_LEVEL_EXTRA_HIGH", "MAX"] },
+      orchestrator: { supportsThinking: true, thinkingLevel: "high" },
+    },
+  });
+  assert.deepEqual(resolveAgyModel("custom", "xhigh", data.reasoning.custom), { model: "custom-deep" });
+  assert.deepEqual(resolveAgyModel("custom", "max", data.reasoning.custom), { model: "custom-deep" });
+  assert.deepEqual(resolveAgyModel("custom-max", "max", data.reasoning["custom-max"]), { model: "custom-max", thinkingLevel: "max" });
+  assert.deepEqual(resolveAgyModel("custom-max", "medium", data.reasoning["custom-max"]), { model: "custom-max" });
+  assert.deepEqual(resolveAgyModel("orchestrator", "xhigh", data.reasoning.orchestrator), { model: "orchestrator" });
+  assert.deepEqual((buildAgyCatalog(data).models.find((model) => model.slug === "agy/custom-max")!.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),
+    ["low", "xhigh", "max"]);
+});
+
+test("agy 参数能力和默认变体经磁盘重载后仍能还原，能力变化使目录缓存失效", TIMEOUT, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "agy-reasoning-cache-"));
+  try {
+    const options = {
+      cacheDirectory: directory, catalogMode: "manual" as const,
+      credentials: async () => ({ accessToken: "fake", expiryMs: Date.now() + 60_000, identity: "account", authMethod: "consumer" as const }),
+      fetchCatalog: async () => ({
+        defaultAgentModelId: "hydrogen-high",
+        models: { "hydrogen-low": {}, "hydrogen-high": {}, parameter: { supportsThinking: true, supportedThinkingLevels: ["low", "max"] } },
+      }),
+    };
+    await createAgyCatalogStore(options).refresh();
+    const recovered = await createAgyCatalogStore({ ...options, fetchCatalog: async () => { throw new Error("offline"); } }).reload();
+    assert.deepEqual(resolveAgyModel("hydrogen", undefined, recovered.reasoning.hydrogen), { model: "hydrogen-high" });
+    assert.deepEqual(resolveAgyModel("parameter", "max", recovered.reasoning.parameter), { model: "parameter", thinkingLevel: "max" });
+    assert.deepEqual(resolveAgyModel("parameter", "xhigh", recovered.reasoning.parameter), { model: "parameter" });
+    // 旧版本的分组或默认占位语义不同，即使内容哈希完整也不能沿用。
+    const cacheFile = path.join(directory, "agy-catalog.json");
+    const oldCache = JSON.parse(fs.readFileSync(cacheFile, "utf8"));
+    const endpoint = createHash("sha256").update(AGY_ENDPOINT).digest("hex").slice(0, 16);
+    for (const revision of [10, 11]) {
+      oldCache.cache_key = createHash("sha256").update(JSON.stringify({ revision, identity: "account", endpoint })).digest("hex");
+      fs.writeFileSync(cacheFile, JSON.stringify(oldCache));
+      await assert.rejects(createAgyCatalogStore(options).reload(), /没有可用的本地缓存/);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("agy groupedModels 保留服务端默认级别和显示名，排除目录没有的变体", TIMEOUT, () => {
+  const data = parseAgyCatalogData({
+    agentModelSorts: [{ groups: [{ modelIds: ["hydrogen"] }] }],
+    groupedModels: {
+      hydrogen: { displayName: "Gemini 4 Hydrogen", supportedThinkingLevels: ["low", "medium", "high", "xhigh", "max"].map((level) => ({ thinkingSuffix: `-${level}` })) },
+    },
+    models: {
+      hydrogen: { thinkingLevel: "THINKING_LEVEL_HIGH" },
+      "hydrogen-low": {}, "hydrogen-medium": {}, "hydrogen-high": {}, "hydrogen-xhigh": {},
+    },
+  });
+  const catalog = buildAgyCatalog(data);
+  assert.equal(catalog.models.length, 1);
+  assert.equal(catalog.models[0]!.slug, "agy/hydrogen");
+  assert.equal(catalog.models[0]!.display_name, "AGY/Gemini 4 Hydrogen");
+  assert.equal(catalog.models[0]!.default_reasoning_level, "high");
+  assert.deepEqual((catalog.models[0]!.supported_reasoning_levels as Array<{ effort: string }>).map((level) => level.effort),
+    ["low", "medium", "high", "xhigh"]);
+  assert.deepEqual(resolveAgyModel("hydrogen", undefined, data.reasoning.hydrogen), { model: "hydrogen-high" });
+  assert.deepEqual(resolveAgyModel("hydrogen", "xhigh", data.reasoning.hydrogen), { model: "hydrogen-xhigh" });
 });
 
 test("agy 家族信息随目录缓存落盘，磁盘缓存回退时仍可解析档位", TIMEOUT, async () => {

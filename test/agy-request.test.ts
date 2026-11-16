@@ -84,7 +84,7 @@ test("agy 请求转换：工具声明与 tool_choice 映射 functionDeclarations
     tools: [
       { type: "function", name: "shell", parameters: { type: "object", properties: { command: { type: "string" } } } },
       { type: "custom", name: "apply_patch" },
-      { type: "web_search" },
+      { type: "web_search", external_web_access: false },
     ],
     tool_choice: { type: "function", name: "shell" },
   });
@@ -141,7 +141,7 @@ test("agy 请求转换：仅在增补信封声明的工具可被选择，服务�
     input: [
       { type: "additional_tools", tools: [
         { type: "function", name: "shell", parameters: { type: "object" } },
-        { type: "web_search" },
+        { type: "web_search", external_web_access: false },
       ] },
       { type: "message", role: "user", content: "检查文件" },
     ],
@@ -281,17 +281,27 @@ test("agy 请求转换：reasoning 档位映射 thinkingLevel，未知档位只�
     { includeThoughts: true, thinkingBudget: -1, thinkingLevel: "high" });
   assert.deepEqual(translated({ input: "q", reasoning: { effort: "minimal" } }).request.generationConfig.thinkingConfig,
     { includeThoughts: true, thinkingBudget: -1, thinkingLevel: "low" });
-  assert.equal(translated({ input: "q", reasoning: { effort: "none" } }).request.generationConfig.thinkingConfig.thinkingLevel, undefined);
-});
-
-test("agy xhigh 模型由上游变体决定档位，不以 thinkingLevel 降成 high", TIMEOUT, () => {
-  for (const effort of [undefined, "low", "xhigh", "max"]) {
-    const { wrapper } = translateAgyRequest({ input: "q", reasoning: { effort } }, "gemini-4-hydrogen-xhigh");
-    assert.equal(wrapper.model, "gemini-4-hydrogen-xhigh");
-    assert.deepEqual((wrapper.request as Json).generationConfig.thinkingConfig,
+  assert.deepEqual(translated({ input: "q", reasoning: { effort: "max" } }).request.generationConfig.thinkingConfig,
+    { includeThoughts: true, thinkingBudget: -1, thinkingLevel: "max" });
+  // 固定模型的 xhigh 同名直传，不能降成 high 或省略。
+  assert.deepEqual(translated({ input: "q", reasoning: { effort: "xhigh" } }).request.generationConfig.thinkingConfig,
+    { includeThoughts: true, thinkingBudget: -1, thinkingLevel: "xhigh" });
+  for (const effort of ["none", "toString", "constructor", "__proto__"]) {
+    assert.deepEqual(translated({ input: "q", reasoning: { effort } }).request.generationConfig.thinkingConfig,
       { includeThoughts: true, thinkingBudget: -1 });
   }
-  assert.equal(translated({ input: "q", reasoning: { effort: "xhigh" } }).request.generationConfig.thinkingConfig.thinkingLevel, "high");
+});
+
+test("agy 所有档位变体均由模型 ID 表达档位，不再透传 effort 枚举", TIMEOUT, () => {
+  for (const tier of ["low", "medium", "high", "xhigh", "max"]) {
+    for (const effort of [undefined, "minimal", "low", "medium", "high", "xhigh", "max", "unknown"]) {
+      const model = `gemini-4-hydrogen-${tier}`;
+      const { wrapper } = translateAgyRequest({ input: "q", reasoning: { effort } }, { model });
+      assert.equal(wrapper.model, model);
+      assert.deepEqual((wrapper.request as Json).generationConfig.thinkingConfig,
+        { includeThoughts: true, thinkingBudget: -1 }, `model=${model}, effort=${effort}`);
+    }
+  }
 });
 
 test("agy 请求转换：默认 maxOutputTokens 与采样参数透传", TIMEOUT, () => {
@@ -311,7 +321,7 @@ test("agy 请求转换：剥离的服务器工具写入系统旁白，reasoning 
       { type: "web_search_call", id: "item_ws", action: { query: "gemini docs" } },
       { type: "message", role: "user", content: "继续" },
     ],
-    tools: [{ type: "web_search" }],
+    tools: [{ type: "web_search", external_web_access: false }],
   }, "gemini-3.8-flash");
   const innerRequest = wrapper.request as Json;
   assert.deepEqual(dropped, ["web_search"]);
